@@ -3,14 +3,14 @@
 | Campo | Valor |
 |---|---|
 | Documento | 05 — Especificación de API |
-| Versión | 2.0 (**borrador pre-freeze** — se congela tras validar el demo, Fase 1) |
+| Versión | 2.1 (**congelada** — freeze de Fase 1, 2026-07-27; ver README/CLAUDE.md tabla de fase) |
 | Fecha | 2026-07-27 |
 | Auth | Bearer — Firebase ID token verificado server-side |
 | Base URL | `/v1` |
 | Formato | JSON UTF-8 |
 | Depende de | [`01_SRS`](../01-vision/01_SRS_especificacion_requisitos.md) · [`03_modelo_de_datos`](../03-datos/03_modelo_de_datos.md) · [`04_plan_de_seguridad`](../04-seguridad/04_plan_de_seguridad.md) |
 
-> FastAPI genera OpenAPI automáticamente; tras el freeze, este documento incluye la interfaz `ApiClient` literal (§9) y cualquier cambio de firma la actualiza en la misma sesión (Gobernanza v3 mejora 4).
+> FastAPI genera OpenAPI automáticamente; este documento incluye la interfaz `ApiClient` literal (§9, **congelada**) y cualquier cambio de firma la actualiza en la misma sesión (Gobernanza v3 mejora 4).
 
 ---
 
@@ -166,10 +166,17 @@ Query: `actor?, accion?, entidad?, desde?, hasta?, page`. Solo lectura.
 
 ---
 
-## 9. Interfaz `ApiClient` (borrador — se congela literal tras validar el demo)
+## 9. Interfaz `ApiClient` (congelada — freeze de Fase 1, 2026-07-27)
+
+Literal de `apps/web/src/lib/api.ts`. Dos campos y un módulo se añadieron respecto al borrador porque el
+demo (Claude Design) los ejercita: `Job.id_solicitud` y `Comprobante.xml_path` (los muestran los drawers
+P6/P7), y `listarUsuarios`/`listarConfiguracion`/`listarBitacora` (P10/P11, antes solo descritos como
+endpoints REST en §2/§8 sin entrada en esta interfaz). Las mutaciones de usuarios de §2 (alta, permisos,
+activar/desactivar) no se añaden aquí porque P10 es de solo lectura en el demo — se agregan cuando exista
+una UI real que las use.
 
 ```typescript
-// apps/web/src/lib/api.ts — contrato único; el demo usa el mock, Fase 2 la implementación real
+// apps/web/src/lib/api.ts — contrato único; api.mock.ts hoy, api.http.ts cuando exista el backend real
 export type Rol = 'admin' | 'operador' | 'consulta';
 export type EstadoJob = 'NUEVO' | 'SOLICITADO' | 'EN_PROCESO' | 'TERMINADA' | 'DESCARGADO' | 'ERROR';
 export type EstatusCfdi = 'vigente' | 'cancelado' | 'no_verificado';
@@ -180,12 +187,19 @@ export interface EmpresaResumen { empresa_id: number; nombre: string; rfc: strin
                                   activo: boolean; efirma: { presente: boolean; not_after: string | null } | null }
 export interface Job { job_id: number; tipo: 'emitido' | 'recibido'; solicitud: 'CFDI' | 'METADATA';
                        origen: 'manual' | 'sync'; desde: string; hasta: string; estado: EstadoJob;
-                       intentos: number; paquetes: number; mensaje: string | null; updated_at: string }
+                       intentos: number; paquetes: number; mensaje: string | null; updated_at: string;
+                       id_solicitud: string | null }
 export interface Comprobante { comprobante_id: number; uuid: string; folio: string | null;
                                rfc_emisor: string; rfc_receptor: string; razon_social_emisor: string | null;
                                total: number | null; fecha_emision: string | null; tipo_comprobante: string | null;
-                               estatus: EstatusCfdi; estatus_verificado_at: string | null }
+                               estatus: EstatusCfdi; estatus_verificado_at: string | null; xml_path: string | null }
 export interface Evento { evento_id: number; tipo: TipoEvento; detalle: Record<string, unknown>; created_at: string }
+export interface NotificacionDestino { correo: string; eventos: TipoEvento[] }
+export interface UsuarioAdmin { usuario_id: number; correo: string; nombre: string; rol_global: Rol;
+                                activo: boolean; permisos: { empresa_id: number; empresa_nombre: string; rol: Rol }[] }
+export interface ConfiguracionItem { clave: string; ejercicio_fiscal: string; valor: string; descripcion: string }
+export interface BitacoraEntrada { bitacora_id: number; actor: string; accion: string; entidad: string;
+                                   detalle: Record<string, unknown>; created_at: string }
 
 export interface ApiClient {
   // Sesión (prioridad 1)
@@ -194,26 +208,34 @@ export interface ApiClient {
   listarEmpresas(): Promise<EmpresaResumen[]>;
   crearEmpresa(input: { nombre: string; rfc: string }): Promise<EmpresaResumen>;
   // Bóveda (prioridad 1)
-  subirEfirma(empresaId: number, files: { cer: File; key: File; password: string }):
+  subirEfirma(empresaId: number, files: { cer: File; key: File; password: string; escenarioDemo?: string }):
     Promise<{ num_serie: string; not_before: string; not_after: string; dias_para_vencer: number }>;
-  obtenerEfirma(empresaId: number): Promise<{ num_serie: string; not_after: string } | null>;
+  obtenerEfirma(empresaId: number): Promise<{ num_serie: string; not_before: string; not_after: string } | null>;
   eliminarEfirma(empresaId: number): Promise<void>;
   // Descargas (prioridad 2)
   crearDescarga(empresaId: number, input: { tipo: 'emitido' | 'recibido'; solicitud: 'CFDI' | 'METADATA';
-                desde: string; hasta: string }): Promise<{ job_ids: number[]; ventanas: number }>;
+                desde: string; hasta: string; simVencidaDemo?: boolean }): Promise<{ job_ids: number[]; ventanas: number }>;
   listarJobs(empresaId: number, f?: { estado?: EstadoJob; origen?: 'manual' | 'sync'; page?: number }): Promise<Page<Job>>;
   reintentarJob(empresaId: number, jobId: number): Promise<void>;
   // Comprobantes (prioridades 2–3)
   listarComprobantes(empresaId: number, f?: { desde?: string; hasta?: string; estatus?: EstatusCfdi;
-                     rfc_contraparte?: string; q?: string; page?: number }): Promise<Page<Comprobante>>;
+                     tipo_comprobante?: string; q?: string; page?: number }): Promise<Page<Comprobante>>;
   validarLote(empresaId: number, alcance: 'no_verificados' | 'todos' | { uuids: string[] }): Promise<{ tarea_id: string }>;
   exportarExcel(empresaId: number, f?: Record<string, string>): Promise<{ tarea_id: string }>;
   estadoTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string }>;
   // Vigilancia y notificaciones (prioridad 3)
   listarEventos(empresaId: number, f?: { tipo?: TipoEvento; page?: number }): Promise<Page<Evento>>;
-  obtenerNotificaciones(empresaId: number): Promise<{ destinos: { correo: string; eventos: TipoEvento[] }[] }>;
-  guardarNotificaciones(empresaId: number, destinos: { correo: string; eventos: TipoEvento[] }[]): Promise<void>;
+  obtenerNotificaciones(empresaId: number): Promise<{ destinos: NotificacionDestino[] }>;
+  guardarNotificaciones(empresaId: number, destinos: NotificacionDestino[]): Promise<void>;
+  // Administración (añadido en el freeze — doc 05 §2/§8, consumido por P10/P11; solo lectura)
+  listarUsuarios(): Promise<UsuarioAdmin[]>;
+  listarConfiguracion(): Promise<ConfiguracionItem[]>;
+  listarBitacora(f?: { page?: number }): Promise<Page<BitacoraEntrada>>;
 }
 ```
 
-> Cobertura: sesión/usuarios, empresas, bóveda, descargas/máquina de estados (crear/monitorear/reintentar), comprobantes (listar/validar/exportar), eventos, notificaciones, configuración y bitácora — todos los módulos del SRS §3. Los endpoints de administración de usuarios/configuración/bitácora se consumen desde pantallas de admin y se añaden al `ApiClient` en el freeze si el demo los valida.
+Campos `escenarioDemo`/`simVencidaDemo` de `subirEfirma`/`crearDescarga` son exclusivos de
+`VITE_DEMO_CONTROLS` (fuerzan la respuesta del backend simulado para la sesión de validación) — no
+existen en `api.http.ts` cuando se construya el backend real.
+
+> Cobertura: sesión/usuarios, empresas, bóveda, descargas/máquina de estados (crear/monitorear/reintentar), comprobantes (listar/validar/exportar), eventos, notificaciones, administración (usuarios/configuración/bitácora, solo lectura) — todos los módulos del SRS §3.

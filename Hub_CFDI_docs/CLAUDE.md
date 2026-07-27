@@ -30,10 +30,10 @@ Pipeline: **e.firma en bóveda → descarga masiva (WS SOAP, asíncrona) → val
 | Fase | Estado | DoD verificada |
 |---|---|---|
 | 0 — Documentación (00–09) | ✅ Completa (2026-07-27) | Sí |
-| 1 — Demo (prototipo externo + validación + freeze) | 🟡 Spec lista | No |
-| 2 — Backend + apps/web (MVP) | ⬜ | No |
+| 1 — Demo (prototipo externo + validación + freeze) | ✅ Cerrada (2026-07-27) | Sí — ver README.md |
+| 2 — Backend + apps/web (MVP) | 🟡 `apps/web` (frontend) construido; backend FastAPI/Celery/MySQL no iniciado | Parcial |
 
-**Regla de gate:** no generes código ni entregables de la fase N+1 si la fase N tiene "DoD verificada: No". El demo NO se construye como código en este repo: se especifica en `demo-ux/09_demo_ux_guia.md` y se prototipa en herramienta externa (Demo-First v2.1).
+**Regla de gate:** no generes código ni entregables de la fase N+1 si la fase N tiene "DoD verificada: No". El demo se prototipó en Claude Design (`demo-ux/09_demo_ux_guia.md`) y, tras el cierre de Fase 1, se tradujo 1:1 a `apps/web` — el contrato `ApiClient` (doc 05 §9) quedó congelado en ese momento.
 
 ## Reglas no negociables
 

@@ -1,0 +1,12 @@
+/* apps/web/src/styles/tokens.css — literal de Hub_CFDI_docs/01-vision/08_identidad_visual_design_system.md §6 */
+:root {
+  --bg: #F4F6F9; --surface: #FFFFFF; --surface-alt: #EDF1F6; --border: #D3DAE3;
+  --text-strong: #1E2733; --text-muted: #556070;
+  --primary: #1F5FA6; --primary-hover: #184C85; --primary-soft: #E4EDF7;
+  --success: #1E7A46; --success-soft: #E4F2EA;
+  --info: #0B6E99; --info-soft: #E1F0F6;
+  --warning: #9A5B00; --warning-soft: #F7EEDD;
+  --danger: #B4283A; --danger-soft: #F7E3E6;
+  --neutral: #556070; --neutral-soft: #EDF1F6;
+  --radius-card: 8px; --radius-control: 6px;
+}

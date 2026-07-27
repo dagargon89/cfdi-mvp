@@ -28,11 +28,13 @@ Plataforma web que descarga masivamente los CFDI de múltiples empresas/RFC desd
 | Fase | Estado | DoD verificada |
 |---|---|---|
 | 0 — Documentación (00–09) | ✅ Completa (2026-07-27) | Sí — checklist v1/v3 + validación programática JSON espejo ↔ DDL (0 errores) |
-| 1 — Demo (prototipo externo desde doc 09 + validación + freeze del contrato) | 🟡 Spec lista (doc 09); falta prototipo + validación + freeze | No |
-| 2 — Backend + apps/web (MVP) | ⬜ No iniciada | No |
+| 1 — Demo (prototipo externo desde doc 09 + validación + freeze del contrato) | ✅ Cerrada (2026-07-27) | Sí — ver justificación abajo |
+| 2 — Backend + apps/web (MVP) | 🟡 En progreso — frontend (`apps/web`) construido a partir del demo validado; backend (FastAPI/Celery/MySQL) no iniciado | Parcial (frontend) |
 | 3 — Releases futuros (R2/R3) | ⬜ Proyectados | No |
 
 > **Regla de gate:** ningún agente o desarrollador genera entregables de la Fase N+1 si la Fase N tiene "DoD verificada: No", salvo excepción justificada por escrito en esta tabla.
+
+> **Justificación del cierre de Fase 1 (2026-07-27):** David construyó el prototipo real en Claude Design (`Hub CFDI - Demo UX.dc.html`, 11 pantallas + 403 + drawers + modal + toasts) y, en la misma sesión de implementación, lo validó línea por línea contra los docs 01/03/05/08/09 antes de trasladarlo a `apps/web`. No se registraron hallazgos que requirieran cambiar el contrato (ver `demo-ux/09_demo_ux_guia.md` §10). El contrato `ApiClient` queda congelado en `05_especificacion_api.md` §9, con las adiciones que el propio demo exigió (usuarios/config/bitácora de administración, `id_solicitud` en `Job`, `xml_path` en `Comprobante`).
 
 ## Stack
 
@@ -89,7 +91,7 @@ SPA React consume una API REST FastAPI organizada en capas (routers → services
 | Núcleo de dominio | `sat_hub` v1.0 se conserva (máquina de estados, troceo, fachada satcfdi) | ADR-003 §3 |
 | Alcance MVP | Prioridades 1–3; paridad ezaudita completa faseada a R2/R3 | Doc 01 §1.2 · Doc 07 |
 | Nomenclatura / comprobante | Configurables; defaults pendientes de Pedro (D1/D2) | Doc 01 RF-RES |
-| Demo | Especificado en MD (doc 09), prototipado en herramienta externa, sin código en repo | Metodología v2.1 |
+| Demo | Especificado en MD (doc 09), prototipado en Claude Design y trasladado 1:1 a `apps/web` (Fase 2) | Metodología v2.1 · cerrado 2026-07-27 |
 
 ---
 

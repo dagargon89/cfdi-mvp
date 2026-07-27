@@ -1,0 +1,42 @@
+/* apps/web/src/styles/app.css — literal de Hub_CFDI_docs/01-vision/08_identidad_visual_design_system.md §7 */
+@import "tailwindcss";
+@import "./tokens.css";
+
+@theme {
+  --color-bg: #F4F6F9; --color-surface: #FFFFFF; --color-surface-alt: #EDF1F6;
+  --color-border: #D3DAE3; --color-text-strong: #1E2733; --color-text-muted: #556070;
+  --color-primary: #1F5FA6; --color-primary-hover: #184C85; --color-primary-soft: #E4EDF7;
+  --color-success: #1E7A46; --color-success-soft: #E4F2EA;
+  --color-info: #0B6E99; --color-info-soft: #E1F0F6;
+  --color-warning: #9A5B00; --color-warning-soft: #F7EEDD;
+  --color-danger: #B4283A; --color-danger-soft: #F7E3E6;
+  --color-neutral: #556070; --color-neutral-soft: #EDF1F6;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    font-family: var(--font-sans);
+    color: var(--text-strong);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  table { border-collapse: collapse; width: 100%; }
+  :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+@keyframes dc-slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes dc-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dc-up { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.animate-dc-slide { animation: dc-slide 0.18s ease-out; }
+.animate-dc-fade { animation: dc-fade 0.15s ease-out; }
+.animate-dc-up { animation: dc-up 0.16s ease-out; }

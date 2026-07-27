@@ -5,7 +5,7 @@
 | Documento | 09 — Guía del Demo UX |
 | Versión | 2.0 |
 | Fecha | 2026-07-27 |
-| Metodología | Demo-First v2.1 **Docs-First**: el demo NO es código en este repo; esta spec se prototipa en herramienta externa (Claude Design) y se traduce a `apps/web` en Fase 2 |
+| Metodología | Demo-First v2.1 **Docs-First**: esta spec se prototipó en herramienta externa (Claude Design) y, tras el cierre de Fase 1 (2026-07-27), se tradujo 1:1 a `apps/web` (Fase 2) — ver `Hub CFDI - Demo UX.dc.html` en el proyecto de Claude Design |
 | Depende de | [`01_SRS`](../01-vision/01_SRS_especificacion_requisitos.md) · [`03_modelo_de_datos`](../03-datos/03_modelo_de_datos.md) · [`05_especificacion_api`](../05-api/05_especificacion_api.md) · [`08_design_system`](../01-vision/08_identidad_visual_design_system.md) |
 
 ## 1. Propósito y alcance
@@ -184,6 +184,10 @@ Sesión con David (+ Pedro si D1/D2 se discuten en vivo): (1) login como Ana (op
 
 | # | Hallazgo | Doc afectado (01/05/08/09) | Cambio | Estado |
 |---|---|---|---|---|
-| — | *(se llena durante la validación)* | | | |
+| 1 | El drawer de job (P6) muestra `id_solicitud`, ausente en `Job` de la interfaz `ApiClient` | 05 §9 | Se agregó `id_solicitud: string \| null` a `Job` | Resuelto |
+| 2 | El drawer de comprobante (P7) muestra la ruta del XML, ausente en `Comprobante` | 05 §9 | Se agregó `xml_path: string \| null` a `Comprobante` | Resuelto |
+| 3 | P10 (Usuarios) y P11 (Config·Bitácora) no tenían métodos en `ApiClient` — solo endpoints REST descritos en §2/§8 | 05 §9 | Se agregaron `listarUsuarios`, `listarConfiguracion`, `listarBitacora` (solo lectura, igual que el demo) | Resuelto |
+| 4 | El login del demo usa cuentas simuladas sin backend; `apps/web` usa Firebase Auth real (decisión de David) | 09 §2 (P1) | La pantalla real sustituye el selector de cuentas por un formulario Firebase | Resuelto — login validado en vivo por David con su cuenta real (2026-07-27) |
+| 5 | David solo necesita la cuenta admin (`dgarcia@planjuarez.org`); las cuentas demo de operador/consulta (`ana@demo.test`/`beto@demo.test`) no se crean en Firebase | 09 §2 (P1) · `api.mock.ts` | `db.usuarios` del mock: el usuario admin usa el correo real de David en vez de `admin@demo.test`; Ana/Beto quedan como fixture sin cuenta Firebase (los pasos 1 y 6 del protocolo §9, con rol operador/consulta, quedan pendientes de ejecutar el día que existan esas cuentas) | Resuelto para el flujo admin; pasos de rol limitado pendientes |
 
-**Cierre de Fase 1:** hallazgos resueltos → re-sincronizar SRS (01) y API (05) → marcar el contrato `ApiClient` como **CONGELADO** → actualizar tabla de Estado de fase en README/CLAUDE.
+**Cierre de Fase 1 (2026-07-27):** hallazgos resueltos → SRS (01) sin cambios de alcance → contrato `ApiClient` (05 §9) marcado **CONGELADO** → tabla de Estado de fase actualizada en README/CLAUDE.md. Traslado a `apps/web` (Fase 2, frontend) completado en la misma sesión de implementación. Login con Firebase Auth real validado en vivo por David (rol admin); los pasos 1–2 y 6 del protocolo §9 (roles operador/consulta) quedan pendientes hasta que se necesiten esas cuentas.
