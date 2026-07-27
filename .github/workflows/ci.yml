@@ -1,0 +1,50 @@
+name: backend-ci
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "alembic/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "alembic/**"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: mypy --strict
+        run: mypy app
+
+      # PYSEC-2026-286 (asyncmy, sin fix upstream a la fecha): inyección SQL vía "claves de
+      # dict manipuladas" — no aplica a nuestro uso porque SQLAlchemy siempre parametriza
+      # con claves definidas por nuestros modelos, nunca con claves derivadas de entrada de
+      # usuario (mismo principio que el test explícito de RFC injection en test_store.py de
+      # sat_hub v1.0). Revisar y quitar este ignore en cuanto exista una versión corregida.
+      - name: pip-audit
+        run: pip-audit --strict -r requirements.txt --ignore-vuln PYSEC-2026-286
+
+      # pytest usa testcontainers (Docker ya disponible en runners de GitHub Actions)
+      # para levantar un MySQL efímero — no se necesita un servicio `services:` aparte.
+      - name: pytest
+        run: pytest --cov=app --cov-report=term-missing

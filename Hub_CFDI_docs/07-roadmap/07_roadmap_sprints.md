@@ -37,21 +37,21 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 
 ## 3. Fase 2 — Backend + apps/web (MVP)
 
-### Sprint 0 — Cimientos
+### Sprint 0 — Cimientos ✅ Cerrado (2026-07-27)
 **Objetivo:** esqueleto reproducible con calidad de gate desde el día uno.
-- Monorepo (`app/` FastAPI + `apps/web`), Docker Compose (nginx, api, worker, beat, mysql, redis), CI (pytest, mypy, tsc, audits).
-- Migraciones Alembic = DDL doc 03; verificación esquema↔documento automatizada.
-- Portar `sat_hub` v1.0 como paquete (daterange, fachada satcfdi, errores); **confirmar firma satcfdi para emitidos** (riesgo heredado).
-- Config versionada (RF-CFG-01); logging con filtro de redacción.
-- **Hito:** `docker compose up` levanta todo; CI verde; esquema migrado.
+- Monorepo (`app/` FastAPI + `apps/web`), Docker Compose (api, worker, beat, mysql, redis — `nginx` diferido a despliegue), CI (pytest, mypy, pip-audit; tsc/lint de `apps/web` ya vivían aparte).
+- Migraciones Alembic = DDL doc 03; verificado tabla por tabla contra el documento (12/12 tablas, ENUMs en minúsculas, `ON UPDATE CURRENT_TIMESTAMP`, `utf8mb4_unicode_ci`).
+- Portado `sat_hub` v1.0 como paquete (`app/sat_hub/`: domain, daterange, errores, fachada satcfdi) — `store.py`/`engine.py`/`secrets.py` quedan para Sprint 2 (se reescriben contra MySQL/Celery/bóveda). **Firma satcfdi confirmada**: `satcfdi==26.7.4` (`app/scripts/inspect_satcfdi.py`) coincide con el contrato congelado.
+- **Hito verificado:** `docker compose up` levanta los 5 servicios limpio; CI (`.github/workflows/ci.yml`) corre pytest+mypy+pip-audit; esquema migrado y comparado contra doc 03.
 
-### Sprint 1 — Seguridad y autenticación (prioridad 1 — sin funciones de negocio)
+### Sprint 1 — Seguridad y autenticación (prioridad 1 — sin funciones de negocio) ✅ Cerrado (2026-07-27)
 **Objetivo:** nadie entra sin permiso; la bóveda opera cifrada y auditada.
-- Verificación de ID token + usuario local + `require_empresa` (doc 04 §3.2); gestión de usuarios y permisos (RF-AUTH-01…04).
-- Bóveda completa: envelope encryption, alta/validación/reemplazo/borrado de e.firma, KEK operativa (RF-BOV-01…04).
-- Bitácora transaccional (RF-BIT-01) + privilegios MySQL restrictivos.
-- Pruebas: doc 06 §2.1, §2.2 (IDOR por recurso existente), §2.3, §2.7 (A02/A05/A07).
-- **Hito:** suite de seguridad verde; grep de secretos limpio; demo interna de alta de e.firma con bitácora.
+- Verificación de ID token (Firebase Admin SDK) + usuario local + `require_empresa` (`app/api/deps.py`); alta de usuarios (crea la cuenta de Firebase vía Admin SDK) y permisos (RF-AUTH-01…04).
+- Bóveda completa (`app/services/boveda.py` + `app/services/fiel.py`): envelope encryption AES-256-GCM, alta/validación (abre/RFC/vigencia)/reemplazo/borrado de e.firma, KEK de desarrollo (`app/scripts/generar_kek_dev.py`; KEK de producción sigue siendo el procedimiento manual de doc 04 §3.5) (RF-BOV-01…04).
+- Bitácora transaccional (`app/services/bitacora.py`, RF-BIT-01), verificada con un usuario MySQL real restringido a INSERT+SELECT en las pruebas.
+- Pruebas: 17 casos verdes cubriendo doc 06 §2.1 (auth), §2.2 (IDOR — 404 idéntico para empresa inexistente/ajena), §2.3 (bóveda: los 3 códigos 422, cifrado en reposo verificado, bitácora), §2.7 (A02 grep de secretos, A05 grants de `bitacora`). MySQL efímero vía testcontainers; verificador de Firebase falso (sin red real); certificados de prueba autofirmados (nunca material real).
+- **Hito verificado:** suite de seguridad verde (`pytest`, 17/17); `mypy --strict` limpio (52 archivos); alta real de e.firma de prueba cifra en reposo y queda en bitácora.
+- **Pendiente para poder operar con datos reales:** David debe generar una service account de Firebase (Admin SDK) — las credenciales web de `apps/web` no sirven para verificar tokens en el servidor.
 
 ### Sprint 2 — Núcleo de escritorio I: empresas y descarga masiva (prioridad 2)
 **Objetivo:** el ciclo asíncrono v1.0 corriendo en workers.

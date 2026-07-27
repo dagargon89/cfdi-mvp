@@ -1,0 +1,96 @@
+services:
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: hub_cfdi
+      MYSQL_USER: hub_cfdi
+      MYSQL_PASSWORD: hub_cfdi
+      MYSQL_ROOT_PASSWORD: hub_cfdi_root
+    ports:
+      - "3308:3306" # puerto distinto a otros proyectos en esta máquina (ver .env.example)
+    volumes:
+      - hub_cfdi_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-phub_cfdi_root"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./app:/srv/app
+      - ./secrets:/srv/secrets
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: mysql+asyncmy://hub_cfdi:hub_cfdi@mysql:3306/hub_cfdi
+      REDIS_URL: redis://redis:6379/0
+      KEK_PATH: /srv/secrets/kek.dev.bin
+      GOOGLE_APPLICATION_CREDENTIALS: /srv/secrets/firebase-service-account.json
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-cfdi-app}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      ENVIRONMENT: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker -l info
+    volumes:
+      - ./app:/srv/app
+      - ./secrets:/srv/secrets
+    environment:
+      DATABASE_URL: mysql+asyncmy://hub_cfdi:hub_cfdi@mysql:3306/hub_cfdi
+      REDIS_URL: redis://redis:6379/0
+      KEK_PATH: /srv/secrets/kek.dev.bin
+      GOOGLE_APPLICATION_CREDENTIALS: /srv/secrets/firebase-service-account.json
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-cfdi-app}
+      ENVIRONMENT: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app beat -l info
+    volumes:
+      - ./app:/srv/app
+      - ./secrets:/srv/secrets
+    environment:
+      DATABASE_URL: mysql+asyncmy://hub_cfdi:hub_cfdi@mysql:3306/hub_cfdi
+      REDIS_URL: redis://redis:6379/0
+      KEK_PATH: /srv/secrets/kek.dev.bin
+      GOOGLE_APPLICATION_CREDENTIALS: /srv/secrets/firebase-service-account.json
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-cfdi-app}
+      ENVIRONMENT: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  hub_cfdi_mysql:

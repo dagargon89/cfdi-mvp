@@ -31,7 +31,7 @@ Pipeline: **e.firma en bóveda → descarga masiva (WS SOAP, asíncrona) → val
 |---|---|---|
 | 0 — Documentación (00–09) | ✅ Completa (2026-07-27) | Sí |
 | 1 — Demo (prototipo externo + validación + freeze) | ✅ Cerrada (2026-07-27) | Sí — ver README.md |
-| 2 — Backend + apps/web (MVP) | 🟡 `apps/web` (frontend) construido; backend FastAPI/Celery/MySQL no iniciado | Parcial |
+| 2 — Backend + apps/web (MVP) | 🟡 `apps/web` completo · backend Sprint 0 (cimientos) + Sprint 1 (seguridad) cerrados 2026-07-27 · Sprints 2-5 pendientes | Parcial |
 
 **Regla de gate:** no generes código ni entregables de la fase N+1 si la fase N tiene "DoD verificada: No". El demo se prototipó en Claude Design (`demo-ux/09_demo_ux_guia.md`) y, tras el cierre de Fase 1, se tradujo 1:1 a `apps/web` — el contrato `ApiClient` (doc 05 §9) quedó congelado en ese momento.
 
@@ -69,24 +69,32 @@ Almacenamiento de paquetes/XML por empresa (disco/objeto, fuera del webroot)
 ## Comandos de arranque (Fase 2)
 
 ```bash
-# Infraestructura local
-docker compose up -d mysql redis
+# Todo junto (mysql, redis, api, worker, beat)
+docker compose up -d --build               # http://localhost:8000 (OpenAPI en /docs)
 
-# Backend
+# Backend, fuera de Docker (equivalente, para desarrollo local)
 python -m venv .venv && source .venv/bin/activate
-pip install --require-hashes -r requirements.txt
-alembic upgrade head                      # migraciones (DDL doc 03)
-uvicorn app.main:app --reload             # http://localhost:8000  (OpenAPI en /docs)
-celery -A app.worker worker -l info       # workers SAT
-celery -A app.worker beat -l info         # scheduler (sync diaria, EFOS)
+pip install -e ".[dev]"
+python -m app.scripts.generar_kek_dev      # KEK de desarrollo (una sola vez)
+alembic upgrade head                       # migraciones (DDL doc 03)
+uvicorn app.main:app --reload              # http://localhost:8000 (OpenAPI en /docs)
+celery -A app.worker.celery_app worker -l info   # workers SAT (Sprint 2+, aún sin tareas)
+celery -A app.worker.celery_app beat -l info     # scheduler (Sprint 4+, aún sin schedule)
 
 # Frontend
-cd apps/web && npm install && npm run dev # http://localhost:5173
+cd apps/web && npm install && npm run dev  # http://localhost:5173
 
 # Calidad
-pytest --cov=app && mypy app && pip-audit
+pytest --cov=app && mypy app && pip-audit --strict -r requirements.txt --ignore-vuln PYSEC-2026-286
 cd apps/web && npm run typecheck && npm run lint
 ```
+
+> Nota (2026-07-27): `requirements.txt` todavía no usa `--require-hashes` (pendiente para el
+> endurecimiento de Sprint 5, doc 04 §4.2 A06) — hoy es un `pip freeze` simple del entorno
+> resuelto por `pyproject.toml`. `PYSEC-2026-286` (asyncmy) se ignora explícitamente en
+> `pip-audit`: es una inyección SQL vía "claves de dict manipuladas" sin fix upstream a la
+> fecha; no aplica a nuestro uso porque SQLAlchemy siempre parametriza con claves definidas
+> por nuestros modelos, nunca con claves derivadas de entrada de usuario.
 
 ## Identidad visual (resumen operativo — detalle en doc 08)
 

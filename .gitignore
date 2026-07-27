@@ -1,0 +1,22 @@
+# Backend Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Secretos y datos locales — NUNCA se versionan (contienen material de e.firma cifrado, KEK, tokens)
+.env
+.env.local
+*.env.local
+secrets/
+storage/
+
+# Alembic no debe versionar bases de datos SQLite sueltas si alguna vez se usan localmente
+*.sqlite3
+
+# General
+.DS_Store

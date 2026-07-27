@@ -26,3 +26,9 @@ if (firebaseConfigured) {
 export function getFirebaseAuth(): Auth | null {
   return authInstance;
 }
+
+/** ID token del usuario actual, para el header Authorization: Bearer de api.http.ts. null si no hay sesión. */
+export async function getIdToken(): Promise<string | null> {
+  const user = authInstance?.currentUser;
+  return user ? user.getIdToken() : null;
+}

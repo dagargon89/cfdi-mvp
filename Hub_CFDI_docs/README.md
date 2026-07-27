@@ -29,7 +29,7 @@ Plataforma web que descarga masivamente los CFDI de múltiples empresas/RFC desd
 |---|---|---|
 | 0 — Documentación (00–09) | ✅ Completa (2026-07-27) | Sí — checklist v1/v3 + validación programática JSON espejo ↔ DDL (0 errores) |
 | 1 — Demo (prototipo externo desde doc 09 + validación + freeze del contrato) | ✅ Cerrada (2026-07-27) | Sí — ver justificación abajo |
-| 2 — Backend + apps/web (MVP) | 🟡 En progreso — frontend (`apps/web`) construido a partir del demo validado; backend (FastAPI/Celery/MySQL) no iniciado | Parcial (frontend) |
+| 2 — Backend + apps/web (MVP) | 🟡 En progreso — frontend (`apps/web`) completo; backend: Sprint 0 (cimientos) y Sprint 1 (seguridad: auth, bóveda, bitácora) cerrados 2026-07-27; Sprints 2-5 (descarga masiva vía Celery, resguardo, EFOS, notificaciones, endurecimiento) pendientes | Parcial (frontend + Sprint 0-1 backend) |
 | 3 — Releases futuros (R2/R3) | ⬜ Proyectados | No |
 
 > **Regla de gate:** ningún agente o desarrollador genera entregables de la Fase N+1 si la Fase N tiene "DoD verificada: No", salvo excepción justificada por escrito en esta tabla.
