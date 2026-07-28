@@ -116,6 +116,11 @@ export interface ApiClient {
   // Empresas
   listarEmpresas(): Promise<EmpresaResumen[]>;
   crearEmpresa(input: { nombre: string; rfc: string }): Promise<EmpresaResumen>;
+  /** Añadido tras el freeze — RF-EMP-02 (baja lógica), doc 05 §3 PATCH /v1/empresas/{id}. Solo admin. */
+  actualizarEmpresa(empresaId: number, input: { activo: boolean }): Promise<EmpresaResumen>;
+  /** Añadido tras el freeze (2026-07-28) — borrado real, solo si la empresa nunca tuvo e.firma/jobs/
+   * comprobantes (doc 04 §4.4: el historial fiscal nunca se borra vía API). 409 EMPRESA_CON_HISTORIAL si no. */
+  eliminarEmpresa(empresaId: number): Promise<void>;
   // Bóveda (prioridad 1)
   subirEfirma(
     empresaId: number,

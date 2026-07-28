@@ -3,12 +3,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertCircle, Clock, ShieldCheck, ShieldX } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/Button';
+import { ConfirmarRfcModal } from '@/components/ui/ConfirmarRfcModal';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { api } from '@/lib/client';
 import { ApiError } from '@/lib/api';
 import { diasParaVencer, fechaCorta, umbralVigenciaDias } from '@/lib/domain';
-import { EliminarEfirmaModal } from './EliminarEfirmaModal';
 
 const DEMO_CONTROLS = import.meta.env.VITE_DEMO_CONTROLS === 'true';
 type Escenario = 'exito' | 'EFIRMA_NO_ABRE' | 'RFC_NO_COINCIDE' | 'EFIRMA_VENCIDA';
@@ -189,7 +189,18 @@ export function EfirmaPage() {
       )}
 
       {modalAbierto && (
-        <EliminarEfirmaModal rfc={empresa.rfc} onCancelar={() => setModalAbierto(false)} onConfirmar={() => eliminar.mutate()} />
+        <ConfirmarRfcModal
+          titulo="Eliminar e.firma"
+          descripcion={
+            <>
+              Los jobs programados de esta empresa fallarán hasta que se registre una nueva e.firma. Escribe el RFC{' '}
+              <strong className="font-mono text-text-strong">{empresa.rfc}</strong> para confirmar.
+            </>
+          }
+          rfc={empresa.rfc}
+          onCancelar={() => setModalAbierto(false)}
+          onConfirmar={() => eliminar.mutate()}
+        />
       )}
     </div>
   );

@@ -258,6 +258,30 @@ export const apiMock: ApiClient = {
     return empresaResumen(db.empresas[db.empresas.length - 1], 'admin');
   },
 
+  async actualizarEmpresa(empresaId, input) {
+    const u = requireUsuario();
+    const empresa = db.empresas.find((e) => e.empresa_id === empresaId);
+    if (!empresa) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
+    empresa.activo = input.activo ? 1 : 0;
+    logBitacora(u.correo, 'editar_empresa', `empresa:${empresaId}`, { activo: input.activo });
+    return empresaResumen(empresa, 'admin');
+  },
+
+  async eliminarEmpresa(empresaId) {
+    const u = requireUsuario();
+    const empresa = db.empresas.find((e) => e.empresa_id === empresaId);
+    if (!empresa) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
+    const tieneHistorial =
+      db.efirmas.some((e) => e.empresa_id === empresaId) ||
+      db.jobs.some((j) => j.empresa_id === empresaId) ||
+      db.comprobantes.some((c) => c.empresa_id === empresaId);
+    if (tieneHistorial) {
+      throw new ApiError(409, 'EMPRESA_CON_HISTORIAL', "Esta empresa ya tiene e.firma, descargas o comprobantes registrados; no se puede eliminar. Usa 'Desactivar' para darla de baja sin perder el historial.");
+    }
+    db.empresas = db.empresas.filter((e) => e.empresa_id !== empresaId);
+    logBitacora(u.correo, 'eliminar_empresa', `empresa:${empresaId}`, { rfc: empresa.rfc });
+  },
+
   async subirEfirma(empresaId, { password, escenarioDemo }) {
     const u = requireRol(empresaId, 'operador');
     void password;

@@ -48,3 +48,26 @@ async def actualizar_empresa(
         await bitacora.registrar(db, actor=admin.correo, accion="editar_empresa", entidad=f"empresa:{empresa_id}", detalle={"activo": body.activo})
     await db.commit()
     return await empresa_resumen(db, admin, empresa)
+
+
+@router.delete("/{empresa_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_empresa(
+    empresa_id: int, admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)
+) -> None:
+    """Borrado real (a diferencia de PATCH activo=false) — solo si la empresa nunca tuvo
+    e.firma/jobs/comprobantes (doc 04 §4.4: el historial fiscal nunca se borra vía API)."""
+    empresa = await empresas_repo.por_id(db, empresa_id)
+    if empresa is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    if await empresas_repo.tiene_historial(db, empresa_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "codigo": "EMPRESA_CON_HISTORIAL",
+                "mensaje": "Esta empresa ya tiene e.firma, descargas o comprobantes registrados; no se puede eliminar. Usa 'Desactivar' para darla de baja sin perder el historial.",
+            },
+        )
+    rfc = empresa.rfc
+    await bitacora.registrar(db, actor=admin.correo, accion="eliminar_empresa", entidad=f"empresa:{empresa_id}", detalle={"rfc": rfc})
+    await empresas_repo.eliminar(db, empresa)
+    await db.commit()

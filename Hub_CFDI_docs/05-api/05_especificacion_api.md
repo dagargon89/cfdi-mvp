@@ -96,6 +96,11 @@ Body: `{ "nombre": "...", "rfc": "EKU9003173C9", "plantilla_nomenclatura": null 
 ### PATCH /v1/empresas/{empresa_id} — Edición / baja lógica *(admin)*
 `{ "activo": false }` desactiva sin borrar historial (RF-EMP-02). Bitácora.
 
+### DELETE /v1/empresas/{empresa_id} — Borrado real *(admin)* — añadido post-freeze (2026-07-28)
+204 si la empresa nunca tuvo e.firma/jobs/comprobantes. **Errores:** 409 `EMPRESA_CON_HISTORIAL` si ya
+tiene alguno — el historial fiscal nunca se borra vía API (doc 04 §4.4); usar PATCH `activo:false` en
+ese caso. Bitácora (`eliminar_empresa`) dentro de la misma transacción.
+
 ## 4. Recurso: Bóveda de e.firmas (prioridad 1)
 
 ### POST /v1/empresas/{empresa_id}/efirma — Alta/reemplazo *(operador+)*
@@ -207,6 +212,12 @@ export interface ApiClient {
   // Empresas
   listarEmpresas(): Promise<EmpresaResumen[]>;
   crearEmpresa(input: { nombre: string; rfc: string }): Promise<EmpresaResumen>;
+  /** Añadido post-freeze (2026-07-28) — RF-EMP-02, PATCH /v1/empresas/{id}, solo admin. */
+  actualizarEmpresa(empresaId: number, input: { activo: boolean }): Promise<EmpresaResumen>;
+  /** Añadido post-freeze (2026-07-28) — DELETE /v1/empresas/{id}, solo admin. Borrado real
+   * (a diferencia de actualizarEmpresa con activo=false); 409 EMPRESA_CON_HISTORIAL si la
+   * empresa ya tiene e.firma/jobs/comprobantes (doc 04 §4.4: el historial fiscal no se borra). */
+  eliminarEmpresa(empresaId: number): Promise<void>;
   // Bóveda (prioridad 1)
   subirEfirma(empresaId: number, files: { cer: File; key: File; password: string; escenarioDemo?: string }):
     Promise<{ num_serie: string; not_before: string; not_after: string; dias_para_vencer: number }>;

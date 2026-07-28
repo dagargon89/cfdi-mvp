@@ -1,13 +1,20 @@
 // demo.html:172-218 (P2 Empresas) + lógica demo.html:1182-1191,1283-1285.
-import { useQuery } from '@tanstack/react-query';
-import { Building2, Clock, ShieldCheck, ShieldX } from 'lucide-react';
+// Alta/baja de empresa (RF-EMP-01/02) no estaban en el prototipo — se agregaron cuando el
+// backend real ya las soportaba y David preguntó cómo hacerlo.
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Building2, Clock, Power, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
+import { ConfirmarRfcModal } from '@/components/ui/ConfirmarRfcModal';
+import { useToast } from '@/components/ui/ToastProvider';
 import { useAuth } from '@/auth/AuthContext';
 import { useEmpresas } from '@/hooks/useEmpresas';
 import { api } from '@/lib/client';
+import { ApiError } from '@/lib/api';
 import type { EmpresaResumen } from '@/lib/api';
 import { diasParaVencer, umbralVigenciaDias } from '@/lib/domain';
+import { NuevaEmpresaModal } from './NuevaEmpresaModal';
 
 function ChipEfirma({ empresa, umbral }: { empresa: EmpresaResumen; umbral: number }) {
   if (!empresa.efirma?.presente) {
@@ -32,11 +39,35 @@ function ChipEfirma({ empresa, umbral }: { empresa: EmpresaResumen; umbral: numb
   );
 }
 
-function EmpresaCard({ empresa, umbral }: { empresa: EmpresaResumen; umbral: number }) {
+function EmpresaCard({ empresa, umbral, esAdmin }: { empresa: EmpresaResumen; umbral: number; esAdmin: boolean }) {
   const navigate = useNavigate();
+  const { toast } = useToast();
+  const qc = useQueryClient();
   const { data: eventos } = useQuery({ queryKey: ['eventos-count', empresa.empresa_id], queryFn: () => api.listarEventos(empresa.empresa_id) });
   const inactiva = !empresa.activo;
   const sinEfirma = !empresa.efirma?.presente;
+  const [modalBorrar, setModalBorrar] = useState(false);
+
+  const toggleActivo = useMutation({
+    mutationFn: () => api.actualizarEmpresa(empresa.empresa_id, { activo: inactiva }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['empresas'] });
+      toast(inactiva ? 'Empresa activada' : 'Empresa desactivada', 'ok');
+    },
+  });
+
+  const eliminar = useMutation({
+    mutationFn: () => api.eliminarEmpresa(empresa.empresa_id),
+    onSuccess: () => {
+      setModalBorrar(false);
+      qc.invalidateQueries({ queryKey: ['empresas'] });
+      toast('Empresa eliminada', 'ok');
+    },
+    onError: (e) => {
+      setModalBorrar(false);
+      toast(e instanceof ApiError ? e.message : 'No se pudo eliminar la empresa.', 'error');
+    },
+  });
 
   return (
     <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-3" style={{ opacity: inactiva ? 0.6 : 1 }}>
@@ -63,7 +94,32 @@ function EmpresaCard({ empresa, umbral }: { empresa: EmpresaResumen; umbral: num
             Dar de alta e.firma
           </Button>
         )}
+        {esAdmin && (
+          <Button variant="secondary" onClick={() => toggleActivo.mutate()} loading={toggleActivo.isPending} disabled={toggleActivo.isPending}>
+            <Power className="size-3.5" aria-hidden /> {inactiva ? 'Activar' : 'Desactivar'}
+          </Button>
+        )}
+        {esAdmin && (
+          <Button variant="danger" onClick={() => setModalBorrar(true)}>
+            <Trash2 className="size-3.5" aria-hidden /> Eliminar
+          </Button>
+        )}
       </div>
+      {modalBorrar && (
+        <ConfirmarRfcModal
+          titulo="Eliminar empresa"
+          descripcion={
+            <>
+              Esto borra la empresa por completo (a diferencia de "Desactivar", que conserva el historial). Solo
+              funciona si nunca tuvo e.firma, descargas ni comprobantes. Escribe el RFC{' '}
+              <strong className="font-mono text-text-strong">{empresa.rfc}</strong> para confirmar.
+            </>
+          }
+          rfc={empresa.rfc}
+          onCancelar={() => setModalBorrar(false)}
+          onConfirmar={() => eliminar.mutate()}
+        />
+      )}
     </div>
   );
 }
@@ -73,20 +129,24 @@ export function EmpresasPage() {
   const { data: empresas } = useEmpresas();
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion() });
   const umbral = umbralVigenciaDias(config ?? []);
+  const esAdmin = usuario?.rol_global === 'admin';
+  const [modalAbierto, setModalAbierto] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-end gap-3">
-        <div>
+        <div className="flex-1">
           <h2 className="m-0 text-[22px] font-bold">Mis empresas</h2>
           <p className="mt-1 mb-0 text-text-muted">
             {empresas?.length ?? 0} empresa(s) con acceso · rol global {usuario?.rol_global}
           </p>
         </div>
+        {esAdmin && <Button onClick={() => setModalAbierto(true)}>Nueva empresa</Button>}
       </div>
       <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
-        {empresas?.map((e) => <EmpresaCard key={e.empresa_id} empresa={e} umbral={umbral} />)}
+        {empresas?.map((e) => <EmpresaCard key={e.empresa_id} empresa={e} umbral={umbral} esAdmin={esAdmin} />)}
       </div>
+      {modalAbierto && <NuevaEmpresaModal onClose={() => setModalAbierto(false)} />}
       {usuario?.rol_global === 'consulta' && (
         <div className="bg-surface border border-dashed border-border rounded-lg px-4 py-3 flex items-center gap-3">
           <span className="text-xs text-text-muted flex-1 text-pretty">

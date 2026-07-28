@@ -36,7 +36,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 type ApiClientHttpSubset = Pick<
   ApiClient,
-  'me' | 'listarEmpresas' | 'crearEmpresa' | 'subirEfirma' | 'obtenerEfirma' | 'eliminarEfirma' | 'listarUsuarios' | 'listarBitacora'
+  | 'me'
+  | 'listarEmpresas'
+  | 'crearEmpresa'
+  | 'actualizarEmpresa'
+  | 'eliminarEmpresa'
+  | 'subirEfirma'
+  | 'obtenerEfirma'
+  | 'eliminarEfirma'
+  | 'listarUsuarios'
+  | 'listarBitacora'
 >;
 
 export const apiHttp: ApiClientHttpSubset = {
@@ -46,6 +55,11 @@ export const apiHttp: ApiClientHttpSubset = {
 
   crearEmpresa: (input) =>
     request('/v1/empresas', { method: 'POST', body: JSON.stringify(input) }),
+
+  actualizarEmpresa: (empresaId, input) =>
+    request(`/v1/empresas/${empresaId}`, { method: 'PATCH', body: JSON.stringify(input) }),
+
+  eliminarEmpresa: (empresaId) => request(`/v1/empresas/${empresaId}`, { method: 'DELETE' }),
 
   subirEfirma: (empresaId, { cer, key, password }) => {
     const form = new FormData();
