@@ -8,6 +8,7 @@ tests (que sustituyen `verificar_id_token` por un doble) ni antes de tener crede
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
 import firebase_admin
@@ -16,6 +17,8 @@ from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials
 
 from app.core.config import get_settings
+
+logger = logging.getLogger("app")
 
 
 @lru_cache
@@ -41,8 +44,14 @@ def verificar_id_token(authorization: str | None) -> str:
     """
     token = _extraer_token(authorization)
     try:
-        decoded = firebase_auth.verify_id_token(token, app=firebase_app(), check_revoked=True)
+        # `clock_skew_seconds` es 0 por default en el SDK — cualquier desfase de reloj entre
+        # este contenedor y los servidores de Google (visto en desarrollo: WSL2 puede
+        # desincronizar su reloj unos segundos al suspender/reanudar la laptop) rechaza
+        # tokens legítimos con "Token used too early". 10s es un margen estándar de tolerancia
+        # de reloj para JWT, no debilita la verificación de firma/audiencia/revocación.
+        decoded = firebase_auth.verify_id_token(token, app=firebase_app(), check_revoked=True, clock_skew_seconds=10)
     except Exception as e:  # noqa: BLE001 — cualquier fallo de verificación es 401, sin distinción
+        logger.warning("verificar_id_token: verificación fallida (%s): %s", type(e).__name__, e)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado.") from e
     uid = decoded.get("uid")
     if not uid:
