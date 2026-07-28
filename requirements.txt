@@ -26,6 +26,7 @@ defusedxml==0.7.1
 dnspython==2.8.0
 docker==7.2.0
 email-validator==2.3.0
+et-xmlfile==2.0.0
 fastapi==0.140.7
 filelock==3.32.0
 firebase-admin==6.9.0
@@ -65,6 +66,7 @@ mdurl==0.1.2
 msgpack==1.2.1
 mypy==1.20.2
 mypy_extensions==1.1.0
+openpyxl==3.1.5
 packageurl-python==0.17.6
 packaging==26.2
 pathspec==1.1.1

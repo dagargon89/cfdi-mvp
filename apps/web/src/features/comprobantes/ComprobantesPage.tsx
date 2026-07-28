@@ -1,6 +1,6 @@
 // demo.html:505-607 (P7 Comprobantes) + lógica demo.html:1227-1237,1359-1370.
-import { useQuery } from '@tanstack/react-query';
-import { FileSpreadsheet } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { FileSpreadsheet, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
@@ -14,9 +14,10 @@ import { money } from '@/lib/domain';
 import { ComprobanteDrawer } from './ComprobanteDrawer';
 
 export function ComprobantesPage() {
-  const { empresa } = useEmpresaCtx();
+  const { empresa, puedeMutar } = useEmpresaCtx();
   const { esMovil, esEscritorio } = useBreakpoint();
   const { toast } = useToast();
+  const qc = useQueryClient();
   const [params] = useSearchParams();
 
   const [q, setQ] = useState(params.get('q') ?? '');
@@ -25,6 +26,7 @@ export function ComprobantesPage() {
   const [desde, setDesde] = useState('');
   const [abierto, setAbierto] = useState<Comprobante | null>(null);
   const [exportando, setExportando] = useState(false);
+  const [validando, setValidando] = useState(false);
 
   const filtros = { q: q || undefined, estatus: estatus || undefined, tipo_comprobante: tipo || undefined, desde: desde || undefined };
   const { data: page } = useQuery({ queryKey: ['comprobantes', empresa.empresa_id, filtros], queryFn: () => api.listarComprobantes(empresa.empresa_id, filtros) });
@@ -40,22 +42,49 @@ export function ComprobantesPage() {
     setQ(''); setEstatus(''); setTipo(''); setDesde('');
   }
 
+  async function esperarTarea(tareaId: string) {
+    let estado: 'pendiente' | 'completada' | 'fallida' = 'pendiente';
+    let url: string | undefined;
+    while (estado === 'pendiente') {
+      await new Promise((r) => setTimeout(r, 300));
+      const t = await api.estadoTarea(tareaId);
+      estado = t.estado;
+      url = t.descarga_url;
+    }
+    return { estado, url };
+  }
+
   async function exportar() {
     setExportando(true);
     toast('Generando exportación…', 'info');
     try {
       const { tarea_id } = await api.exportarExcel(empresa.empresa_id, filtros as Record<string, string>);
-      let estado = 'pendiente';
-      let url: string | undefined;
-      while (estado === 'pendiente') {
-        await new Promise((r) => setTimeout(r, 300));
-        const t = await api.estadoTarea(tarea_id);
-        estado = t.estado;
-        url = t.descarga_url;
+      const { estado, url } = await esperarTarea(tarea_id);
+      if (estado === 'completada' && url) {
+        window.open(url, '_blank');
+        toast(`${url.split('/').pop() ?? 'archivo'} listo`, 'ok');
+      } else {
+        toast('No se pudo generar la exportación', 'error');
       }
-      toast(`${url?.split('/').pop() ?? 'archivo'} descargado`, 'ok');
     } finally {
       setExportando(false);
+    }
+  }
+
+  async function validarPendientes() {
+    setValidando(true);
+    toast('Validando estatus con el SAT…', 'info');
+    try {
+      const { tarea_id } = await api.validarLote(empresa.empresa_id, 'no_verificados');
+      const { estado } = await esperarTarea(tarea_id);
+      if (estado === 'completada') {
+        qc.invalidateQueries({ queryKey: ['comprobantes', empresa.empresa_id] });
+        toast('Validación completada', 'ok');
+      } else {
+        toast('No se pudo completar la validación', 'error');
+      }
+    } finally {
+      setValidando(false);
     }
   }
 
@@ -89,6 +118,11 @@ export function ComprobantesPage() {
           <input id="f-desde" type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="h-[34px] border border-border rounded px-2" />
         </div>
         <Button variant="secondary" onClick={limpiar}>Limpiar</Button>
+        {puedeMutar && (
+          <Button variant="secondary" onClick={validarPendientes} loading={validando} disabled={validando}>
+            <ShieldCheck className="size-[15px]" aria-hidden /> Validar pendientes
+          </Button>
+        )}
         <Button onClick={exportar} loading={exportando} disabled={exportando}>
           <FileSpreadsheet className="size-[15px]" aria-hidden /> Exportar
         </Button>

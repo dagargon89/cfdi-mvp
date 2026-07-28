@@ -11,6 +11,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 _kek_tmp = tempfile.NamedTemporaryFile(delete=False)
 _kek_tmp.write(os.urandom(32))
 _kek_tmp.close()
+_storage_tmp = tempfile.mkdtemp(prefix="hub_cfdi_storage_")
 
 os.environ.setdefault("DATABASE_URL", "mysql+asyncmy://root:root@localhost:0/placeholder")
 os.environ.setdefault("REDIS_URL", "redis://localhost:0/0")
@@ -18,6 +19,9 @@ os.environ.setdefault("KEK_PATH", _kek_tmp.name)
 os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", "/dev/null")
 os.environ.setdefault("FIREBASE_PROJECT_ID", "test-project")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
+os.environ.setdefault("STORAGE_ROOT", _storage_tmp)
+os.environ.setdefault("SIGNING_SECRET", "test-signing-secret-not-for-production-use")
+os.environ.setdefault("PUBLIC_BASE_URL", "http://test")
 
 import pytest
 import pytest_asyncio

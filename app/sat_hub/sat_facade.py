@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from .domain import Job, Tipo
+from .errors import SatRechazoError
 
 # --------------------------------------------------------------------------- #
 # EstadoSolicitud (espejo congelado de satcfdi.pacs.sat.EstadoSolicitud).
@@ -119,19 +120,38 @@ class SatFacade:
     # ---- Solicitud (mapeo tipo → método dedicado · H-04 resuelto) -------- #
 
     def solicitar(self, job: Job) -> str:
-        """Envía la solicitud de descarga masiva y devuelve el ``IdSolicitud``."""
-        from satcfdi.pacs.sat import TipoDescargaMasivaTerceros
+        """Envía la solicitud de descarga masiva y devuelve el ``IdSolicitud``.
+
+        ``satcfdi`` devuelve ``{**res.attrib}`` del XML de respuesta tal cual — cuando el
+        SAT rechaza la solicitud de entrada (p. ej. ya existe una solicitud con los mismos
+        criterios, RFC no autorizado, límite de solicitudes) el elemento no trae
+        ``IdSolicitud``, solo ``CodEstatus``/``Mensaje``. Sin este chequeo, `resp["IdSolicitud"]`
+        revienta con ``KeyError`` sin traducirse a `SatRechazoError` (visto en producción:
+        el job se queda en NUEVO para siempre, sin mensaje visible para el usuario).
+        """
+        from satcfdi.pacs.sat import EstadoComprobante, TipoDescargaMasivaTerceros
 
         comun = dict(
             fecha_inicial=job.fecha_inicial,
             fecha_final=job.fecha_final,
             tipo_solicitud=TipoDescargaMasivaTerceros[job.solicitud.name],
+            # El SAT rechaza (CodEstatus=301, "no se permite la descarga de xml que se
+            # encuentren cancelados") si se omite este filtro al pedir XML/CFDI. Los
+            # cancelados se detectan después vía re-verificación de estatus (RF-VAL,
+            # "cancelación tardía"), nunca volviendo a pedirlos en la descarga masiva.
+            estado_comprobante=EstadoComprobante.VIGENTE,
         )
         if job.tipo is Tipo.RECIBIDO:
             resp = self._sat.recover_comprobante_received_request(rfc_receptor=self._rfc, **comun)
         else:
             resp = self._sat.recover_comprobante_emitted_request(rfc_emisor=self._rfc, **comun)
-        return str(resp["IdSolicitud"])
+
+        id_solicitud = resp.get("IdSolicitud")
+        if not id_solicitud:
+            cod = resp.get("CodEstatus", "SIN_CODIGO")
+            mensaje = resp.get("Mensaje", "El SAT rechazó la solicitud sin indicar un motivo.")
+            raise SatRechazoError(f"El SAT rechazó la solicitud (CodEstatus={cod}): {mensaje}")
+        return str(id_solicitud)
 
     # ---- Verificación (polling) ----------------------------------------- #
 

@@ -53,20 +53,34 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 - **Hito verificado:** suite de seguridad verde (`pytest`, 17/17); `mypy --strict` limpio (52 archivos); alta real de e.firma de prueba cifra en reposo y queda en bitácora.
 - **Pendiente para poder operar con datos reales:** David debe generar una service account de Firebase (Admin SDK) — las credenciales web de `apps/web` no sirven para verificar tokens en el servidor.
 
-### Sprint 2 — Núcleo de escritorio I: empresas y descarga masiva (prioridad 2)
+### Sprint 2 — Núcleo de escritorio I: empresas y descarga masiva (prioridad 2) ✅ Código cerrado (2026-07-28)
 **Objetivo:** el ciclo asíncrono v1.0 corriendo en workers.
-- Empresas (RF-EMP-01…03); tareas Celery `ejecutar_job` con máquina de estados persistida (RF-DESC-01…06); monitoreo básico (RF-SYNC-03); reintento manual.
-- Pruebas: doc 06 §2.4 completa (T1–T11, I1–I8), §2.5.
-- **Hito:** ciclo `solicitar→verificar→descargar` contra RFC de prueba del SAT vía workers, con reanudación demostrada.
+- Empresas (RF-EMP-01…03) — ya cerrado en la sesión de Sprint 0-1 (alta/baja lógica/borrado real).
+- Tarea Celery `ejecutar_job` con máquina de estados persistida (`app/repositories/jobs.py`, `app/worker/tasks.py`) — RF-DESC-01…06.
+- Monitoreo básico (`GET /jobs` con filtros) — RF-SYNC-03; reintento manual (`POST /jobs/{id}/reintentar`, T11).
+- `apps/web` conectado de verdad: `crearDescarga`/`listarJobs`/`reintentarJob` vía `api.http.ts` (antes resueltos por el mock).
+- Pruebas: doc 06 §2.4 completa (T1–T11, I1–I8) en `tests/test_maquina_estados.py`; §2.5 (camino feliz, reintentos, rechazo, e.firma vencida, reanudación) en `tests/test_worker.py` con `SatFacade` mockeada — nunca toca el SAT real ni usa la e.firma de producción.
+- **Hito pendiente (manual, requiere autorización explícita):** el ciclo `solicitar→verificar→descargar` contra el SAT real (con RFC de prueba del SAT o la e.firma real de producción) no se ha ejecutado — solo se validó contra una fachada simulada. Un intento real consume cupo real del SAT y registra una solicitud real; queda como paso explícito que David debe autorizar por separado.
 
-### Sprint 3 — Núcleo de escritorio II: validación, resguardo y consulta (prioridad 2)
+### Sprint 3 — Núcleo de escritorio II: validación, resguardo y consulta (prioridad 2) ✅ Cerrado (2026-07-28)
 **Objetivo:** de paquetes a índice consultable.
-- Resguardo: parseo → `comprobantes`, nomenclatura configurable, comprobante según D1/D2 (RF-RES-01…03).
-- Validación de estatus en lote y re-verificación (RF-VAL-01…03).
-- Listados con filtros + export a Excel en worker (RF-LIST-01/02).
-- Pruebas: resguardo encadenado, listados sin N+1, rendimiento §3 sobre datos sintéticos.
-- **Hito:** una descarga real termina indexada, validada, consultable y exportable.
-- **Gate de decisiones:** D1/D2 (Pedro) deben cerrarse en este sprint para fijar defaults; si no, quedan configurables con default provisional documentado.
+- Resguardo: parseo → `comprobantes` (`app/services/resguardo.py`), nomenclatura configurable con
+  tokens + sanitización anti path-traversal, encadenado automáticamente tras `DESCARGADO` (RF-RES-01…03).
+- Validación de estatus en lote (`POST /comprobantes/validar` → tarea Celery `validar_lote`, usa el
+  endpoint público del SAT, sin bóveda) y re-verificación bajo demanda (RF-VAL-01…03).
+- Listados con filtros (`GET /comprobantes`) + export a Excel en worker con streaming (`openpyxl`
+  `write_only`, tarea `exportar_excel`) vía enlaces firmados temporales (RF-LIST-01/02).
+- `GET /v1/tareas/{id}` (envuelve `AsyncResult` de Celery, sin tabla nueva) y
+  `GET /v1/descargas-archivo/{token}` (HMAC-SHA256, `app/services/enlaces.py`).
+- `apps/web` conectado: `listarComprobantes`/`validarLote`/`exportarExcel`/`estadoTarea` reales;
+  se cerraron dos huecos de UI heredados del mock ("Exportar" nunca abría el archivo resultante,
+  "Descargar XML" era decorativo) y se agregó el botón "Validar pendientes" (antes sin UI).
+- **D1/D2 (Pedro):** siguen sin decisión explícita — se usó el default provisional ya presente en el
+  esquema desde Sprint 0 (`plantilla_nomenclatura`, `genera_pdf_comprobante=false`); PDF no
+  implementado (bandera en `false`).
+- **Hito verificado con datos reales:** la descarga real de la empresa 11 (Sprint 2, 76 CFDI) se indexó
+  (76/76), se validó contra el SAT real (endpoint público, sin e.firma) y se exportó a un `.xlsx` real
+  servido por un enlace firmado — de punta a punta, sin tocar el SAT con la e.firma de producción.
 
 ### Sprint 4 — Complementos del MVP (prioridad 3)
 **Objetivo:** la plataforma trabaja sola y avisa.

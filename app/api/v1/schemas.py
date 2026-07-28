@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import date
+from typing import Literal
+
 from pydantic import BaseModel, EmailStr
 
-from app.models.enums import RolEmpresa, RolGlobal
+from app.models.enums import RolEmpresa, RolGlobal, SolicitudTipo, TipoJob
 
 
 class EfirmaResumenOut(BaseModel):
@@ -87,6 +90,79 @@ class PermisosIn(BaseModel):
 class UsuarioPatchIn(BaseModel):
     activo: bool | None = None
     rol_global: RolGlobal | None = None
+
+
+class DescargaCrearIn(BaseModel):
+    tipo: TipoJob
+    solicitud: SolicitudTipo
+    desde: date
+    hasta: date
+
+
+class DescargaCrearOut(BaseModel):
+    job_ids: list[int]
+    ventanas: int
+
+
+class JobOut(BaseModel):
+    job_id: int
+    tipo: str
+    solicitud: str
+    origen: str
+    desde: str
+    hasta: str
+    estado: str
+    intentos: int
+    paquetes: int
+    mensaje: str | None
+    updated_at: str
+    id_solicitud: str | None
+
+
+class JobPageOut(BaseModel):
+    data: list[JobOut]
+    page: int
+    per_page: int
+    total: int
+
+
+class ComprobanteOut(BaseModel):
+    comprobante_id: int
+    uuid: str
+    folio: str | None
+    rfc_emisor: str
+    rfc_receptor: str
+    razon_social_emisor: str | None
+    total: float | None
+    fecha_emision: str | None
+    tipo_comprobante: str | None
+    estatus: str
+    estatus_verificado_at: str | None
+    xml_path: str | None
+
+
+class ComprobantePageOut(BaseModel):
+    data: list[ComprobanteOut]
+    page: int
+    per_page: int
+    total: int
+
+
+class AlcanceUuids(BaseModel):
+    uuids: list[str]
+
+
+class ValidarLoteIn(BaseModel):
+    alcance: Literal["no_verificados", "todos"] | AlcanceUuids
+
+
+class TareaCrearOut(BaseModel):
+    tarea_id: str
+
+
+class TareaEstadoOut(BaseModel):
+    estado: Literal["pendiente", "completada", "fallida"]
+    descarga_url: str | None = None
 
 
 class BitacoraOut(BaseModel):

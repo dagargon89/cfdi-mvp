@@ -2,7 +2,9 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/client';
 import type { EstadoJob } from '@/lib/api';
 
-const EN_CURSO: EstadoJob[] = ['SOLICITADO', 'EN_PROCESO'];
+// NUEVO incluido: contra el backend real hay una ventana breve entre crear el job y que el
+// worker de Celery lo levante (con el mock, avanzarJob() salta directo a SOLICITADO).
+const EN_CURSO: EstadoJob[] = ['NUEVO', 'SOLICITADO', 'EN_PROCESO'];
 
 /** Poll corto mientras haya jobs en curso — sustituye al event-bus del prototipo para reflejar la
  * progresión simulada de avanzarJob() (demo.html:1088-1097) sin acoplar la UI al mock. */

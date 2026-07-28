@@ -18,6 +18,7 @@ dependencies = [
     "pydantic-settings>=2.5,<3",
     "python-multipart>=0.0.12,<1",
     "satcfdi>=26,<27",
+    "openpyxl>=3.1,<4",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +38,7 @@ python_version = "3.12"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["satcfdi.*", "firebase_admin.*", "celery.*", "asyncmy.*", "testcontainers.*"]
+module = ["satcfdi.*", "firebase_admin.*", "celery.*", "asyncmy.*", "testcontainers.*", "openpyxl.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
