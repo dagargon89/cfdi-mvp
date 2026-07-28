@@ -117,12 +117,17 @@ async def test_reintentar_job_en_error_202(client: AsyncClient, db: AsyncSession
     job = await db.get(Job, job_id)
     assert job is not None
     job.estado = EstadoJob.ERROR
+    job.intentos = 60  # simula un job que ya agotó los reintentos antes de fallar
     await db.commit()
 
     r = await client.post(f"/v1/empresas/{empresa.empresa_id}/jobs/{job_id}/reintentar", headers={"Authorization": "Bearer uid-op5"})
     assert r.status_code == 202
     await db.refresh(job)
     assert job.estado is EstadoJob.NUEVO
+    # una solicitud nueva merece un presupuesto de sondeo fresco — bug real visto en
+    # producción: sin esto, un job reintentado casi de inmediato volvía a fallar por
+    # "reintentos agotados" arrastrando el contador del intento anterior.
+    assert job.intentos == 0
     assert job.id_solicitud is None
 
 

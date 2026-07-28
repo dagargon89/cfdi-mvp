@@ -51,15 +51,29 @@ ESTADOS_TERMINADA = frozenset({ESTADO_TERMINADA})
 # Rechazo definitivo → el job pasa a ERROR.
 ESTADOS_RECHAZO = frozenset({ESTADO_ERROR, ESTADO_RECHAZADA, ESTADO_VENCIDA})
 
+# `CodigoEstadoSolicitud` real del SAT (catálogo de `satcfdi.pacs.sat`) — "5004" viene
+# acompañado de `EstadoSolicitud=0` (fuera del enum 1-6 de arriba, que solo cubre la
+# respuesta "normal") y significa "la solicitud es válida pero no hay CFDI que coincidan":
+# NO es un error, es una terminación exitosa con cero paquetes (visto en producción con
+# una solicitud de METADATA para un rango de fechas sin comprobantes).
+COD_ESTATUS_SIN_RESULTADOS = "5004"
+
 
 @dataclass(slots=True)
 class ResultadoVerificacion:
-    """Resultado de una verificación de estatus de solicitud ante el SAT."""
+    """Resultado de una verificación de estatus de solicitud ante el SAT.
+
+    ``cod_estatus`` es el catálogo real del SAT (``CodigoEstadoSolicitud`` en `satcfdi`):
+    "5000" éxito, "5002" agotado, "5003" tope máximo, "5004" *sin resultados* (visto en
+    producción con `EstadoSolicitud=0` — no es un error, es una solicitud válida sin CFDI
+    que coincidan), "5005" duplicada, "404" error genérico no controlado.
+    """
 
     estado_solicitud: int
     ids_paquetes: list[str] = field(default_factory=list)
     num_cfdis: int = 0
     mensaje: str | None = None
+    cod_estatus: str | None = None
 
 
 @dataclass(slots=True)
@@ -163,6 +177,7 @@ class SatFacade:
             ids_paquetes=list(st.get("IdsPaquetes", []) or []),
             num_cfdis=int(st.get("NumeroCFDIs", 0) or 0),
             mensaje=st.get("Mensaje"),
+            cod_estatus=st.get("CodEstatus"),
         )
 
     # ---- Descarga -------------------------------------------------------- #

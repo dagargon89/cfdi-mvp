@@ -43,7 +43,15 @@ from app.sat_hub.domain import Job as DominioJob
 from app.sat_hub.domain import Solicitud as DominioSolicitud
 from app.sat_hub.domain import Tipo as DominioTipo
 from app.sat_hub.errors import FielVencidaError, SatRechazoError, SatReintentableError
-from app.sat_hub.sat_facade import ESTADOS_EN_PROCESO, ESTADOS_RECHAZO, ESTADOS_TERMINADA, SatFacade, consultar_estatus_xml
+from app.sat_hub.sat_facade import (
+    COD_ESTATUS_SIN_RESULTADOS,
+    ESTADOS_EN_PROCESO,
+    ESTADOS_RECHAZO,
+    ESTADOS_TERMINADA,
+    ResultadoVerificacion,
+    SatFacade,
+    consultar_estatus_xml,
+)
 from app.services import representaciones
 from app.services import resguardo
 from app.services.descargas import EfirmaAusenteError, signer_para_empresa
@@ -150,11 +158,54 @@ async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids
         logger.exception("resguardo: fallo indexando el job %s.", job.job_id)
 
 
+_REINTENTOS_INMEDIATOS_PARPADEO = 2
+_ESPERA_PARPADEO_SEG = 3
+
+
+def _es_resultado_definitivo(resultado: ResultadoVerificacion) -> bool:
+    """True si no hace falta el margen de gracia de "parpadeo" — ya es un resultado que
+    sabemos clasificar con certeza (incluye `COD_ESTATUS_SIN_RESULTADOS`, que llega con
+    `EstadoSolicitud=0` pero es un éxito documentado, no un código ambiguo)."""
+    return (
+        resultado.estado_solicitud in ESTADOS_EN_PROCESO | ESTADOS_TERMINADA | ESTADOS_RECHAZO
+        or resultado.cod_estatus == COD_ESTATUS_SIN_RESULTADOS
+    )
+
+
 async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
     assert job.id_solicitud is not None  # garantizado por T1: NUEVO→SOLICITADO siempre lo asigna
     signer = await signer_para_empresa(db, job.empresa)
     facade = SatFacade(signer, job.empresa.rfc)
     resultado = facade.verificar(job.id_solicitud)  # SatReintentableError se propaga (backoff de Celery)
+
+    # Un código no catalogado por satcfdi (fuera de 1-6) CON un mensaje del SAT no es "sigue en
+    # proceso" silencioso — es el WS respondiendo un error explícito. Visto en producción con una
+    # solicitud de METADATA: el WS "parpadeó" (error/éxito/error de nuevo en menos de un minuto)
+    # — unos segundos de gracia in-proceso antes de rendirse evita fallar un job que se hubiera
+    # recuperado solo en el siguiente intento, sin gastar un sondeo completo (countdown de
+    # `polling_espera_seg`, minutos) por cada parpadeo.
+    intentos_parpadeo = 0
+    while not _es_resultado_definitivo(resultado) and resultado.mensaje and intentos_parpadeo < _REINTENTOS_INMEDIATOS_PARPADEO:
+        intentos_parpadeo += 1
+        logger.warning(
+            "ejecutar_job: EstadoSolicitud %s con mensaje %r para job %s — reintento inmediato %s/%s.",
+            resultado.estado_solicitud,
+            resultado.mensaje,
+            job.job_id,
+            intentos_parpadeo,
+            _REINTENTOS_INMEDIATOS_PARPADEO,
+        )
+        await asyncio.sleep(_ESPERA_PARPADEO_SEG)
+        resultado = facade.verificar(job.id_solicitud)
+
+    if resultado.cod_estatus == COD_ESTATUS_SIN_RESULTADOS:
+        # "5004: No se encontró la información" — la solicitud es válida, simplemente no hay
+        # CFDI que coincidan con el rango/tipo pedido. Éxito con cero paquetes, no un error
+        # (visto en producción: una solicitud de METADATA sin comprobantes ese mes).
+        await jobs_repo.transicion(db, job, EstadoJob.TERMINADA, paquetes=0)  # T4/T7
+        await db.commit()
+        await _descargar_paquetes(db, job, facade, [])
+        return ResultadoPaso("hecho")
 
     if resultado.estado_solicitud in ESTADOS_RECHAZO:
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=resultado.mensaje or "Rechazo definitivo del SAT.")  # T5/T8
@@ -167,11 +218,16 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         await _descargar_paquetes(db, job, facade, resultado.ids_paquetes)
         return ResultadoPaso("hecho")
 
-    # Cualquier otro código (los documentados de "en proceso" 1-2, o uno no catalogado por
-    # satcfdi — visto en producción: el SAT respondió un EstadoSolicitud fuera de 1-6
-    # mientras aún procesaba) se trata igual: sigue en proceso. Nunca asumir TERMINADA ni
-    # ERROR ante un código desconocido — el tope real es `configuracion.max_reintentos` (T8).
     if resultado.estado_solicitud not in ESTADOS_EN_PROCESO:
+        if resultado.mensaje:
+            # Ya se le dio su margen de gracia (parpadeo) arriba y sigue fallando — esto sí es
+            # un error real, no vale la pena agotar 60 reintentos (~1h) para mostrar lo mismo.
+            await jobs_repo.transicion(
+                db, job, EstadoJob.ERROR, mensaje=f"El SAT respondió un error (EstadoSolicitud={resultado.estado_solicitud}): {resultado.mensaje}"
+            )
+            await db.commit()
+            return ResultadoPaso("hecho")
+        # Código desconocido SIN mensaje (silencio, no un error explícito) — sí es transitorio.
         logger.warning("ejecutar_job: EstadoSolicitud %s no catalogado para job %s; se trata como 'en proceso'.", resultado.estado_solicitud, job.job_id)
 
     max_reintentos = await config_repo.valor(db, "max_reintentos", 60)

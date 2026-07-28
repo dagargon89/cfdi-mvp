@@ -184,6 +184,65 @@ async def test_rechazo_definitivo_pasa_a_error(db: AsyncSession, facade_fake: ty
     assert job.mensaje == "Rechazado por el SAT"
 
 
+async def test_sin_resultados_pasa_a_descargado_con_cero_paquetes(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """CodEstatus=5004 ("No se encontró la información") es un éxito documentado del SAT, no
+    un error — visto en producción con una solicitud de METADATA para un mes sin comprobantes.
+    EstadoSolicitud llega en 0 (fuera del catálogo 1-6), pero no debe tratarse como error ni
+    como "en proceso"."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=0, mensaje="No se encontro la informacion", cod_estatus="5004")]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
+    assert job.estado is EstadoJob.DESCARGADO
+    assert job.paquetes == 0
+    assert job.mensaje is None
+
+
+async def test_estado_no_catalogado_con_mensaje_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """Visto en producción con una solicitud de METADATA: el SAT respondió
+    EstadoSolicitud=0/CodEstatus=404/"Error no controlado" en cada sondeo durante más de una
+    hora, sin variar nunca. Un código no catalogado CON mensaje no es "sigue en proceso" —
+    debe pasar a ERROR de inmediato, no agotar los 60 reintentos con un mensaje genérico."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=0, mensaje="Error no controlado.")]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
+    assert job.estado is EstadoJob.ERROR
+    assert "Error no controlado" in (job.mensaje or "")
+
+
+async def test_estado_no_catalogado_con_mensaje_se_recupera_en_el_margen_de_gracia(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """Visto también en producción: el mismo `id_solicitud` respondió error/éxito/error en
+    menos de un minuto. El margen de gracia in-proceso debe absorber un "parpadeo" que se
+    recupera solo, sin fallar el job de inmediato."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [
+        ResultadoVerificacion(estado_solicitud=0, mensaje="Error no controlado."),
+        ResultadoVerificacion(estado_solicitud=ESTADO_ACEPTADA),
+    ]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "reintentar"
+    assert job.estado is EstadoJob.EN_PROCESO
+
+
+async def test_estado_no_catalogado_sin_mensaje_sigue_en_proceso(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """Un código no catalogado SIN mensaje (silencio, no un error explícito) sigue tratándose
+    como transitorio — es el caso ya visto en producción que se auto-resolvió solo."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=0, mensaje=None)]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "reintentar"
+    assert job.estado is EstadoJob.EN_PROCESO
+
+
 async def test_efirma_vencida_pasa_a_error_sin_solicitar(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
     vencida = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     job = await _crear_job_con_efirma(db, not_after=vencida)

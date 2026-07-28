@@ -60,7 +60,14 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 - Monitoreo básico (`GET /jobs` con filtros) — RF-SYNC-03; reintento manual (`POST /jobs/{id}/reintentar`, T11).
 - `apps/web` conectado de verdad: `crearDescarga`/`listarJobs`/`reintentarJob` vía `api.http.ts` (antes resueltos por el mock).
 - Pruebas: doc 06 §2.4 completa (T1–T11, I1–I8) en `tests/test_maquina_estados.py`; §2.5 (camino feliz, reintentos, rechazo, e.firma vencida, reanudación) en `tests/test_worker.py` con `SatFacade` mockeada — nunca toca el SAT real ni usa la e.firma de producción.
-- **Hito pendiente (manual, requiere autorización explícita):** el ciclo `solicitar→verificar→descargar` contra el SAT real (con RFC de prueba del SAT o la e.firma real de producción) no se ha ejecutado — solo se validó contra una fachada simulada. Un intento real consume cupo real del SAT y registra una solicitud real; queda como paso explícito que David debe autorizar por separado.
+- **Hito verificado con datos reales (2026-07-28):** David lanzó una descarga real (empresa 11, e.firma de producción) y el ciclo `solicitar→verificar→descargar` corrió de punta a punta contra el SAT real hasta `DESCARGADO` (76 CFDI reales). En el camino se encontraron y corrigieron 5 bugs reales que no aparecían con la fachada simulada:
+  1. `SatFacade.solicitar` no manejaba una respuesta del SAT sin `IdSolicitud`.
+  2. Faltaba pedir `EstadoComprobante=Vigente` explícito (el SAT rechazaba con CodEstatus=301).
+  3. El pool de conexiones async del worker se rompía entre sondeos ("Future attached to a different loop", corregido con `NullPool`).
+  4. Una solicitud de METADATA reveló que el WS de verificación del SAT puede "parpadear" (mismo `id_solicitud`: error/éxito/error en <1 min) y que `CodEstatus=5004` ("No se encontró la información") es un **éxito documentado con cero paquetes**, no un error — antes se confundía con un código no catalogado y se trataba mal; ahora `ResultadoVerificacion.cod_estatus` se usa para distinguirlo, con un margen de gracia de 2 reintentos inmediatos (3s) antes de dar por real cualquier otro código no catalogado con mensaje.
+  5. "Reintentar" (T11, ERROR→NUEVO) no reiniciaba `job.intentos` — una solicitud nueva heredaba el contador de la solicitud anterior y podía agotar `max_reintentos` casi de inmediato; ahora se reinicia a 0.
+
+  También se ajustaron `polling_espera_seg` (15→60s) y `max_reintentos` (20→60) porque el SAT real tardó más que la ventana pensada para pruebas.
 
 ### Sprint 3 — Núcleo de escritorio II: validación, resguardo y consulta (prioridad 2) ✅ Cerrado (2026-07-28)
 **Objetivo:** de paquetes a índice consultable.
@@ -75,9 +82,13 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 - `apps/web` conectado: `listarComprobantes`/`validarLote`/`exportarExcel`/`estadoTarea` reales;
   se cerraron dos huecos de UI heredados del mock ("Exportar" nunca abría el archivo resultante,
   "Descargar XML" era decorativo) y se agregó el botón "Validar pendientes" (antes sin UI).
-- **D1/D2 (Pedro):** siguen sin decisión explícita — se usó el default provisional ya presente en el
-  esquema desde Sprint 0 (`plantilla_nomenclatura`, `genera_pdf_comprobante=false`); PDF no
-  implementado (bandera en `false`).
+- **D1/D2 (Pedro):** D1 (nomenclatura) sigue con el default provisional (`plantilla_nomenclatura`).
+  **D2 (PDF) quedó resuelto post-cierre (2026-07-28)**: el contador de la organización pidió
+  explícitamente poder descargar el PDF (representación impresa) y un "Detalle del CFDI" (constancia
+  de validación), además del XML — señal real de un stakeholder. Se implementó `app/services/
+  representaciones.py` (usa `satcfdi.render`/`weasyprint`, ya incluidos en el proyecto, sin columnas
+  nuevas en `comprobantes`): descarga individual, `.zip` por comprobante (XML+PDF+Detalle) y por lote
+  desde la tabla (selección con casillas). Verificado con datos reales de la empresa 11.
 - **Hito verificado con datos reales:** la descarga real de la empresa 11 (Sprint 2, 76 CFDI) se indexó
   (76/76), se validó contra el SAT real (endpoint público, sin e.firma) y se exportó a un `.xlsx` real
   servido por un enlace firmado — de punta a punta, sin tocar el SAT con la e.firma de producción.
@@ -106,7 +117,7 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 | Compromiso de la bóveda / KEK mal gestionada | Baja | Crítico | Diseño doc 04 §A02; hardening S5; runbook de revocación | 1, 5 |
 | Firma satcfdi para emitidos difiere | Media | Medio | Verificación temprana y congelación en doc 05 | 0 |
 | Saturación del SAT alarga jobs a días | Alta | Medio | Diseño asíncrono reanudable ya lo absorbe | 2 |
-| D1/D2 no se cierran a tiempo | Media | Bajo | Configurables con default provisional | 3 |
+| D1 no se cierra a tiempo (D2 resuelto 2026-07-28: PDF pedido por el contador) | Baja | Bajo | Configurable con default provisional | 3 |
 | Cruce EFOS lento sobre histórico grande | Media | Medio | Índices doc 03; cruce incremental por versión de lista | 4 |
 | Fatiga de alertas (correo excesivo) | Media | Medio | Idempotencia por hash + suscripción granular | 4 |
 | Costo/operación del servidor (D7 sin decidir) | Media | Bajo | Compose portable: VPS o cloud sin cambio de diseño | 0, 5 |
