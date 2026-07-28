@@ -23,7 +23,10 @@ class Efirma(Base):
 
     efirma_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     empresa_id: Mapped[int] = mapped_column(ForeignKey("empresas.empresa_id", ondelete="RESTRICT"), unique=True, nullable=False)
-    num_serie: Mapped[str] = mapped_column(String(40), nullable=False)
+    # RFC 5280 permite hasta 20 octetos de serial (≈49 dígitos decimales); confirmado con una
+    # e.firma real cuyo serial (`signer.serial_number`, crudo del X.509, no el "Número de
+    # Certificado" de 20 dígitos que usa el SAT en el CFDI) llegó a 51 caracteres.
+    num_serie: Mapped[str] = mapped_column(String(64), nullable=False)
     not_before: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     not_after: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     cer_pem: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

@@ -9,7 +9,6 @@ contra `satcfdi` real, sin tocar el SAT.
 from __future__ import annotations
 
 import datetime
-import secrets
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -42,10 +41,11 @@ def generar_fiel_prueba(
         .subject_name(nombre)
         .issuer_name(nombre)
         .public_key(key.public_key())
-        # Los seriales reales del SAT son de 20 dígitos (ver fixtures de doc 09) — a
-        # diferencia de x509.random_serial_number() (hasta ~50 dígitos), que rebasaría
-        # `efirmas.num_serie VARCHAR(40)` del DDL congelado (doc 03).
-        .serial_number(secrets.randbelow(9 * 10**18) + 3 * 10**19)
+        # x509.random_serial_number() (RFC 5280: hasta 20 octetos, ~49 dígitos) — una e.firma
+        # real confirmó que `signer.serial_number` (el serial crudo del X.509, no el "Número de
+        # Certificado" de 20 dígitos que usa el SAT en el CFDI) puede llegar a esa longitud;
+        # `efirmas.num_serie` se ensanchó a VARCHAR(64) en el DDL (doc 03) para tolerarlo.
+        .serial_number(x509.random_serial_number())
         .not_valid_before(not_before)
         .not_valid_after(not_after)
         .sign(key, hashes.SHA256())

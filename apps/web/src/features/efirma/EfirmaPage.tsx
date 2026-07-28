@@ -98,10 +98,10 @@ export function EfirmaPage() {
             <span className={`text-xs font-semibold rounded-md px-2 py-0.5 ${estadoInfo.fg} ${estadoInfo.bg}`}>{estadoInfo.texto}</span>
           </div>
           <dl className="m-0 grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
-            <div><dt className="text-xs text-text-muted font-semibold">Número de serie</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{efirma.num_serie}</dd></div>
-            <div><dt className="text-xs text-text-muted font-semibold">Vigente desde</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{fechaCorta(efirma.not_before)}</dd></div>
-            <div><dt className="text-xs text-text-muted font-semibold">Vigente hasta</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{fechaCorta(efirma.not_after)}</dd></div>
-            <div><dt className="text-xs text-text-muted font-semibold">Días restantes</dt><dd className={`mt-0.5 mb-0 font-mono text-[13px] ${estadoInfo.fg}`}>{dias} días</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Número de serie</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{efirma.num_serie}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente desde</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fechaCorta(efirma.not_before)}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente hasta</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fechaCorta(efirma.not_after)}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Días restantes</dt><dd className={`mt-0.5 mb-0 font-mono text-[13px] break-all ${estadoInfo.fg}`}>{dias} días</dd></div>
           </dl>
           {puedeMutar && (
             <div className="flex gap-2 border-t border-border pt-3">
@@ -115,30 +115,30 @@ export function EfirmaPage() {
         <form onSubmit={onSubmit} className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-3.5">
           <h3 className="m-0 text-[15px] font-semibold">{efirma ? 'Reemplazar e.firma' : 'Dar de alta e.firma'}</h3>
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-            <div className="flex flex-col gap-1.5">
+            <div className="min-w-0 flex flex-col gap-1.5">
               <label htmlFor="ef-cer" className="text-xs font-semibold text-text-muted">Certificado (.cer)</label>
               <input
                 id="ef-cer" type="file" accept=".cer" aria-describedby="ef-cer-h"
                 onChange={(e) => { const f = e.target.files?.[0] ?? null; setCerFile(f); setCerNombre(f?.name ?? 'Sin archivo seleccionado'); }}
-                className="border border-border rounded px-2 py-1.5 text-[13px]"
+                className="border border-border rounded px-2 py-1.5 text-[13px] min-w-0"
               />
-              <span id="ef-cer-h" className="text-xs text-text-muted">{cerNombre}</span>
+              <span id="ef-cer-h" className="text-xs text-text-muted break-all">{cerNombre}</span>
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="min-w-0 flex flex-col gap-1.5">
               <label htmlFor="ef-key" className="text-xs font-semibold text-text-muted">Llave privada (.key)</label>
               <input
                 id="ef-key" type="file" accept=".key" aria-describedby="ef-key-h"
                 onChange={(e) => { const f = e.target.files?.[0] ?? null; setKeyFile(f); setKeyNombre(f?.name ?? 'Sin archivo seleccionado'); }}
-                className="border border-border rounded px-2 py-1.5 text-[13px]"
+                className="border border-border rounded px-2 py-1.5 text-[13px] min-w-0"
               />
-              <span id="ef-key-h" className="text-xs text-text-muted">{keyNombre}</span>
+              <span id="ef-key-h" className="text-xs text-text-muted break-all">{keyNombre}</span>
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="min-w-0 flex flex-col gap-1.5">
               <label htmlFor="ef-pass" className="text-xs font-semibold text-text-muted">Contraseña de la llave</label>
               <input
                 id="ef-pass" type="password" autoComplete="new-password" aria-describedby="ef-pass-h"
                 value={password} onChange={(e) => setPassword(e.target.value)}
-                className="h-9 border border-border rounded px-2.5"
+                className="h-9 border border-border rounded px-2.5 min-w-0"
               />
               <span id="ef-pass-h" className="text-xs text-text-muted">No se guarda en el navegador ni se vuelve a mostrar.</span>
             </div>
@@ -160,16 +160,16 @@ export function EfirmaPage() {
           {error && (
             <div role="alert" className="bg-danger-soft rounded-md px-2.5 py-2.5 flex gap-2 text-danger">
               <AlertCircle className="size-[17px] shrink-0 mt-px" aria-hidden />
-              <span className="flex flex-col gap-0.5">
-                <strong className="text-[13px] font-mono">{error.codigo}</strong>
-                <span className="text-[13px] text-pretty">{error.mensaje}</span>
+              <span className="min-w-0 flex flex-col gap-0.5">
+                <strong className="text-[13px] font-mono break-all">{error.codigo}</strong>
+                <span className="text-[13px] text-pretty break-words">{error.mensaje}</span>
               </span>
             </div>
           )}
           {ok && (
             <div role="status" className="bg-success-soft rounded-md px-2.5 py-2.5 flex gap-2 text-success">
               <ShieldCheck className="size-[17px] shrink-0 mt-px" aria-hidden />
-              <span className="text-[13px] text-pretty">{ok}</span>
+              <span className="min-w-0 text-[13px] text-pretty break-words">{ok}</span>
             </div>
           )}
 
