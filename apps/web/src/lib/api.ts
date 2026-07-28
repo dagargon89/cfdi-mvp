@@ -101,6 +101,28 @@ export interface ConfiguracionItem {
   descripcion: string;
 }
 
+/** Añadido tras el freeze (2026-07-28) — RF-NOT-01: correo saliente configurable desde la UI
+ * (Configuración → Correo), no por variable de entorno. `configurado=false` cuando nadie lo
+ * ha guardado todavía; la contraseña de aplicación nunca viaja de vuelta desde el backend. */
+export interface ConfigSmtp {
+  configurado: boolean;
+  host: string | null;
+  port: number | null;
+  usuario: string | null;
+  remitente: string | null;
+  tls: boolean | null;
+}
+
+export interface ConfigSmtpIn {
+  host: string;
+  port: number;
+  usuario: string;
+  /** vacío/omitido conserva la contraseña ya guardada (editar host/remitente sin reteclearla). */
+  password?: string;
+  remitente: string;
+  tls: boolean;
+}
+
 export interface BitacoraEntrada {
   bitacora_id: number;
   actor: string;
@@ -174,4 +196,8 @@ export interface ApiClient {
   listarUsuarios(): Promise<UsuarioAdmin[]>;
   listarConfiguracion(): Promise<ConfiguracionItem[]>;
   listarBitacora(f?: { page?: number }): Promise<Page<BitacoraEntrada>>;
+  /** Añadidos tras el freeze (2026-07-28) — RF-NOT-01, Configuración → Correo. */
+  obtenerConfigSmtp(): Promise<ConfigSmtp>;
+  guardarConfigSmtp(input: ConfigSmtpIn): Promise<void>;
+  probarConfigSmtp(input: ConfigSmtpIn & { correo_destino: string }): Promise<void>;
 }

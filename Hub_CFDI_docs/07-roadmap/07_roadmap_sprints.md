@@ -69,6 +69,15 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
 
   También se ajustaron `polling_espera_seg` (15→60s) y `max_reintentos` (20→60) porque el SAT real tardó más que la ventana pensada para pruebas.
 
+- **Limitación operativa conocida — METADATA es notablemente menos estable que CFDI en el WS del SAT
+  (confirmado con datos propios, no solo folclore de la comunidad):** tras el fix del punto 4, un
+  segundo job de METADATA (empresa 11, julio 2026) mostró el mismo "parpadeo" ("Error no controlado")
+  en casi cada ciclo de sondeo durante más de 30 minutos — el margen de gracia lo absorbe y el job
+  sigue avanzando sano, pero el patrón es recurrente, no un incidente aislado. Los jobs de CFDI no
+  muestran este comportamiento con la misma frecuencia. Implicación para Sprint 4 (RF-SYNC-01, sync
+  nocturna): planear que las solicitudes de METADATA tomen sistemáticamente más ciclos de sondeo que
+  las de CFDI, y no alarmarse por eso — es el WS del SAT, no un bug del sistema.
+
 ### Sprint 3 — Núcleo de escritorio II: validación, resguardo y consulta (prioridad 2) ✅ Cerrado (2026-07-28)
 **Objetivo:** de paquetes a índice consultable.
 - Resguardo: parseo → `comprobantes` (`app/services/resguardo.py`), nomenclatura configurable con
@@ -93,13 +102,78 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
   (76/76), se validó contra el SAT real (endpoint público, sin e.firma) y se exportó a un `.xlsx` real
   servido por un enlace firmado — de punta a punta, sin tocar el SAT con la e.firma de producción.
 
-### Sprint 4 — Complementos del MVP (prioridad 3)
+### Sprint 4 — Complementos del MVP ✅ Código cerrado (2026-07-28)
 **Objetivo:** la plataforma trabaja sola y avisa.
-- Sync diaria por empresa con beat + recuperación de corridas perdidas (RF-SYNC-01); descarga manual UI (RF-SYNC-02).
-- Lista 69-B: descarga, versión, cruce histórico + eventos EFOS (RF-RIES-02); cancelaciones tardías por re-verificación programada (RF-RIES-01).
-- Notificaciones por correo con destinos/suscripciones y log (RF-NOT-01).
-- Pruebas: doc 06 §2.6 completa (idempotencia incluida).
-- **Hito:** una semana de corridas nocturnas sin intervención; alerta EFOS y cancelación tardía demostradas end-to-end.
+- Sync diaria por empresa (`sync_diaria_empresa`/`disparar_sync_diaria`, beat cada hora — no un cron a
+  hora fija, así una caída de `beat` se autorecupera sola el mismo día, RNF-05); ventana incremental vía
+  `jobs.origen=sync` (nunca repite un rango ya sincronizado); primera corrida arranca en "ayer", nunca un
+  backfill histórico automático (RF-SYNC-01).
+- Lista 69-B: `descargar_lista_69b` (CSV público del SAT, propio — no el caché privado de `satcfdi`),
+  versión diaria (`actualizar_lista_69b`, beat), cruce histórico contra `comprobantes.rfc_emisor` con
+  evento `efos` idempotente por `hash_detalle` (RF-RIES-02).
+- Cancelaciones tardías: enganchadas dentro de `_validar_lote_async` (Sprint 3) — solo en una transición
+  real vigente→cancelado de un mes ya cerrado (RF-RIES-01); re-verificación programada
+  (`re_verificar_vigentes`, beat diario, `configuracion.dias_re_verificacion=30`) reutiliza la misma
+  validación en lote (RF-VAL-03).
+- Notificaciones por correo: `smtplib` estándar (sin SDK propietario — Gmail Workspace/Office 365/SES/
+  SendGrid funcionan igual), destinos/suscripciones por tipo de evento, `notificacion_log`, reintento
+  seguro ante fallo SMTP (`ya_enviado` evita reenviar a un destino que ya había recibido el correo en un
+  intento anterior) (RF-NOT-01).
+- Idempotencia real de eventos: `eventos_repo.crear` usa un SAVEPOINT (`begin_nested`) + la `UNIQUE
+  (empresa_id, tipo, hash_detalle)` del DDL, no una verificación previa con condición de carrera (doc 06 §2.6).
+- Endpoints nuevos: `GET /v1/empresas/{id}/eventos`, `GET /v1/efos/estado` (global, cualquier usuario
+  autenticado), `GET`/`PUT /v1/empresas/{id}/notificaciones`. `apps/web` conectado (`listarEventos`/
+  `obtenerNotificaciones`/`guardarNotificaciones` reales, sin cambios de UI sobre lo ya construido contra
+  el mock).
+- Pruebas: `test_sync.py`, `test_efos.py`, `test_riesgo.py`, `test_notificaciones.py`,
+  `test_eventos_api.py` + extensión de `test_worker_comprobantes.py` — 139 pruebas totales, todas contra
+  dobles (nunca la red del SAT ni un servidor SMTP real, "límite de seguridad" del sprint).
+- **2 bugs reales encontrados y corregidos con la verificación en vivo (2026-07-28):**
+  1. El CSV público del 69-B trae **RFC duplicados** — 82 casos en la descarga real de hoy (14,234 filas
+     → 14,055 RFC únicos), cada uno con una fila por cambio de situación en su historial (p. ej.
+     `presunto→definitivo`, o `definitivo→sentencia_favorable` si el contribuyente ganó su caso).
+     `descargar_lista_69b` no deduplicaba, así que `crear_version` reventaba contra el
+     `UNIQUE(rfc, version_lista)` del DDL. Corregido quedándose con la última fila del archivo por RFC
+     (el orden del CSV es cronológico, así que la última fila es siempre el estado vigente).
+  2. El contenedor `beat` nunca había podido arrancar: a su bloque de entorno en `docker-compose.yml` le
+     faltaba `SIGNING_SECRET` (requerido por `Settings`, sin default) — `restart: unless-stopped` lo
+     mantenía "Up" pese a reiniciarse en bucle. Bug preexistente de sprints anteriores, no de este
+     sprint, pero bloqueaba por completo el `beat_schedule` nuevo; corregido agregando la variable.
+- **Verificado con datos reales:** tras los 2 fixes, `actualizar_lista_69b` corrió contra el CSV público
+  real y el cruce contra los 259 comprobantes indexados de la empresa 11 dio 0 coincidencias — confirmado
+  independientemente con una consulta directa (`JOIN comprobantes/lista_69b`), no solo con el resultado
+  de la tarea. `worker` registró las 9 tareas (incluidas las 4 nuevas) al reiniciar; los 3 endpoints
+  nuevos aparecen en el OpenAPI real de `api`.
+- **Pendiente de David (no bloquea el cierre del código):** disparar `sync_diaria_empresa` manualmente
+  contra la empresa 11 (consciente de que encola solicitudes reales al SAT con la e.firma de producción,
+  se deja como acción manual del usuario en vez de automatizarse en esta sesión).
+- **Addendum post-cierre (2026-07-28):** David pidió que el correo saliente (RF-NOT-01) se configure
+  desde la UI en vez de variables de entorno — cualquier correo con una contraseña de aplicación, no
+  atado a una cuenta fija del `.env`. Se agregó `configuracion_smtp` (una fila global, contraseña cifrada
+  con el mismo sobre AES-256-GCM que la e.firma en la bóveda — `app/services/notificaciones.py`
+  `guardar_config`/`resolver_credenciales`), endpoints `GET`/`PUT /v1/config/smtp` +
+  `POST /v1/config/smtp/probar` (botón de correo de prueba, admin-only), y una pestaña nueva "Correo" en
+  Configuración (`apps/web`). Las variables `SMTP_*` se retiraron de `docker-compose.yml`/`.env`.
+- **2 bugs reales más, encontrados por un efecto colateral en cadena (2026-07-28):** al arreglar el bug
+  de `beat` (arriba) para poder probar la config SMTP, `beat` arrancó de verdad por primera vez y
+  `disparar_sync_diaria` se disparó solo (ya era la hora configurada) — encoló 4 jobs `origen=sync`
+  reales para la empresa 11, los 4 terminaron en `ERROR`:
+  1. El SAT rechaza (`CodEstatus=301`, "la fecha inicial es mayor o igual a la fecha final") cualquier
+     solicitud cuya `fecha_inicial`/`fecha_final` caigan en el MISMO día calendario (confirmado
+     revisando cómo `satcfdi` serializa un `date` sin hora — ambas fechas llegan idénticas al WS). Con
+     una sync que avanza exactamente un día por corrida, esto pasaba **todos los días en régimen
+     estable**, no solo la primera vez (`ultima_ventana_sincronizada + 1 día` siempre da "ayer").
+     Corregido en dos capas: `crear_descarga` ahora rechaza explícitamente `desde == hasta` (protege
+     también la descarga manual de la UI, doc 05 §5), y `sync_diaria_empresa` ya no avanza `desde` al
+     día siguiente de la marca de agua — traslapa el último día ya cubierto (`desde = ultima`, no
+     `ultima + 1`), garantizando siempre ≥ 2 días distintos. `resguardo.indexar_job` ya es idempotente
+     por `UNIQUE(empresa_id, uuid)`, así que el traslape no duplica nada.
+  2. `ultima_ventana_sincronizada` no filtraba por estado — un job de sync que terminó en `ERROR` (como
+     los 4 de arriba) igual "adelantaba" la marca de agua, así que esa fecha se hubiera dado por
+     sincronizada sin haberse descargado nunca (ese día habría quedado saltado para siempre). Corregido
+     excluyendo `ERROR` (no exigiendo `DESCARGADO`: un job todavía `EN_PROCESO` sí debe seguir contando,
+     para no volver a pedirle al SAT la misma ventana mientras el anterior sigue en curso — otro
+     rechazo documentado, `CodEstatus=5005` "solicitud duplicada").
 
 ### Sprint 5 — Endurecimiento y cierre de Fase 2
 **Objetivo:** DoD verificada, no declarada (Gobernanza v3 mejora 3).

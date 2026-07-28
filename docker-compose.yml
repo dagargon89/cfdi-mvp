@@ -93,6 +93,10 @@ services:
       KEK_PATH: /srv/secrets/kek.dev.bin
       GOOGLE_APPLICATION_CREDENTIALS: /srv/secrets/firebase-service-account.json
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-cfdi-app}
+      # `Settings.signing_secret` no tiene default (doc 04 §3.5) — sin esto `get_settings()`
+      # revienta al importar `celery_app.py` (falla en TODO arranque de `beat`, visto en vivo
+      # al restaurar este contenedor para cargar el `beat_schedule` de Sprint 4).
+      SIGNING_SECRET: ${SIGNING_SECRET}
       ENVIRONMENT: development
     depends_on:
       mysql:

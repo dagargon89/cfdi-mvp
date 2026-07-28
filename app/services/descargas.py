@@ -55,6 +55,7 @@ async def crear_descarga(
     desde: date,
     hasta: date,
     hoy: date | None = None,
+    origen: OrigenJob = OrigenJob.MANUAL,
 ) -> list[Job]:
     if not empresa.activo:
         raise EmpresaInactivaError("La empresa está desactivada; no se pueden crear descargas.")
@@ -65,6 +66,14 @@ async def crear_descarga(
     if _efirma_vencida(efirma):
         raise FielVencidaError("La e.firma de esta empresa está vencida; el SAT rechazará la solicitud.")
 
+    if desde == hasta:
+        # Confirmado en producción (2026-07-28, sync diaria de la empresa 11): el SAT rechaza
+        # (CodEstatus=301) un rango de un solo día calendario — `FechaInicial`/`FechaFinal` se
+        # serializan como fecha sin hora (`app/sat_hub/sat_facade.py`, vía `satcfdi`), así que
+        # ambas quedan iguales y el WS las trata como "fecha inicial >= fecha final". `trocear`
+        # ya rechaza `hasta < desde`; esto cubre el caso que se le escapa (`hasta == desde`).
+        raise RangoInvalidoError("El rango debe cubrir al menos 2 días distintos — el SAT no acepta una sola fecha para inicio y fin.")
+
     ventana_meses = await config_repo.valor(db, "max_meses_ventana", 12)
     antiguedad_anios = await config_repo.valor(db, "max_anios_antiguedad", 5)
     try:
@@ -72,7 +81,7 @@ async def crear_descarga(
     except ValueError as exc:
         raise RangoInvalidoError(str(exc)) from exc
 
-    return await jobs_repo.crear_lote(db, empresa_id=empresa.empresa_id, tipo=tipo, solicitud=solicitud, ventanas=ventanas, origen=OrigenJob.MANUAL)
+    return await jobs_repo.crear_lote(db, empresa_id=empresa.empresa_id, tipo=tipo, solicitud=solicitud, ventanas=ventanas, origen=origen)
 
 
 async def signer_para_empresa(db: AsyncSession, empresa: Empresa, *, actor: str = "sistema:worker") -> Any:

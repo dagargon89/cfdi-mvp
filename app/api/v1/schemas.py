@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, EmailStr
 
-from app.models.enums import RolEmpresa, RolGlobal, SolicitudTipo, TipoJob
+from app.models.enums import RolEmpresa, RolGlobal, SolicitudTipo, TipoEvento, TipoJob
 
 
 class EfirmaResumenOut(BaseModel):
@@ -167,6 +167,66 @@ class TareaCrearOut(BaseModel):
 class TareaEstadoOut(BaseModel):
     estado: Literal["pendiente", "completada", "fallida"]
     descarga_url: str | None = None
+
+
+class EventoOut(BaseModel):
+    evento_id: int
+    tipo: str
+    detalle: dict[str, object]
+    created_at: str
+
+
+class EventoPageOut(BaseModel):
+    data: list[EventoOut]
+    page: int
+    per_page: int
+    total: int
+
+
+class Efos69bEstadoOut(BaseModel):
+    version_lista: str | None
+    registros: int
+
+
+class NotificacionDestinoIn(BaseModel):
+    correo: EmailStr
+    eventos: list[TipoEvento]
+
+
+class NotificacionesGuardarIn(BaseModel):
+    destinos: list[NotificacionDestinoIn]
+
+
+class NotificacionDestinoOut(BaseModel):
+    correo: str
+    eventos: list[str]
+
+
+class NotificacionesOut(BaseModel):
+    destinos: list[NotificacionDestinoOut]
+
+
+class ConfigSmtpOut(BaseModel):
+    configurado: bool
+    host: str | None
+    port: int | None
+    usuario: str | None
+    remitente: str | None
+    tls: bool | None
+
+
+class ConfigSmtpIn(BaseModel):
+    host: str
+    port: int = 587
+    usuario: str
+    # `None`/vacío conserva la contraseña ya guardada (editar host/remitente sin reteclearla).
+    password: str | None = None
+    remitente: str
+    tls: bool = True
+
+
+class ConfigSmtpProbarIn(ConfigSmtpIn):
+    correo_destino: EmailStr
 
 
 class BitacoraOut(BaseModel):

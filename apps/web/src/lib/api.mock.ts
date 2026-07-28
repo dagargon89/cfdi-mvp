@@ -10,6 +10,8 @@ import type {
   ApiClient,
   BitacoraEntrada,
   Comprobante,
+  ConfigSmtp,
+  ConfigSmtpIn,
   ConfiguracionItem,
   EmpresaResumen,
   EstadoJob,
@@ -43,6 +45,7 @@ interface DbComprobante {
 interface DbEvento { evento_id: number; empresa_id: number; tipo: TipoEvento; detalle: Record<string, unknown>; created_at: string }
 interface DbDestino { destino_id: number; empresa_id: number; correo: string; eventos_suscritos: TipoEvento[]; activo: 0 | 1 }
 interface DbBitacora { bitacora_id: number; actor: string; accion: string; entidad: string; detalle: Record<string, unknown>; created_at: string }
+interface DbConfigSmtp { host: string; port: number; usuario: string; password: string; remitente: string; tls: boolean }
 interface DbConfig { clave: string; ejercicio_fiscal: string; valor: string | number }
 
 const db = {
@@ -94,6 +97,7 @@ const db = {
     { clave: 'umbral_vigencia_dias', ejercicio_fiscal: 'vigente', valor: 15 },
     { clave: 'hora_sync', ejercicio_fiscal: 'vigente', valor: '02:00' },
   ] as DbConfig[],
+  configSmtp: null as DbConfigSmtp | null,
 };
 
 const CONFIG_DESC: Record<string, string> = {
@@ -470,5 +474,30 @@ export const apiMock: ApiClient = {
     const u = requireUsuario();
     if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede ver esta pantalla.');
     return paginate(db.bitacora as BitacoraEntrada[], f?.page);
+  },
+
+  async obtenerConfigSmtp(): Promise<ConfigSmtp> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede ver esta pantalla.');
+    const c = db.configSmtp;
+    if (!c) return { configurado: false, host: null, port: null, usuario: null, remitente: null, tls: null };
+    return { configurado: true, host: c.host, port: c.port, usuario: c.usuario, remitente: c.remitente, tls: c.tls };
+  },
+
+  async guardarConfigSmtp(input: ConfigSmtpIn): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede realizar esta acción.');
+    const password = input.password || db.configSmtp?.password;
+    if (!password) throw new ApiError(422, 'SMTP_SIN_CONTRASENA', 'Se requiere una contraseña de aplicación la primera vez que se configura el correo.');
+    db.configSmtp = { host: input.host, port: input.port, usuario: input.usuario, password, remitente: input.remitente, tls: input.tls };
+    logBitacora(u.correo, 'guardar_config_smtp', 'config_smtp:1', { host: input.host, usuario: input.usuario });
+  },
+
+  async probarConfigSmtp(input: ConfigSmtpIn & { correo_destino: string }): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede realizar esta acción.');
+    const password = input.password || db.configSmtp?.password;
+    if (!password) throw new ApiError(422, 'SMTP_SIN_CONTRASENA', 'Escribe la contraseña de aplicación para probar (todavía no hay ninguna guardada).');
+    // Mock: no hay servidor SMTP real que probar — simula éxito siempre.
   },
 };

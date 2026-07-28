@@ -1,9 +1,10 @@
-// Implementación HTTP real contra el backend FastAPI — cubre lo que Sprint 0-3 construyó
+// Implementación HTTP real contra el backend FastAPI — cubre lo que Sprint 0-4 construyó
 // (sesión, empresas, bóveda, usuarios admin, bitácora, descargas/jobs, comprobantes/validar/
-// export). Todo lo demás (alertas, notificaciones, config) no tiene endpoint real todavía —
-// lib/client.ts combina este objeto con api.mock.ts para esos métodos, no lo uses solo.
+// export, eventos/EFOS/notificaciones, config de correo saliente). El listado genérico de
+// `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
+// con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, BitacoraEntrada, Comprobante, EmpresaResumen, Job, Page, UsuarioAdmin } from './api';
+import type { ApiClient, BitacoraEntrada, Comprobante, ConfigSmtp, EmpresaResumen, Evento, Job, Page, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -79,6 +80,12 @@ type ApiClientHttpSubset = Pick<
   | 'descargarLoteZip'
   | 'listarUsuarios'
   | 'listarBitacora'
+  | 'listarEventos'
+  | 'obtenerNotificaciones'
+  | 'guardarNotificaciones'
+  | 'obtenerConfigSmtp'
+  | 'guardarConfigSmtp'
+  | 'probarConfigSmtp'
 >;
 
 export const apiHttp: ApiClientHttpSubset = {
@@ -162,4 +169,23 @@ export const apiHttp: ApiClientHttpSubset = {
     const params = f?.page ? `?page=${f.page}` : '';
     return request<Page<BitacoraEntrada>>(`/v1/bitacora${params}`);
   },
+
+  listarEventos: (empresaId, f) => {
+    const params = new URLSearchParams();
+    if (f?.tipo) params.set('tipo', f.tipo);
+    if (f?.page) params.set('page', String(f.page));
+    const qs = params.toString();
+    return request<Page<Evento>>(`/v1/empresas/${empresaId}/eventos${qs ? `?${qs}` : ''}`);
+  },
+
+  obtenerNotificaciones: (empresaId) => request(`/v1/empresas/${empresaId}/notificaciones`),
+
+  guardarNotificaciones: (empresaId, destinos) =>
+    request(`/v1/empresas/${empresaId}/notificaciones`, { method: 'PUT', body: JSON.stringify({ destinos }) }),
+
+  obtenerConfigSmtp: () => request<ConfigSmtp>('/v1/config/smtp'),
+
+  guardarConfigSmtp: (input) => request('/v1/config/smtp', { method: 'PUT', body: JSON.stringify(input) }),
+
+  probarConfigSmtp: (input) => request('/v1/config/smtp/probar', { method: 'POST', body: JSON.stringify(input) }),
 };

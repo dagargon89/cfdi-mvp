@@ -81,6 +81,16 @@ async def db(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+@pytest.fixture(autouse=True)
+def _sin_notificaciones_reales(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ningún test dispara un envío real por Celery/SMTP (doc 07 Sprint 4, "límite de
+    seguridad") — los tests que sí quieren verificar el encolado lo sobreescriben ellos
+    mismos dentro del propio test (monkeypatch por test gana sobre este autouse)."""
+    import app.services.notificaciones as notificaciones_service
+
+    monkeypatch.setattr(notificaciones_service, "encolar_si_nuevo", lambda evento: None)
+
+
 def _fake_verificar_id_token(authorization: str | None) -> str:
     """Firebase falso: el propio valor del Bearer ES el `firebase_uid` (sin red real)."""
     if not authorization or not authorization.startswith("Bearer "):

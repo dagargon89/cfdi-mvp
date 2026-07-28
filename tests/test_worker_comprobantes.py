@@ -5,6 +5,7 @@ Celery ni HTTP. `consultar_estatus_xml` se reemplaza por un doble: nunca toca el
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta
 
 import openpyxl
 import pytest
@@ -13,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.models.comprobante import Comprobante
-from app.models.enums import EstatusCfdi
+from app.models.enums import EstatusCfdi, TipoEvento
+from app.repositories import eventos as eventos_repo
 from app.worker import tasks as worker_tasks
 from tests.factories import crear_comprobante, crear_empresa
 
@@ -177,3 +179,57 @@ async def test_descargar_zip_lote_omite_comprobante_sin_xml(db: AsyncSession) ->
     resultado = await worker_tasks._descargar_zip_lote_async(empresa.empresa_id, [c_ok.comprobante_id, c_sin_archivo.comprobante_id])
     assert resultado["solicitados"] == 2
     assert resultado["incluidos"] == 1  # el que no tiene XML se omite, no aborta el lote
+
+
+# --------------------------------------------------------------------------- #
+# Cancelación tardía (RF-RIES-01) — enganchada dentro de `_validar_lote_async`: solo
+# cuando la transición real es vigente→cancelado (no la primera verificación de un CFDI).
+# --------------------------------------------------------------------------- #
+
+
+async def test_validar_lote_cancelacion_tardia_mes_anterior_genera_evento(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_tasks, "consultar_estatus_xml", lambda xml: "Cancelado")
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    ruta = _escribir_xml(empresa.empresa_id)
+    # 40 días siempre cruza al menos un mes calendario completo (ningún mes tiene más de 31 días).
+    hace_40_dias = datetime.now() - timedelta(days=40)
+    c = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="55555555-5555-5555-5555-555555555555", xml_path=ruta, estatus=EstatusCfdi.VIGENTE, fecha_emision=hace_40_dias
+    )
+
+    await worker_tasks._validar_lote_async(empresa.empresa_id, [c.comprobante_id])
+
+    eventos, total = await eventos_repo.listar(db, empresa.empresa_id, tipo=TipoEvento.CANCELACION_TARDIA)
+    assert total == 1
+    assert eventos[0].detalle["uuid"] == c.uuid
+
+
+async def test_validar_lote_cancelacion_mes_en_curso_no_genera_evento(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_tasks, "consultar_estatus_xml", lambda xml: "Cancelado")
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    ruta = _escribir_xml(empresa.empresa_id)
+    c = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="66666666-6666-6666-6666-666666666666", xml_path=ruta, estatus=EstatusCfdi.VIGENTE, fecha_emision=datetime.now()
+    )
+
+    await worker_tasks._validar_lote_async(empresa.empresa_id, [c.comprobante_id])
+
+    _, total = await eventos_repo.listar(db, empresa.empresa_id, tipo=TipoEvento.CANCELACION_TARDIA)
+    assert total == 0
+
+
+async def test_validar_lote_ya_cancelado_no_genera_evento_de_nuevo(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No es una transición vigente→cancelado (ya estaba cancelado) — no cuenta como
+    cancelación tardía, aunque la fecha de emisión sea de un mes anterior."""
+    monkeypatch.setattr(worker_tasks, "consultar_estatus_xml", lambda xml: "Cancelado")
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    ruta = _escribir_xml(empresa.empresa_id)
+    hace_40_dias = datetime.now() - timedelta(days=40)
+    c = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="77777777-7777-7777-7777-777777777777", xml_path=ruta, estatus=EstatusCfdi.CANCELADO, fecha_emision=hace_40_dias
+    )
+
+    await worker_tasks._validar_lote_async(empresa.empresa_id, [c.comprobante_id])
+
+    _, total = await eventos_repo.listar(db, empresa.empresa_id, tipo=TipoEvento.CANCELACION_TARDIA)
+    assert total == 0

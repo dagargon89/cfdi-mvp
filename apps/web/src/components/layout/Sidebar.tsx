@@ -58,7 +58,7 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
   if (usuario?.rol_global === 'admin') {
     items.push(
       { key: 'usuarios', label: 'Usuarios', Icon: NAV_ICON.usuarios, href: '/admin/usuarios', active: path === '/admin/usuarios' },
-      { key: 'admin', label: 'Config · Bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') },
+      { key: 'admin', label: 'Config · Bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') || path.startsWith('/admin/correo') },
     );
   }
 

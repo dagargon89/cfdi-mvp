@@ -31,7 +31,7 @@ Pipeline: **e.firma en bóveda → descarga masiva (WS SOAP, asíncrona) → val
 |---|---|---|
 | 0 — Documentación (00–09) | ✅ Completa (2026-07-27) | Sí |
 | 1 — Demo (prototipo externo + validación + freeze) | ✅ Cerrada (2026-07-27) | Sí — ver README.md |
-| 2 — Backend + apps/web (MVP) | 🟡 `apps/web` completo · backend Sprint 0-3 (cimientos, seguridad, descarga masiva, resguardo/validación/consulta) cerrados 2026-07-28, verificados con datos reales · Sprints 4-5 pendientes | Parcial |
+| 2 — Backend + apps/web (MVP) | 🟡 `apps/web` completo · backend Sprint 0-4 (cimientos, seguridad, descarga masiva, resguardo/validación/consulta, sync diaria/EFOS/cancelaciones tardías/notificaciones) cerrados 2026-07-28, verificados con datos reales · Sprint 5 pendiente | Parcial |
 
 **Regla de gate:** no generes código ni entregables de la fase N+1 si la fase N tiene "DoD verificada: No". El demo se prototipó en Claude Design (`demo-ux/09_demo_ux_guia.md`) y, tras el cierre de Fase 1, se tradujo 1:1 a `apps/web` — el contrato `ApiClient` (doc 05 §9) quedó congelado en ese momento.
 
@@ -79,7 +79,7 @@ python -m app.scripts.generar_kek_dev      # KEK de desarrollo (una sola vez)
 alembic upgrade head                       # migraciones (DDL doc 03)
 uvicorn app.main:app --reload              # http://localhost:8000 (OpenAPI en /docs)
 celery -A app.worker.celery_app worker -l info   # workers SAT (`ejecutar_job` desde Sprint 2)
-celery -A app.worker.celery_app beat -l info     # scheduler (Sprint 4+, aún sin schedule)
+celery -A app.worker.celery_app beat -l info     # scheduler (Sprint 4: sync diaria/EFOS/re-verificación)
 
 # Frontend
 cd apps/web && npm install && npm run dev  # http://localhost:5173

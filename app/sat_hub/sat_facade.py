@@ -223,3 +223,57 @@ def consultar_estatus_xml(xml: bytes) -> str:
     sat = SAT()  # sin signer: status es endpoint público
     resp = sat.status(CFDI.from_string(xml))
     return str(resp.get("Estado", "")).strip()
+
+
+# Situación tal cual la publica el CSV del SAT (mismos literales que `satcfdi.pacs.TaxpayerStatus`,
+# que solo consulta un RFC a la vez contra su propio caché privado en archivo — no sirve para
+# bulk-download) → valor de `app.models.enums.SituacionEfos` (RF-RIES-02).
+_SITUACION_A_ENUM = {
+    "Presunto": "presunto",
+    "Definitivo": "definitivo",
+    "Desvirtuado": "desvirtuado",
+    "Sentencia Favorable": "sentencia_favorable",
+}
+
+LISTA_69B_URL = "http://omawww.sat.gob.mx/cifras_sat/Documents/Listado_Completo_69-B.csv"
+
+
+def descargar_lista_69b() -> list[tuple[str, str]]:
+    """Descarga y parsea el CSV público del padrón 69-B completo (RF-RIES-02).
+
+    Endpoint público del SAT, sin firma/e.firma — mismo espíritu que `consultar_estatus_xml`.
+    No se usa `satcfdi.pacs.sat.SAT.list_69b()` porque solo consulta un RFC a la vez contra una
+    función privada con caché en un archivo local que este proyecto no controla; el CSV es
+    público y su parseo es sencillo, así que se hace aquí directamente (único punto de
+    contacto con el SAT para este flujo).
+
+    Devuelve una lista de ``(rfc, situacion)`` — ``situacion`` ya normalizada al valor de
+    `SituacionEfos` (p. ej. "definitivo"), no al literal en español del CSV. Un mismo RFC
+    puede aparecer varias veces en el archivo real del SAT (una fila por cada cambio de
+    situación en su historial — p. ej. "presunto" y luego, más abajo, "definitivo"; o
+    "definitivo" y luego "sentencia_favorable" si el contribuyente ganó su caso). Solo
+    interesa el estado VIGENTE, así que se deduplica quedándose con la última fila del
+    archivo para cada RFC (el orden del CSV es cronológico: la entrada más reciente de un
+    RFC siempre queda más abajo que las anteriores) — confirmado con el archivo real
+    (82 RFC repetidos en la descarga de producción del 2026-07-28).
+    """
+    import csv
+    from itertools import islice
+
+    import requests
+
+    respuesta = requests.get(LISTA_69B_URL, headers={"User-Agent": "hub-cfdi/1.0"}, timeout=30)
+    respuesta.raise_for_status()
+    lineas = str(respuesta.content, "windows-1250").splitlines(keepends=True)
+    lector = csv.reader(islice(lineas, 3, None), delimiter=",", quotechar='"')
+
+    por_rfc: dict[str, str] = {}
+    for fila in lector:
+        if len(fila) < 4:
+            continue
+        rfc, situacion_cruda = fila[1].strip(), fila[3].strip()
+        situacion = _SITUACION_A_ENUM.get(situacion_cruda)
+        if situacion is None:
+            continue  # fila con una situación que no reconocemos — se ignora, no se rompe el cruce
+        por_rfc[rfc] = situacion  # una fila posterior del mismo RFC sobreescribe a la anterior
+    return list(por_rfc.items())

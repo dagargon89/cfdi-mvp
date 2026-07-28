@@ -40,6 +40,7 @@ export function App() {
                       <Route path="usuarios" element={<UsuariosPage />} />
                       <Route path="config" element={<ConfigBitacoraPage />} />
                       <Route path="bitacora" element={<ConfigBitacoraPage />} />
+                      <Route path="correo" element={<ConfigBitacoraPage />} />
                     </Route>
                   </Route>
                   {/* Rutas de empresa: EmpresaProvider va ANTES de AppShell para que el Sidebar

@@ -24,7 +24,7 @@ import os
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -33,12 +33,16 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
-from app.models.enums import EstadoJob, EstatusCfdi
+from app.models.enums import EstadoJob, EstatusCfdi, OrigenJob, ResultadoNotificacion, SolicitudTipo, TipoEvento, TipoJob
+from app.models.evento import Evento
 from app.models.job import Job
 from app.repositories import comprobantes as comprobantes_repo
 from app.repositories import configuracion as config_repo
 from app.repositories import empresas as empresas_repo
+from app.repositories import eventos as eventos_repo
 from app.repositories import jobs as jobs_repo
+from app.repositories import lista_69b as lista_69b_repo
+from app.repositories import notificaciones as notificaciones_repo
 from app.sat_hub.domain import Job as DominioJob
 from app.sat_hub.domain import Solicitud as DominioSolicitud
 from app.sat_hub.domain import Tipo as DominioTipo
@@ -51,10 +55,13 @@ from app.sat_hub.sat_facade import (
     ResultadoVerificacion,
     SatFacade,
     consultar_estatus_xml,
+    descargar_lista_69b,
 )
+from app.services import notificaciones as notificaciones_service
 from app.services import representaciones
 from app.services import resguardo
-from app.services.descargas import EfirmaAusenteError, signer_para_empresa
+from app.services import riesgo as riesgo_service
+from app.services.descargas import EfirmaAusenteError, EmpresaInactivaError, RangoInvalidoError, crear_descarga, signer_para_empresa
 from app.worker.celery_app import celery_app
 
 logger = logging.getLogger("app.worker")
@@ -302,8 +309,13 @@ async def _validar_lote_async(empresa_id: int, comprobante_ids: list[int]) -> di
                 with open(os.path.join(storage_root, c.xml_path), "rb") as f:
                     xml_bytes = f.read()
                 estado = consultar_estatus_xml(xml_bytes)
+                estatus_anterior = c.estatus
                 c.estatus = EstatusCfdi.VIGENTE if estado.strip().lower() == "vigente" else EstatusCfdi.CANCELADO
                 c.estatus_verificado_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                if estatus_anterior is EstatusCfdi.VIGENTE and c.estatus is EstatusCfdi.CANCELADO:
+                    # RF-RIES-01: solo nos interesa la cancelación de un CFDI que YA se había
+                    # dado por vigente antes — no la primera verificación de uno recién bajado.
+                    await riesgo_service.registrar_cancelacion_tardia(db, c)
                 exitosos += 1
             except Exception as exc:  # noqa: BLE001 — RF-VAL-02: un CFDI no consultable no aborta el lote
                 logger.warning("validar_lote: no se pudo validar el comprobante %s: %s", c.comprobante_id, exc)
@@ -429,3 +441,227 @@ async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int])
 @celery_app.task(name="app.worker.tasks.descargar_zip_lote")  # type: ignore[untyped-decorator]
 def descargar_zip_lote(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
     return asyncio.run(_descargar_zip_lote_async(empresa_id, comprobante_ids))
+
+
+# --------------------------------------------------------------------------- #
+# Sincronización diaria (RF-SYNC-01, RNF-05) — `disparar_sync_diaria` corre cada hora
+# (beat) y decide si ya es momento de encolar `sync_diaria_empresa` por empresa activa;
+# nunca un cron a una hora exacta, así una caída de `beat` se autorecupera solo (basta con
+# que vuelva a correr en CUALQUIER hora >= la configurada, el mismo día).
+# --------------------------------------------------------------------------- #
+
+# emitido/recibido × CFDI/Metadata (doc 01 §1.3) — las 4 combinaciones que cubre RF-DESC-01.
+_COMBINACIONES_SYNC: tuple[tuple[TipoJob, SolicitudTipo], ...] = (
+    (TipoJob.EMITIDO, SolicitudTipo.CFDI),
+    (TipoJob.EMITIDO, SolicitudTipo.METADATA),
+    (TipoJob.RECIBIDO, SolicitudTipo.CFDI),
+    (TipoJob.RECIBIDO, SolicitudTipo.METADATA),
+)
+
+
+async def _sync_diaria_empresa_async(empresa_id: int) -> dict[str, Any]:
+    ayer = date.today() - timedelta(days=1)
+    job_ids: list[int] = []
+    evento_generado: str | None = None
+    async with SessionLocal() as db:
+        empresa = await empresas_repo.por_id(db, empresa_id)
+        if empresa is None or not empresa.activo:
+            return {"jobs_creados": 0, "evento": None}
+
+        for tipo, solicitud in _COMBINACIONES_SYNC:
+            ultima = await jobs_repo.ultima_ventana_sincronizada(db, empresa_id, tipo, solicitud)
+            # `desde = ultima` (NO `ultima + 1 día`): confirmado en producción (2026-07-28) que
+            # el SAT rechaza (CodEstatus=301, "fecha inicial >= fecha final") cualquier solicitud
+            # cuya `fecha_inicial`/`fecha_final` caigan en el MISMO día calendario — y con una
+            # sync que avanza exactamente un día por corrida, `ultima + 1 día` == `ayer` TODOS
+            # los días en régimen estable, no solo la primera vez. Se vuelve a incluir el último
+            # día ya sincronizado (1 día de traslape) para garantizar siempre ≥ 2 días distintos;
+            # `resguardo.indexar_job` ya es idempotente por `UNIQUE(empresa_id, uuid)`, así que
+            # reprocesar ese día no duplica nada, solo re-consulta un poco de más al SAT.
+            # Primera vez (`ultima is None`): arranca 2 días atrás de "ayer" — sigue sin disparar
+            # un backfill histórico automático, eso ya existe como acción manual consciente en la UI.
+            desde = ultima if ultima is not None else ayer - timedelta(days=1)
+            if desde >= ayer:
+                continue  # ya sincronizado hasta ayer (o más) en esta combinación; nada que hacer
+            try:
+                jobs = await crear_descarga(db, empresa, tipo=tipo, solicitud=solicitud, desde=desde, hasta=ayer, origen=OrigenJob.SYNC)
+                job_ids.extend(j.job_id for j in jobs)
+            except (EfirmaAusenteError, FielVencidaError) as exc:
+                # Empresarial, no por combinación: no tiene caso seguir probando las otras 3.
+                evento = await eventos_repo.crear(db, empresa_id, TipoEvento.EFIRMA_POR_VENCER, {"mensaje": str(exc)})
+                notificaciones_service.encolar_si_nuevo(evento)
+                evento_generado = "efirma_por_vencer" if evento is not None else None
+                break
+            except (EmpresaInactivaError, RangoInvalidoError) as exc:
+                logger.warning("sync_diaria_empresa: %s (empresa %s, %s/%s).", exc, empresa_id, tipo.value, solicitud.value)
+                continue
+        await db.commit()
+
+    for job_id in job_ids:
+        ejecutar_job.delay(job_id)
+    return {"jobs_creados": len(job_ids), "evento": evento_generado}
+
+
+@celery_app.task(name="app.worker.tasks.sync_diaria_empresa")  # type: ignore[untyped-decorator]
+def sync_diaria_empresa(empresa_id: int) -> dict[str, Any]:
+    return asyncio.run(_sync_diaria_empresa_async(empresa_id))
+
+
+async def _disparar_sync_diaria_async() -> dict[str, Any]:
+    hoy = date.today()
+    async with SessionLocal() as db:
+        hora_sync = str(await config_repo.valor(db, "hora_sync", "02:00"))
+        try:
+            hora_objetivo = int(hora_sync.split(":")[0])
+        except ValueError:
+            hora_objetivo = 2
+
+        # `< ` (no `!=`): si el beat estuvo caído durante la hora configurada, la siguiente
+        # vez que despierte (cualquier hora posterior, mismo día) igual dispara (RNF-05).
+        if datetime.now().hour < hora_objetivo:
+            return {"disparado": False, "razon": "fuera_de_hora"}
+        if await eventos_repo.existe_tipo_hoy_global(db, TipoEvento.RESUMEN_SYNC, hoy):
+            return {"disparado": False, "razon": "ya_corrio_hoy"}
+
+        empresas = await empresas_repo.listar_activas(db)
+        if not empresas:
+            return {"disparado": False, "razon": "sin_empresas_activas"}
+
+        # El evento "resumen_sync" vive bajo la primera empresa activa (el DDL exige un
+        # empresa_id en `eventos`, doc 03 §2.2) — es solo el ancla de idempotencia diaria del
+        # disparador; el conteo real de jobs por empresa se ve en `jobs.origen=sync`.
+        await eventos_repo.crear(db, empresas[0].empresa_id, TipoEvento.RESUMEN_SYNC, {"fecha": hoy.isoformat(), "empresas": len(empresas)})
+        await db.commit()
+
+    for empresa in empresas:
+        sync_diaria_empresa.delay(empresa.empresa_id)
+    return {"disparado": True, "empresas": len(empresas)}
+
+
+@celery_app.task(name="app.worker.tasks.disparar_sync_diaria")  # type: ignore[untyped-decorator]
+def disparar_sync_diaria() -> dict[str, Any]:
+    return asyncio.run(_disparar_sync_diaria_async())
+
+
+# --------------------------------------------------------------------------- #
+# EFOS 69-B (RF-RIES-02) — tarea diaria (beat): descarga el CSV público, guarda una
+# versión nueva solo si cambió respecto a la última, y siempre re-cruza (aunque la lista
+# no haya cambiado puede haber comprobantes nuevos indexados desde el último cruce).
+# --------------------------------------------------------------------------- #
+
+
+async def _actualizar_lista_69b_async() -> dict[str, Any]:
+    filas = descargar_lista_69b()
+    hoy = date.today()
+    async with SessionLocal() as db:
+        anterior = await lista_69b_repo.version_mas_reciente(db)
+        cambio = True
+        if anterior is not None:
+            filas_anteriores = await lista_69b_repo.rfcs_de_version(db, anterior)
+            cambio = {(f.rfc, f.situacion.value) for f in filas_anteriores} != set(filas)
+
+        version_usada = anterior
+        if cambio or anterior is None:
+            await lista_69b_repo.crear_version(db, hoy, filas)
+            version_usada = hoy
+        await db.commit()
+
+        creados = await riesgo_service.cruzar_efos(db, version_usada) if version_usada is not None else 0
+        await db.commit()
+    return {"version": version_usada.isoformat() if version_usada else None, "registros": len(filas), "cambio": cambio, "eventos_creados": creados}
+
+
+@celery_app.task(name="app.worker.tasks.actualizar_lista_69b")  # type: ignore[untyped-decorator]
+def actualizar_lista_69b() -> dict[str, Any]:
+    return asyncio.run(_actualizar_lista_69b_async())
+
+
+# --------------------------------------------------------------------------- #
+# Re-verificación programada de vigencia (RF-VAL-03) — tarea diaria (beat): reutiliza
+# `_validar_lote_async` (ya usada por el endpoint manual de Sprint 3), sin duplicar lógica.
+# --------------------------------------------------------------------------- #
+
+
+async def _re_verificar_vigentes_async() -> dict[str, Any]:
+    async with SessionLocal() as db:
+        dias = int(await config_repo.valor(db, "dias_re_verificacion", 30))
+        empresas = await empresas_repo.listar_activas(db)
+    limite = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=dias)
+
+    total_revalidados = 0
+    for empresa in empresas:
+        async with SessionLocal() as db:
+            ids = await comprobantes_repo.ids_vigentes_por_revalidar(db, empresa.empresa_id, limite)
+        if not ids:
+            continue
+        resultado = await _validar_lote_async(empresa.empresa_id, ids)
+        total_revalidados += resultado["total"]
+    return {"empresas": len(empresas), "comprobantes_revalidados": total_revalidados}
+
+
+@celery_app.task(name="app.worker.tasks.re_verificar_vigentes")  # type: ignore[untyped-decorator]
+def re_verificar_vigentes() -> dict[str, Any]:
+    return asyncio.run(_re_verificar_vigentes_async())
+
+
+# --------------------------------------------------------------------------- #
+# Envío de notificaciones (RF-NOT-01) — se encola desde `app.services.notificaciones.
+# encolar_si_nuevo` cada vez que `eventos_repo.crear` produce un evento NUEVO (nunca en un
+# no-op de idempotencia). Un fallo SMTP reintenta la tarea completa (doc 06 §2.6); antes de
+# reenviar a cada destino se comprueba `ya_enviado` para no duplicar un correo que ya había
+# salido bien en un intento anterior.
+# --------------------------------------------------------------------------- #
+
+
+async def _enviar_notificacion_async(evento_id: int) -> dict[str, Any]:
+    enviados = 0
+    fallo_retryable = False
+    async with SessionLocal() as db:
+        evento = await db.get(Evento, evento_id)
+        if evento is None:
+            logger.warning("enviar_notificacion: el evento %s ya no existe.", evento_id)
+            return {"enviados": 0, "fallo_retryable": False}
+
+        destinos = await notificaciones_repo.destinos_suscritos(db, evento.empresa_id, evento.tipo)
+        if not destinos:
+            return {"enviados": 0, "fallo_retryable": False}
+
+        # Credenciales resueltas UNA vez por invocación (no una vez por destinatario) —
+        # `resolver_credenciales` descifra la contraseña con la bóveda, no vale la pena
+        # repetirlo N veces para N destinos del mismo evento.
+        try:
+            credenciales = await notificaciones_service.resolver_credenciales(db)
+        except notificaciones_service.SmtpNoConfiguradoError as exc:
+            for destino in destinos:
+                if not await notificaciones_repo.ya_enviado(db, evento_id, destino.correo):
+                    await notificaciones_repo.registrar_envio(db, evento_id, destino.correo, ResultadoNotificacion.FALLIDO, str(exc))
+            await db.commit()
+            return {"enviados": 0, "fallo_retryable": False}
+
+        for destino in destinos:
+            if await notificaciones_repo.ya_enviado(db, evento_id, destino.correo):
+                continue
+            try:
+                notificaciones_service.enviar_correo(destino, evento, credenciales)
+            except Exception as exc:  # noqa: BLE001 — smtplib.SMTPException y similares, sí son transitorios
+                await notificaciones_repo.registrar_envio(db, evento_id, destino.correo, ResultadoNotificacion.FALLIDO, str(exc)[:500])
+                fallo_retryable = True
+                continue
+            await notificaciones_repo.registrar_envio(db, evento_id, destino.correo, ResultadoNotificacion.ENVIADO)
+            enviados += 1
+        await db.commit()
+    return {"enviados": enviados, "fallo_retryable": fallo_retryable}
+
+
+@celery_app.task(  # type: ignore[untyped-decorator]
+    bind=True,
+    name="app.worker.tasks.enviar_notificacion",
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=600,
+)
+def enviar_notificacion(self, evento_id: int) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    resultado = asyncio.run(_enviar_notificacion_async(evento_id))
+    if resultado["fallo_retryable"]:
+        raise self.retry(countdown=60)
+    return resultado

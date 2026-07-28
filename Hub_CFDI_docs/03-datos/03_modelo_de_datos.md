@@ -163,7 +163,15 @@ Destinatarios por empresa (correos libres) con `eventos_suscritos SET(...)` (RF-
 Append-only (RF-BIT-01): `actor` (usuario o `worker`), `accion`, `entidad` (`tipo:id`), `detalle JSON`, `created_at`. Sin UPDATE/DELETE (privilegios del usuario MySQL de la app lo impiden).
 
 ### `configuracion`
-Clave-valor JSON versionada por `ejercicio_fiscal` (RF-CFG-01): `max_meses_ventana`, `max_anios_antiguedad`, `polling_espera_seg`, `max_reintentos`, `umbral_vigencia_dias`, `hora_sync`.
+Clave-valor JSON versionada por `ejercicio_fiscal` (RF-CFG-01): `max_meses_ventana`, `max_anios_antiguedad`, `polling_espera_seg`, `max_reintentos`, `umbral_vigencia_dias`, `hora_sync`, `dias_re_verificacion`.
+
+### `configuracion_smtp`
+Añadida post-freeze (2026-07-28, RF-NOT-01) — correo saliente para notificaciones, gestionado desde
+Configuración → Correo en vez de variable de entorno. Una sola fila global (`config_id` autoincrement,
+sin FK — el `guardar` reemplaza la fila existente, misma semántica que `efirmas.upsert`). `host`,
+`port`, `usuario`, `remitente`, `tls`; `password_cifrada`/`dek_envuelta` con el mismo sobre AES-256-GCM
+que protege la e.firma en la bóveda — nunca la contraseña de aplicación en claro, y nunca se regresa por
+la API una vez guardada.
 
 ---
 

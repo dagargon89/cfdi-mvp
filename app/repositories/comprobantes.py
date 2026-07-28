@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +92,19 @@ async def ids_no_verificados(db: AsyncSession, empresa_id: int) -> list[int]:
 
 async def ids_todos(db: AsyncSession, empresa_id: int) -> list[int]:
     result = await db.scalars(select(Comprobante.comprobante_id).where(Comprobante.empresa_id == empresa_id))
+    return list(result.all())
+
+
+async def ids_vigentes_por_revalidar(db: AsyncSession, empresa_id: int, antes_de: datetime) -> list[int]:
+    """RF-VAL-03: comprobantes `vigente` cuya última verificación es más vieja que
+    `configuracion.dias_re_verificacion` — candidatos de la re-verificación programada."""
+    result = await db.scalars(
+        select(Comprobante.comprobante_id).where(
+            Comprobante.empresa_id == empresa_id,
+            Comprobante.estatus == EstatusCfdi.VIGENTE,
+            or_(Comprobante.estatus_verificado_at.is_(None), Comprobante.estatus_verificado_at < antes_de),
+        )
+    )
     return list(result.all())
 
 

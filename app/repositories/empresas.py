@@ -37,6 +37,12 @@ async def por_id(db: AsyncSession, empresa_id: int) -> Empresa | None:
     return await db.get(Empresa, empresa_id)
 
 
+async def listar_activas(db: AsyncSession) -> list[Empresa]:
+    """Usado por `disparar_sync_diaria` (RF-SYNC-01) para encolar una sync por empresa."""
+    result = await db.scalars(select(Empresa).where(Empresa.activo.is_(True)).order_by(Empresa.empresa_id))
+    return list(result.all())
+
+
 async def por_rfc(db: AsyncSession, rfc: str) -> Empresa | None:
     result: Empresa | None = await db.scalar(select(Empresa).where(Empresa.rfc == rfc))
     return result

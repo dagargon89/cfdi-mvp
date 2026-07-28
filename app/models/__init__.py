@@ -7,6 +7,7 @@ que Alembic autogenere/compare correctamente).
 from app.models.bitacora import Bitacora
 from app.models.comprobante import Comprobante
 from app.models.configuracion import Configuracion
+from app.models.configuracion_smtp import ConfiguracionSmtp
 from app.models.efirma import Efirma
 from app.models.empresa import Empresa
 from app.models.evento import Evento
@@ -30,4 +31,5 @@ __all__ = [
     "NotificacionLog",
     "Bitacora",
     "Configuracion",
+    "ConfiguracionSmtp",
 ]

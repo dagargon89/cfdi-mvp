@@ -73,6 +73,27 @@ async def crear_lote(
     return jobs
 
 
+async def ultima_ventana_sincronizada(db: AsyncSession, empresa_id: int, tipo: TipoJob, solicitud: SolicitudTipo) -> date | None:
+    """`fecha_final` más reciente de un job `origen=SYNC` con esos parámetros (RF-SYNC-01) —
+    la siguiente corrida traslapa desde aquí. Excluye `ERROR` (no cualquier otro): un job de
+    sync que terminó en `ERROR` nunca llegó a bajar nada, así que esa fecha no puede darse por
+    sincronizada (si contara, ese día quedaría saltado para siempre — visto en producción
+    2026-07-28, donde 4 jobs de sync fallaron por CodEstatus=301 antes de este fix). Pero
+    NUEVO/SOLICITADO/EN_PROCESO/TERMINADA sí cuentan: si el job de ayer sigue en proceso
+    (el SAT puede tardar), no hay que volver a pedirle la misma ventana hoy — pediría una
+    solicitud duplicada exacta, que el SAT también rechaza (CodEstatus=5005)."""
+    resultado: date | None = await db.scalar(
+        select(func.max(Job.fecha_final)).where(
+            Job.empresa_id == empresa_id,
+            Job.tipo == tipo,
+            Job.solicitud == solicitud,
+            Job.origen == OrigenJob.SYNC,
+            Job.estado != EstadoJob.ERROR,
+        )
+    )
+    return resultado
+
+
 async def por_id_de_empresa(db: AsyncSession, empresa_id: int, job_id: int) -> Job | None:
     result: Job | None = await db.scalar(select(Job).where(Job.job_id == job_id, Job.empresa_id == empresa_id))
     return result
