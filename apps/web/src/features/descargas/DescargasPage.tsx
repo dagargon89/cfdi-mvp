@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { EstadoChip } from '@/components/ui/EstadoChip';
+import { Paginador } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -24,7 +25,8 @@ export function DescargasPage() {
   const { job: jobParam } = useParams();
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion() });
-  const { data: jobsPage } = useJobs(empresa.empresa_id);
+  const [pagina, setPagina] = useState(1);
+  const { data: jobsPage } = useJobs(empresa.empresa_id, pagina);
   const jobs = jobsPage?.data ?? [];
 
   const [tipo, setTipo] = useState<'recibido' | 'emitido'>('recibido');
@@ -41,6 +43,7 @@ export function DescargasPage() {
     mutationFn: () => api.crearDescarga(empresa.empresa_id, { tipo, solicitud, desde, hasta, simVencidaDemo: DEMO_CONTROLS ? simVencida : undefined }),
     onSuccess: (r) => {
       setError(null);
+      setPagina(1); // los jobs nuevos aparecen primero (orden desc por job_id)
       qc.invalidateQueries({ queryKey: ['jobs', empresa.empresa_id] });
       toast(`${r.ventanas} solicitud(es) enviadas al SAT`, 'ok');
     },
@@ -188,6 +191,8 @@ export function DescargasPage() {
         )}
 
         {jobs.length === 0 && <div className="p-8 text-center text-text-muted text-[13px]">Aún no hay descargas para esta empresa.</div>}
+
+        {jobsPage && <Paginador page={pagina} perPage={jobsPage.per_page} total={jobsPage.total} onChange={setPagina} />}
       </div>
 
       {jobDrawer && (

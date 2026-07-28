@@ -62,6 +62,45 @@ async def test_listar_comprobantes_busqueda_por_texto(client: AsyncClient, db: A
     assert body["data"][0]["razon_social_emisor"] == "ACME SA DE CV"
 
 
+async def test_listar_comprobantes_filtro_direccion(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-con5", correo="con5@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    # emitido por la propia empresa (rfc_emisor == empresa.rfc)
+    await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="11111111-1111-1111-1111-111111111111", rfc_emisor="EKU9003173C9", rfc_receptor="COS890215XXX"
+    )
+    # recibido por la propia empresa (rfc_receptor == empresa.rfc)
+    await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="22222222-2222-2222-2222-222222222222", rfc_emisor="COS890215XXX", rfc_receptor="EKU9003173C9"
+    )
+
+    r_emitidos = await client.get(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes", params={"direccion": "emitido"}, headers={"Authorization": "Bearer uid-con5"}
+    )
+    body_e = r_emitidos.json()
+    assert body_e["total"] == 1
+    assert body_e["data"][0]["uuid"] == "11111111-1111-1111-1111-111111111111"
+
+    r_recibidos = await client.get(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes", params={"direccion": "recibido"}, headers={"Authorization": "Bearer uid-con5"}
+    )
+    body_r = r_recibidos.json()
+    assert body_r["total"] == 1
+    assert body_r["data"][0]["uuid"] == "22222222-2222-2222-2222-222222222222"
+
+
+async def test_listar_comprobantes_direccion_invalida_422(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-con6", correo="con6@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+
+    r = await client.get(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes", params={"direccion": "no_es_valido"}, headers={"Authorization": "Bearer uid-con6"}
+    )
+    assert r.status_code == 422
+
+
 async def test_listar_comprobantes_empresa_ajena_404_idor(client: AsyncClient, db: AsyncSession) -> None:
     await crear_usuario(db, uid="uid-ajeno", correo="ajeno@demo.test", rol_global=RolGlobal.CONSULTA)
     otra_empresa = await crear_empresa(db, rfc="XAXX010101000")  # sin permiso para uid-ajeno

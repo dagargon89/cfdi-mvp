@@ -139,9 +139,13 @@ Query: `estado?, origen?, desde?, hasta?, page`. **200:** paginado con `job_id, 
 ## 6. Recurso: Comprobantes (prioridades 2–3)
 
 ### GET /v1/empresas/{empresa_id}/comprobantes — Listado (RF-LIST-01)
-Query: `desde?, hasta?, tipo_comprobante?, estatus?, rfc_contraparte?, q? (razón social), page, per_page, orden?`.
+Query: `desde?, hasta?, tipo_comprobante?, estatus?, rfc_contraparte?, direccion? ('emitido'|'recibido'), q? (razón social), page, per_page, orden?`.
 **200:** paginado con las columnas del índice (uuid, folio, emisor/receptor, razón social, total, fecha, tipo, estatus, estatus_verificado_at).
 **Seguridad:** consulta siempre acotada a la empresa del contexto; sin N+1.
+**`direccion` añadido tras el freeze (2026-07-28):** relativo al RFC de la propia empresa (no de la
+contraparte) — `emitido` filtra `rfc_emisor = empresa.rfc`, `recibido` filtra `rfc_receptor = empresa.rfc`.
+También soportado en `GET .../export`. `ApiClient.listarComprobantes` (doc 05 §9) documenta el campo
+`direccion` en su firma.
 
 ### POST /v1/empresas/{empresa_id}/comprobantes/validar — Validación en lote *(operador+)* (RF-VAL-02)
 Body: `{ "alcance": "no_verificados" | "todos" | {"uuids": [...]}}` → 202 `{ "tarea_id": "..." }`.
@@ -230,7 +234,7 @@ export interface ApiClient {
   reintentarJob(empresaId: number, jobId: number): Promise<void>;
   // Comprobantes (prioridades 2–3)
   listarComprobantes(empresaId: number, f?: { desde?: string; hasta?: string; estatus?: EstatusCfdi;
-                     tipo_comprobante?: string; q?: string; page?: number }): Promise<Page<Comprobante>>;
+                     tipo_comprobante?: string; direccion?: 'emitido' | 'recibido'; q?: string; page?: number }): Promise<Page<Comprobante>>;
   validarLote(empresaId: number, alcance: 'no_verificados' | 'todos' | { uuids: string[] }): Promise<{ tarea_id: string }>;
   exportarExcel(empresaId: number, f?: Record<string, string>): Promise<{ tarea_id: string }>;
   estadoTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string }>;

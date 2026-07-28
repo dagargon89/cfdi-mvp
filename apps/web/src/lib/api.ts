@@ -151,7 +151,10 @@ export interface ApiClient {
   // Comprobantes (prioridades 2–3)
   listarComprobantes(
     empresaId: number,
-    f?: { desde?: string; hasta?: string; estatus?: EstatusCfdi; tipo_comprobante?: string; q?: string; page?: number },
+    /** `direccion` añadido tras el freeze (2026-07-28) — relativo al RFC de la propia
+     * empresa, no de la contraparte (distinto de `rfc_contraparte`, que no forma parte de
+     * este contrato). */
+    f?: { desde?: string; hasta?: string; estatus?: EstatusCfdi; tipo_comprobante?: string; direccion?: 'emitido' | 'recibido'; q?: string; page?: number },
   ): Promise<Page<Comprobante>>;
   validarLote(empresaId: number, alcance: 'no_verificados' | 'todos' | { uuids: string[] }): Promise<{ tarea_id: string }>;
   exportarExcel(empresaId: number, f?: Record<string, string>): Promise<{ tarea_id: string }>;

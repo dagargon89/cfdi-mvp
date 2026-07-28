@@ -1,10 +1,11 @@
 // demo.html:505-607 (P7 Comprobantes) + lógica demo.html:1227-1237,1359-1370.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileSpreadsheet, ShieldCheck } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { EstadoChip } from '@/components/ui/EstadoChip';
+import { Paginador } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -24,22 +25,36 @@ export function ComprobantesPage() {
   const [estatus, setEstatus] = useState<EstatusCfdi | ''>('');
   const [tipo, setTipo] = useState('');
   const [desde, setDesde] = useState('');
+  const [direccion, setDireccion] = useState<'emitido' | 'recibido' | ''>('');
+  const [pagina, setPagina] = useState(1);
   const [abierto, setAbierto] = useState<Comprobante | null>(null);
   const [exportando, setExportando] = useState(false);
   const [validando, setValidando] = useState(false);
 
-  const filtros = { q: q || undefined, estatus: estatus || undefined, tipo_comprobante: tipo || undefined, desde: desde || undefined };
-  const { data: page } = useQuery({ queryKey: ['comprobantes', empresa.empresa_id, filtros], queryFn: () => api.listarComprobantes(empresa.empresa_id, filtros) });
+  // Volver a la página 1 cuando cambia cualquier filtro — evita quedar en una página vacía.
+  useEffect(() => setPagina(1), [q, estatus, tipo, desde, direccion]);
+
+  const filtros = {
+    q: q || undefined,
+    estatus: estatus || undefined,
+    tipo_comprobante: tipo || undefined,
+    desde: desde || undefined,
+    direccion: direccion || undefined,
+  };
+  const { data: page } = useQuery({
+    queryKey: ['comprobantes', empresa.empresa_id, filtros, pagina],
+    queryFn: () => api.listarComprobantes(empresa.empresa_id, { ...filtros, page: pagina }),
+  });
   const { data: totalEmpresa } = useQuery({ queryKey: ['comprobantes', empresa.empresa_id], queryFn: () => api.listarComprobantes(empresa.empresa_id) });
   const { data: efosPage } = useQuery({ queryKey: ['eventos', empresa.empresa_id, 'efos'], queryFn: () => api.listarEventos(empresa.empresa_id, { tipo: 'efos' }) });
 
   const comprobantes = page?.data ?? [];
   const efosUuids = new Set((efosPage?.data ?? []).flatMap((e) => (e.detalle.uuids as string[]) ?? []));
   const totalSuma = comprobantes.reduce((a, c) => a + (c.total ?? 0), 0);
-  const resumen = `${comprobantes.length} de ${totalEmpresa?.total ?? 0} · total ${money(totalSuma)}`;
+  const resumen = `${page?.total ?? 0} de ${totalEmpresa?.total ?? 0} · total de esta página ${money(totalSuma)}`;
 
   function limpiar() {
-    setQ(''); setEstatus(''); setTipo(''); setDesde('');
+    setQ(''); setEstatus(''); setTipo(''); setDesde(''); setDireccion('');
   }
 
   async function esperarTarea(tareaId: string) {
@@ -116,6 +131,14 @@ export function ComprobantesPage() {
         <div className="flex flex-col gap-1.5">
           <label htmlFor="f-desde" className="text-xs font-semibold text-text-muted">Emitido desde</label>
           <input id="f-desde" type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="h-[34px] border border-border rounded px-2" />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="f-dir" className="text-xs font-semibold text-text-muted">Dirección</label>
+          <select id="f-dir" value={direccion} onChange={(e) => setDireccion(e.target.value as 'emitido' | 'recibido' | '')} className="h-[34px] border border-border rounded px-2">
+            <option value="">Emitidos y recibidos</option>
+            <option value="emitido">Emitidos</option>
+            <option value="recibido">Recibidos</option>
+          </select>
         </div>
         <Button variant="secondary" onClick={limpiar}>Limpiar</Button>
         {puedeMutar && (
@@ -202,6 +225,8 @@ export function ComprobantesPage() {
             <Button variant="secondary" onClick={limpiar}>Limpiar los filtros</Button>
           </div>
         )}
+
+        {page && <Paginador page={pagina} perPage={page.per_page} total={page.total} onChange={setPagina} />}
       </div>
 
       {abierto && <ComprobanteDrawer comprobante={abierto} esEfos={efosUuids.has(abierto.uuid)} onClose={() => setAbierto(null)} />}

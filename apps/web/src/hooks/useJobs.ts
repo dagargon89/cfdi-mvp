@@ -8,10 +8,10 @@ const EN_CURSO: EstadoJob[] = ['NUEVO', 'SOLICITADO', 'EN_PROCESO'];
 
 /** Poll corto mientras haya jobs en curso — sustituye al event-bus del prototipo para reflejar la
  * progresión simulada de avanzarJob() (demo.html:1088-1097) sin acoplar la UI al mock. */
-export function useJobs(empresaId: number) {
+export function useJobs(empresaId: number, page = 1) {
   return useQuery({
-    queryKey: ['jobs', empresaId],
-    queryFn: () => api.listarJobs(empresaId),
+    queryKey: ['jobs', empresaId, page],
+    queryFn: () => api.listarJobs(empresaId, { page }),
     refetchInterval: (query) => (query.state.data?.data.some((j) => EN_CURSO.includes(j.estado)) ? 1500 : false),
   });
 }

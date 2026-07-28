@@ -2,15 +2,22 @@
 // (/admin/config, /admin/bitacora) — doc 09 §2 les asigna rutas separadas, a diferencia del `adminTab`
 // en memoria del prototipo.
 import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
 import { Link, useLocation } from 'react-router';
+import { Paginador } from '@/components/ui/Paginador';
 import { api } from '@/lib/client';
 
 export function ConfigBitacoraPage() {
   const { pathname } = useLocation();
   const enBitacora = pathname.startsWith('/admin/bitacora');
+  const [pagina, setPagina] = useState(1);
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion(), enabled: !enBitacora });
-  const { data: bitacoraPage } = useQuery({ queryKey: ['bitacora'], queryFn: () => api.listarBitacora(), enabled: enBitacora });
+  const { data: bitacoraPage } = useQuery({
+    queryKey: ['bitacora', pagina],
+    queryFn: () => api.listarBitacora({ page: pagina }),
+    enabled: enBitacora,
+  });
 
   return (
     <div className="flex flex-col gap-4">
@@ -82,6 +89,7 @@ export function ConfigBitacoraPage() {
               ))}
             </tbody>
           </table>
+          {bitacoraPage && <Paginador page={pagina} perPage={bitacoraPage.per_page} total={bitacoraPage.total} onChange={setPagina} />}
         </div>
       )}
     </div>

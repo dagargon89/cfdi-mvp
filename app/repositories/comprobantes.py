@@ -22,6 +22,8 @@ async def listar(
     tipo_comprobante: str | None = None,
     estatus: EstatusCfdi | None = None,
     rfc_contraparte: str | None = None,
+    direccion: str | None = None,
+    rfc_empresa: str | None = None,
     q: str | None = None,
     page: int = 1,
     per_page: int = 50,
@@ -37,6 +39,12 @@ async def listar(
         filtros.append(Comprobante.estatus == estatus)
     if rfc_contraparte is not None:
         filtros.append(or_(Comprobante.rfc_emisor == rfc_contraparte, Comprobante.rfc_receptor == rfc_contraparte))
+    # "emitido"/"recibido" es relativo al RFC de la propia empresa (no de la contraparte) —
+    # requiere `rfc_empresa` (el llamador lo resuelve, este repo no conoce `empresas`).
+    if direccion == "emitido" and rfc_empresa:
+        filtros.append(Comprobante.rfc_emisor == rfc_empresa)
+    elif direccion == "recibido" and rfc_empresa:
+        filtros.append(Comprobante.rfc_receptor == rfc_empresa)
     if q:
         patron = f"%{q}%"
         filtros.append(

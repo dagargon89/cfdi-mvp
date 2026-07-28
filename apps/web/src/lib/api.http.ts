@@ -100,6 +100,7 @@ export const apiHttp: ApiClientHttpSubset = {
     if (f?.hasta) params.set('hasta', f.hasta);
     if (f?.estatus) params.set('estatus', f.estatus);
     if (f?.tipo_comprobante) params.set('tipo_comprobante', f.tipo_comprobante);
+    if (f?.direccion) params.set('direccion', f.direccion);
     if (f?.q) params.set('q', f.q);
     if (f?.page) params.set('page', String(f.page));
     const qs = params.toString();

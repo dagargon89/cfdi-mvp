@@ -35,6 +35,7 @@ from app.models.enums import EstadoJob, EstatusCfdi
 from app.models.job import Job
 from app.repositories import comprobantes as comprobantes_repo
 from app.repositories import configuracion as config_repo
+from app.repositories import empresas as empresas_repo
 from app.repositories import jobs as jobs_repo
 from app.sat_hub.domain import Job as DominioJob
 from app.sat_hub.domain import Solicitud as DominioSolicitud
@@ -279,6 +280,12 @@ async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dic
 
     total_filas = 0
     async with SessionLocal() as db:
+        direccion = filtros.get("direccion")
+        rfc_empresa = None
+        if direccion:
+            empresa = await empresas_repo.por_id(db, empresa_id)
+            rfc_empresa = empresa.rfc if empresa else None
+
         pagina = 1
         while True:
             filas, _ = await comprobantes_repo.listar(
@@ -289,6 +296,8 @@ async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dic
                 tipo_comprobante=filtros.get("tipo_comprobante"),
                 estatus=estatus,
                 rfc_contraparte=filtros.get("rfc_contraparte"),
+                direccion=direccion,
+                rfc_empresa=rfc_empresa,
                 q=filtros.get("q"),
                 page=pagina,
                 per_page=_TAMANO_LOTE_EXPORT,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from app.api.v1.composers import comprobante_a_out
 from app.api.v1.schemas import AlcanceUuids, ComprobantePageOut, TareaCrearOut, ValidarLoteIn
 from app.models.enums import EstatusCfdi, RolEmpresa
 from app.repositories import comprobantes as comprobantes_repo
+from app.repositories import empresas as empresas_repo
 from app.services import bitacora as bitacora_service
 from app.worker.tasks import exportar_excel, validar_lote
 
@@ -26,13 +28,29 @@ async def listar_comprobantes_endpoint(
     tipo_comprobante: str | None = None,
     estatus: EstatusCfdi | None = None,
     rfc_contraparte: str | None = None,
+    direccion: Literal["emitido", "recibido"] | None = None,
     q: str | None = None,
     page: int = 1,
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> ComprobantePageOut:
+    rfc_empresa = None
+    if direccion is not None:
+        empresa = await empresas_repo.por_id(db, empresa_id)
+        rfc_empresa = empresa.rfc if empresa else None
+
     filas, total = await comprobantes_repo.listar(
-        db, empresa_id, desde=desde, hasta=hasta, tipo_comprobante=tipo_comprobante, estatus=estatus, rfc_contraparte=rfc_contraparte, q=q, page=page
+        db,
+        empresa_id,
+        desde=desde,
+        hasta=hasta,
+        tipo_comprobante=tipo_comprobante,
+        estatus=estatus,
+        rfc_contraparte=rfc_contraparte,
+        direccion=direccion,
+        rfc_empresa=rfc_empresa,
+        q=q,
+        page=page,
     )
     return ComprobantePageOut(data=[comprobante_a_out(c) for c in filas], page=page, per_page=50, total=total)
 
@@ -66,6 +84,7 @@ async def exportar_excel_endpoint(
     tipo_comprobante: str | None = None,
     estatus: EstatusCfdi | None = None,
     rfc_contraparte: str | None = None,
+    direccion: Literal["emitido", "recibido"] | None = None,
     q: str | None = None,
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
@@ -79,6 +98,7 @@ async def exportar_excel_endpoint(
         "tipo_comprobante": tipo_comprobante,
         "estatus": estatus.value if estatus else None,
         "rfc_contraparte": rfc_contraparte,
+        "direccion": direccion,
         "q": q,
     }
     tarea = exportar_excel.delay(empresa_id, filtros)
