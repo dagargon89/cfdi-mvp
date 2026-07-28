@@ -156,6 +156,10 @@ class ValidarLoteIn(BaseModel):
     alcance: Literal["no_verificados", "todos"] | AlcanceUuids
 
 
+class ComprobanteIdsIn(BaseModel):
+    comprobante_ids: list[int]
+
+
 class TareaCrearOut(BaseModel):
     tarea_id: str
 

@@ -401,6 +401,29 @@ export const apiMock: ApiClient = {
     return tareas.get(tareaId) ?? { estado: 'fallida' };
   },
 
+  async descargarComprobantePdf(empresaId) {
+    requireRol(empresaId, 'consulta');
+    return new Blob(['%PDF-1.4 (mock)'], { type: 'application/pdf' });
+  },
+
+  async descargarComprobanteDetalle(empresaId) {
+    requireRol(empresaId, 'consulta');
+    return new Blob(['%PDF-1.4 (mock detalle)'], { type: 'application/pdf' });
+  },
+
+  async descargarComprobanteZip(empresaId) {
+    requireRol(empresaId, 'consulta');
+    return new Blob(['PK (mock zip)'], { type: 'application/zip' });
+  },
+
+  async descargarLoteZip(empresaId) {
+    requireRol(empresaId, 'consulta');
+    const tarea_id = crypto.randomUUID();
+    tareas.set(tarea_id, { estado: 'pendiente' });
+    setTimeout(() => tareas.set(tarea_id, { estado: 'completada', descarga_url: `/mock-descargas/lote_empresa${empresaId}.zip` }), 1200);
+    return { tarea_id };
+  },
+
   async listarEventos(empresaId, f) {
     requireRol(empresaId, 'consulta');
     let rows = db.eventos.filter((e) => e.empresa_id === empresaId);

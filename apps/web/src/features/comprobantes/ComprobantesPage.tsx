@@ -1,6 +1,6 @@
 // demo.html:505-607 (P7 Comprobantes) + lógica demo.html:1227-1237,1359-1370.
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FileSpreadsheet, ShieldCheck } from 'lucide-react';
+import { FileSpreadsheet, PackageOpen, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
@@ -30,9 +30,13 @@ export function ComprobantesPage() {
   const [abierto, setAbierto] = useState<Comprobante | null>(null);
   const [exportando, setExportando] = useState(false);
   const [validando, setValidando] = useState(false);
+  const [seleccionados, setSeleccionados] = useState<Set<number>>(new Set());
+  const [descargandoLote, setDescargandoLote] = useState(false);
 
   // Volver a la página 1 cuando cambia cualquier filtro — evita quedar en una página vacía.
   useEffect(() => setPagina(1), [q, estatus, tipo, desde, direccion]);
+  // La selección es de "lo que se ve" — cambiar de página o de filtros la limpia.
+  useEffect(() => setSeleccionados(new Set()), [q, estatus, tipo, desde, direccion, pagina]);
 
   const filtros = {
     q: q || undefined,
@@ -103,6 +107,36 @@ export function ComprobantesPage() {
     }
   }
 
+  function alternarSeleccion(comprobanteId: number) {
+    setSeleccionados((prev) => {
+      const siguiente = new Set(prev);
+      if (siguiente.has(comprobanteId)) siguiente.delete(comprobanteId);
+      else siguiente.add(comprobanteId);
+      return siguiente;
+    });
+  }
+
+  function alternarSeleccionTodas() {
+    setSeleccionados((prev) => (prev.size === comprobantes.length ? new Set() : new Set(comprobantes.map((c) => c.comprobante_id))));
+  }
+
+  async function descargarLote() {
+    setDescargandoLote(true);
+    toast('Generando .zip de los seleccionados…', 'info');
+    try {
+      const { tarea_id } = await api.descargarLoteZip(empresa.empresa_id, [...seleccionados]);
+      const { estado, url } = await esperarTarea(tarea_id);
+      if (estado === 'completada' && url) {
+        window.open(url, '_blank');
+        toast('Descarga lista', 'ok');
+      } else {
+        toast('No se pudo generar la descarga', 'error');
+      }
+    } finally {
+      setDescargandoLote(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <div className="bg-surface border border-border rounded-lg px-4 py-3 flex gap-3 flex-wrap items-end">
@@ -146,6 +180,11 @@ export function ComprobantesPage() {
             <ShieldCheck className="size-[15px]" aria-hidden /> Validar pendientes
           </Button>
         )}
+        {seleccionados.size > 0 && (
+          <Button variant="secondary" onClick={descargarLote} loading={descargandoLote} disabled={descargandoLote}>
+            <PackageOpen className="size-[15px]" aria-hidden /> Descargar seleccionados ({seleccionados.size})
+          </Button>
+        )}
         <Button onClick={exportar} loading={exportando} disabled={exportando}>
           <FileSpreadsheet className="size-[15px]" aria-hidden /> Exportar
         </Button>
@@ -163,6 +202,14 @@ export function ComprobantesPage() {
               <caption className="sr-only">Comprobantes recibidos y emitidos</caption>
               <thead>
                 <tr className="bg-surface-alt">
+                  <th scope="col" className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      aria-label="Seleccionar todas las facturas de esta página"
+                      checked={comprobantes.length > 0 && seleccionados.size === comprobantes.length}
+                      onChange={alternarSeleccionTodas}
+                    />
+                  </th>
                   <th scope="col" className="text-left text-xs font-semibold px-3 py-2">UUID</th>
                   <th scope="col" className="text-left text-xs font-semibold px-3 py-2">Emisor</th>
                   <th scope="col" className="text-left text-xs font-semibold px-3 py-2">RFC</th>
@@ -180,6 +227,14 @@ export function ComprobantesPage() {
                     className="border-t border-border cursor-pointer h-10 hover:bg-primary-soft"
                     style={{ background: c.estatus === 'cancelado' ? '#FCF6F7' : 'transparent' }}
                   >
+                    <td className="px-3" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Seleccionar factura ${c.uuid}`}
+                        checked={seleccionados.has(c.comprobante_id)}
+                        onChange={() => alternarSeleccion(c.comprobante_id)}
+                      />
+                    </td>
                     <td className="px-3 font-mono text-xs whitespace-nowrap">{c.uuid.slice(0, 13)}…</td>
                     <td className="px-3 text-[13px] max-w-[220px] overflow-hidden text-ellipsis whitespace-nowrap">{c.razon_social_emisor}</td>
                     <td className="px-3 font-mono text-xs">{c.rfc_emisor}</td>

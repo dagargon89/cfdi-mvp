@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import logging
 import os
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
@@ -42,6 +44,7 @@ from app.sat_hub.domain import Solicitud as DominioSolicitud
 from app.sat_hub.domain import Tipo as DominioTipo
 from app.sat_hub.errors import FielVencidaError, SatRechazoError, SatReintentableError
 from app.sat_hub.sat_facade import ESTADOS_EN_PROCESO, ESTADOS_RECHAZO, ESTADOS_TERMINADA, SatFacade, consultar_estatus_xml
+from app.services import representaciones
 from app.services import resguardo
 from app.services.descargas import EfirmaAusenteError, signer_para_empresa
 from app.worker.celery_app import celery_app
@@ -333,3 +336,40 @@ async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dic
 @celery_app.task(name="app.worker.tasks.exportar_excel")  # type: ignore[untyped-decorator]
 def exportar_excel(empresa_id: int, filtros: dict[str, Any]) -> dict[str, Any]:
     return asyncio.run(_exportar_excel_async(empresa_id, filtros))
+
+
+# --------------------------------------------------------------------------- #
+# Descarga por lote (XML+PDF+Detalle de varios comprobantes en un solo .zip) —
+# selección por casillas en la tabla de Comprobantes (RF-RES-03/D2).
+# --------------------------------------------------------------------------- #
+
+
+async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
+    storage_root = get_settings().storage_root
+    incluidos = 0
+    buffer = io.BytesIO()
+    async with SessionLocal() as db:
+        comprobantes = await comprobantes_repo.por_ids(db, empresa_id, comprobante_ids)
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for c in comprobantes:
+                xml_bytes = representaciones.leer_xml_de_disco(storage_root, c)
+                if xml_bytes is None:
+                    logger.warning("descargar_zip_lote: comprobante %s sin XML en disco, se omite.", c.comprobante_id)
+                    continue
+                zf.writestr(f"{c.uuid}.xml", xml_bytes)
+                zf.writestr(f"{c.uuid}.pdf", representaciones.generar_pdf(xml_bytes))
+                zf.writestr(f"{c.uuid}_detalle.pdf", representaciones.generar_detalle(xml_bytes, c.estatus))
+                incluidos += 1
+
+    carpeta = os.path.join(storage_root, str(empresa_id), "exports")
+    os.makedirs(carpeta, exist_ok=True)
+    nombre = f"comprobantes_{uuid.uuid4().hex[:12]}.zip"
+    with open(os.path.join(carpeta, nombre), "wb") as f:
+        f.write(buffer.getvalue())
+    ruta_relativa = os.path.join(str(empresa_id), "exports", nombre)
+    return {"ruta": ruta_relativa, "incluidos": incluidos, "solicitados": len(comprobante_ids)}
+
+
+@celery_app.task(name="app.worker.tasks.descargar_zip_lote")  # type: ignore[untyped-decorator]
+def descargar_zip_lote(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
+    return asyncio.run(_descargar_zip_lote_async(empresa_id, comprobante_ids))

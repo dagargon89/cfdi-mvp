@@ -38,7 +38,7 @@ python_version = "3.12"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["satcfdi.*", "firebase_admin.*", "celery.*", "asyncmy.*", "testcontainers.*", "openpyxl.*"]
+module = ["satcfdi.*", "firebase_admin.*", "celery.*", "asyncmy.*", "testcontainers.*", "openpyxl.*", "weasyprint.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

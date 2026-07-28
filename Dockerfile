@@ -4,6 +4,8 @@ WORKDIR /srv
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
+    fonts-liberation fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml requirements.txt ./

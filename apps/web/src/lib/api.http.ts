@@ -34,6 +34,28 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+/** Como `request()` pero para respuestas binarias (PDF/zip) — nunca intenta `JSON.parse` del
+ * cuerpo exitoso; si falla, el backend igual manda el sobre de error de siempre en JSON. */
+async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  const token = await getIdToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let envelope: ErrorEnvelope | null = null;
+    try {
+      envelope = text ? JSON.parse(text) : null;
+    } catch {
+      // el cuerpo de error no era JSON — se usa el mensaje genérico de abajo
+    }
+    throw new ApiError(res.status, envelope?.error?.codigo ?? 'ERROR', envelope?.error?.mensaje ?? 'Error de red.');
+  }
+  return res.blob();
+}
+
 type ApiClientHttpSubset = Pick<
   ApiClient,
   | 'me'
@@ -51,6 +73,10 @@ type ApiClientHttpSubset = Pick<
   | 'validarLote'
   | 'exportarExcel'
   | 'estadoTarea'
+  | 'descargarComprobantePdf'
+  | 'descargarComprobanteDetalle'
+  | 'descargarComprobanteZip'
+  | 'descargarLoteZip'
   | 'listarUsuarios'
   | 'listarBitacora'
 >;
@@ -120,6 +146,15 @@ export const apiHttp: ApiClientHttpSubset = {
   },
 
   estadoTarea: (tareaId) => request(`/v1/tareas/${tareaId}`),
+
+  descargarComprobantePdf: (empresaId, comprobanteId) => requestBlob(`/v1/empresas/${empresaId}/comprobantes/${comprobanteId}/pdf`),
+
+  descargarComprobanteDetalle: (empresaId, comprobanteId) => requestBlob(`/v1/empresas/${empresaId}/comprobantes/${comprobanteId}/detalle`),
+
+  descargarComprobanteZip: (empresaId, comprobanteId) => requestBlob(`/v1/empresas/${empresaId}/comprobantes/${comprobanteId}/paquete`),
+
+  descargarLoteZip: (empresaId, comprobanteIds) =>
+    request(`/v1/empresas/${empresaId}/comprobantes/descargar-zip`, { method: 'POST', body: JSON.stringify({ comprobante_ids: comprobanteIds }) }),
 
   listarUsuarios: () => request<UsuarioAdmin[]>('/v1/usuarios'),
 

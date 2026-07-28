@@ -28,6 +28,7 @@ def _sin_worker_real(monkeypatch: pytest.MonkeyPatch) -> None:
     tarea = _TareaFalsa()
     monkeypatch.setattr(comprobantes_router, "validar_lote", tarea)
     monkeypatch.setattr(comprobantes_router, "exportar_excel", tarea)
+    monkeypatch.setattr(comprobantes_router, "descargar_zip_lote", tarea)
 
 
 async def test_listar_comprobantes_con_filtros(client: AsyncClient, db: AsyncSession) -> None:
@@ -152,5 +153,86 @@ async def test_exportar_excel_202(client: AsyncClient, db: AsyncSession) -> None
     await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
 
     r = await client.get(f"/v1/empresas/{empresa.empresa_id}/comprobantes/export", headers={"Authorization": "Bearer uid-con4"})
+    assert r.status_code == 202
+    assert r.json()["tarea_id"] == "tarea-falsa-1234"
+
+
+async def _comprobante_con_xml_real(db: AsyncSession, empresa_id: int, uuid: str) -> None:
+    """Escribe un XML sintético real en `storage_root` y crea el `Comprobante` que apunta a
+    él — los endpoints de pdf/detalle/paquete leen el archivo de disco de verdad."""
+    import os
+
+    from app.core.config import get_settings
+    from tests.test_resguardo import _xml
+
+    ruta_relativa = os.path.join(str(empresa_id), "comprobantes", f"{uuid}.xml")
+    ruta_absoluta = os.path.join(get_settings().storage_root, ruta_relativa)
+    os.makedirs(os.path.dirname(ruta_absoluta), exist_ok=True)
+    with open(ruta_absoluta, "wb") as f:
+        f.write(_xml(uuid))
+    await crear_comprobante(db, empresa_id=empresa_id, uuid=uuid, xml_path=ruta_relativa)
+
+
+async def test_descargar_pdf_200(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-pdf", correo="pdf@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    await _comprobante_con_xml_real(db, empresa.empresa_id, "aaaaaaaa-1111-1111-1111-111111111111")
+
+    r = await client.get(f"/v1/empresas/{empresa.empresa_id}/comprobantes/1/pdf", headers={"Authorization": "Bearer uid-pdf"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF-")
+
+
+async def test_descargar_detalle_200(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-det", correo="det@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    await _comprobante_con_xml_real(db, empresa.empresa_id, "bbbbbbbb-2222-2222-2222-222222222222")
+
+    r = await client.get(f"/v1/empresas/{empresa.empresa_id}/comprobantes/1/detalle", headers={"Authorization": "Bearer uid-det"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF-")
+
+
+async def test_descargar_paquete_zip_200_con_3_archivos(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-paq", correo="paq@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    await _comprobante_con_xml_real(db, empresa.empresa_id, "cccccccc-3333-3333-3333-333333333333")
+
+    r = await client.get(f"/v1/empresas/{empresa.empresa_id}/comprobantes/1/paquete", headers={"Authorization": "Bearer uid-paq"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+
+    import zipfile
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(r.content)) as zf:
+        assert len(zf.namelist()) == 3
+
+
+async def test_descargar_pdf_comprobante_de_otra_empresa_404_idor(client: AsyncClient, db: AsyncSession) -> None:
+    await crear_usuario(db, uid="uid-idor", correo="idor@demo.test", rol_global=RolGlobal.CONSULTA)
+    otra_empresa = await crear_empresa(db, rfc="XAXX010101000")
+    await _comprobante_con_xml_real(db, otra_empresa.empresa_id, "dddddddd-4444-4444-4444-444444444444")
+
+    r = await client.get(f"/v1/empresas/{otra_empresa.empresa_id}/comprobantes/1/pdf", headers={"Authorization": "Bearer uid-idor"})
+    assert r.status_code == 404  # sin permiso sobre la empresa — ni siquiera llega a buscar el comprobante
+
+
+async def test_descargar_zip_lote_202(client: AsyncClient, db: AsyncSession) -> None:
+    usuario = await crear_usuario(db, uid="uid-lote", correo="lote@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="eeeeeeee-5555-5555-5555-555555555555")
+
+    r = await client.post(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes/descargar-zip",
+        headers={"Authorization": "Bearer uid-lote"},
+        json={"comprobante_ids": [1]},
+    )
     assert r.status_code == 202
     assert r.json()["tarea_id"] == "tarea-falsa-1234"
