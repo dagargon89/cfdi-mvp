@@ -33,6 +33,7 @@ async def listar_usuarios(admin: Usuario = Depends(require_admin), db: AsyncSess
             nombre=u.nombre,
             rol_global=u.rol_global.value,
             activo=u.activo,
+            aprobado=u.aprobado,
             permisos=[PermisoEmpresaOut(empresa_id=p.empresa_id, empresa_nombre=p.empresa.nombre, rol=p.rol.value) for p in u.permisos],
         )
         for u in usuarios
@@ -49,10 +50,10 @@ async def crear_usuario(body: UsuarioCrearIn, admin: Usuario = Depends(require_a
     except firebase_auth.EmailAlreadyExistsError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "CORREO_DUPLICADO", "mensaje": "Ya existe una cuenta con ese correo en Firebase."}) from exc
 
-    usuario = await usuarios_repo.crear(db, firebase_uid=cuenta.uid, correo=body.correo, nombre=body.nombre, rol_global=body.rol_global)
+    usuario = await usuarios_repo.crear(db, firebase_uid=cuenta.uid, correo=body.correo, nombre=body.nombre, rol_global=body.rol_global, aprobado=True)
     await bitacora.registrar(db, actor=admin.correo, accion="alta_usuario", entidad=f"usuario:{usuario.usuario_id}", detalle={"correo": body.correo, "rol_global": body.rol_global.value})
     await db.commit()
-    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo)
+    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)
 
 
 @router.put("/{usuario_id}/permisos", response_model=UsuarioOut)
@@ -68,7 +69,7 @@ async def asignar_permisos(
         detalle={"permisos": [{"empresa_id": p.empresa_id, "rol": p.rol.value} for p in body.permisos]},
     )
     await db.commit()
-    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo)
+    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)
 
 
 @router.patch("/{usuario_id}", response_model=UsuarioOut)
@@ -78,10 +79,10 @@ async def actualizar_usuario(
     usuario = await usuarios_repo.por_id(db, usuario_id)
     if usuario is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
-    await usuarios_repo.actualizar(db, usuario, activo=body.activo, rol_global=body.rol_global)
+    await usuarios_repo.actualizar(db, usuario, activo=body.activo, rol_global=body.rol_global, aprobado=body.aprobado)
     await bitacora.registrar(
         db, actor=admin.correo, accion="editar_usuario", entidad=f"usuario:{usuario_id}",
         detalle={"activo": body.activo, "rol_global": body.rol_global.value if body.rol_global else None},
     )
     await db.commit()
-    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo)
+    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)

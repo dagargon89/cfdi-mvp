@@ -22,6 +22,7 @@ class Usuario(Base):
     nombre: Mapped[str] = mapped_column(String(120), nullable=False)
     rol_global: Mapped[RolGlobal] = mapped_column(enum_column(RolGlobal), nullable=False, default=RolGlobal.CONSULTA)
     activo: Mapped[bool] = mapped_column(TINYINT(1), nullable=False, default=1)
+    aprobado: Mapped[bool] = mapped_column(TINYINT(1), nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
 
     permisos: Mapped[list["UsuarioEmpresa"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")

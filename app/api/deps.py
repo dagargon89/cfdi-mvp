@@ -44,9 +44,19 @@ class ContextoEmpresa:
 async def _usuario_activo_por_token(authorization: str | None, db: AsyncSession) -> Usuario:
     uid = verificar_id_token(authorization)
     usuario = await db.scalar(select(Usuario).where(Usuario.firebase_uid == uid))
-    if usuario is None or not usuario.activo:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Usuario inactivo o no registrado en Hub CFDI.")
+    if usuario is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"codigo": "NO_REGISTRADO", "mensaje": "No existe un usuario de Hub CFDI para esta cuenta."})
+    if not usuario.aprobado:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"codigo": "CUENTA_PENDIENTE", "mensaje": "Tu cuenta está pendiente de aprobación por un administrador."})
+    if not usuario.activo:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail={"codigo": "CUENTA_INACTIVA", "mensaje": "Tu cuenta está desactivada."})
     return usuario
+
+
+async def uid_del_token(authorization: str | None = Header(default=None)) -> str:
+    """Solo verifica el token de Firebase y devuelve el uid — para endpoints que operan ANTES de que
+    exista/esté aprobado el usuario local (auto-registro)."""
+    return verificar_id_token(authorization)
 
 
 async def usuario_actual(

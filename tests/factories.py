@@ -13,8 +13,8 @@ from app.models.usuario import Usuario
 from app.models.usuario_empresa import UsuarioEmpresa
 
 
-async def crear_usuario(db: AsyncSession, *, uid: str, correo: str, rol_global: RolGlobal = RolGlobal.CONSULTA, activo: bool = True) -> Usuario:
-    usuario = Usuario(firebase_uid=uid, correo=correo, nombre=correo.split("@")[0], rol_global=rol_global, activo=activo)
+async def crear_usuario(db: AsyncSession, *, uid: str, correo: str, rol_global: RolGlobal = RolGlobal.CONSULTA, activo: bool = True, aprobado: bool = True) -> Usuario:
+    usuario = Usuario(firebase_uid=uid, correo=correo, nombre=correo.split("@")[0], rol_global=rol_global, activo=activo, aprobado=aprobado)
     db.add(usuario)
     await db.flush()
     await db.commit()

@@ -77,6 +77,7 @@ class UsuarioOut(BaseModel):
     nombre: str
     rol_global: str
     activo: bool
+    aprobado: bool
 
 
 class PermisoEmpresaOut(BaseModel):
@@ -101,6 +102,7 @@ class PermisosIn(BaseModel):
 class UsuarioPatchIn(BaseModel):
     activo: bool | None = None
     rol_global: RolGlobal | None = None
+    aprobado: bool | None = None
 
 
 class DescargaCrearIn(BaseModel):

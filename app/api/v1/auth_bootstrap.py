@@ -50,7 +50,7 @@ async def bootstrap_admin(body: BootstrapAdminIn, db: AsyncSession = Depends(get
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "CORREO_DUPLICADO", "mensaje": "Ya existe una cuenta con ese correo en Firebase."}) from exc
 
     try:
-        usuario = await usuarios_repo.crear(db, firebase_uid=cuenta.uid, correo=body.correo, nombre=body.nombre, rol_global=RolGlobal.ADMIN)
+        usuario = await usuarios_repo.crear(db, firebase_uid=cuenta.uid, correo=body.correo, nombre=body.nombre, rol_global=RolGlobal.ADMIN, aprobado=True)
         await bitacora.registrar(db, actor=body.correo, accion="alta_admin_bootstrap", entidad=f"usuario:{usuario.usuario_id}", detalle={"correo": body.correo})
         await db.commit()
     except Exception as exc:  # noqa: BLE001 — no dejar cuenta huérfana en Firebase si el registro local falla
@@ -61,4 +61,4 @@ async def bootstrap_admin(body: BootstrapAdminIn, db: AsyncSession = Depends(get
             logger.warning("No se pudo eliminar la cuenta huérfana de Firebase uid=%s tras fallo de bootstrap", cuenta.uid, exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"codigo": "BOOTSTRAP_FALLIDO", "mensaje": "No se pudo completar el alta de arranque."}) from exc
 
-    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo)
+    return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)
