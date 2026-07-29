@@ -100,6 +100,11 @@ async def eliminar_usuario(usuario_id: int, admin: Usuario = Depends(require_adm
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
     if usuario.usuario_id == admin.usuario_id:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "NO_AUTO_ELIMINACION", "mensaje": "No puedes eliminar tu propia cuenta."})
+    # Defensa en profundidad: como `admin` (el actor) siempre es un ADMIN activo+aprobado (lo exige
+    # `require_admin`), si el objetivo también es un ADMIN activo+aprobado, `contar_admins_activos()`
+    # ya cuenta a ambos (>=2) y este branch no se alcanza para ese caso — el único camino real hoy es
+    # que el objetivo sea un ADMIN inactivo o no aprobado (no cuenta en `contar_admins_activos`)
+    # mientras el actor es el único admin activo; ver test_delete_ultimo_admin_admin_inactivo_409.
     if usuario.rol_global == RolGlobal.ADMIN and await usuarios_repo.contar_admins_activos(db) <= 1:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "ULTIMO_ADMIN", "mensaje": "No puedes eliminar al último administrador."})
 

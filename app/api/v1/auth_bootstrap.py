@@ -12,6 +12,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, uid_del_token
@@ -70,6 +71,14 @@ async def registro(body: RegistroIn, uid: str = Depends(uid_del_token), db: Asyn
     """Auto-registro (excepción explícita a RF-AUTH-02): el correo SIEMPRE viene de Firebase
     (nunca del body, para que nadie pueda declarar un correo ajeno) y el usuario local se
     crea `aprobado=False` — sin acceso hasta que un admin lo apruebe (`PATCH /usuarios/{id}`)."""
+    # BD vacía => el primer usuario debe crearse por /auth/bootstrap (admin), nunca por auto-registro;
+    # si no, un `consulta` pendiente ocuparía el lugar del primer usuario y nadie podría aprobar a nadie.
+    if await usuarios_repo.contar(db) == 0:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"codigo": "REGISTRO_NO_DISPONIBLE", "mensaje": "El primer usuario debe crearse como administrador (bootstrap)."},
+        )
+
     try:
         cuenta = firebase_auth.get_user(uid, app=firebase_app())
     except Exception as exc:  # noqa: BLE001
@@ -78,9 +87,14 @@ async def registro(body: RegistroIn, uid: str = Depends(uid_del_token), db: Asyn
     if await usuarios_repo.por_firebase_uid(db, uid) or (correo and await usuarios_repo.por_correo(db, correo)):
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "YA_REGISTRADO", "mensaje": "Esta cuenta ya está registrada."})
 
-    usuario = await usuarios_repo.crear(db, firebase_uid=uid, correo=correo or f"{uid}@sin-correo.local", nombre=body.nombre, rol_global=RolGlobal.CONSULTA, aprobado=False)
-    await bitacora.registrar(db, actor=correo or uid, accion="auto_registro", entidad=f"usuario:{usuario.usuario_id}", detalle={"correo": correo})
-    await db.commit()
+    try:
+        usuario = await usuarios_repo.crear(db, firebase_uid=uid, correo=correo or f"{uid}@sin-correo.local", nombre=body.nombre, rol_global=RolGlobal.CONSULTA, aprobado=False)
+        await bitacora.registrar(db, actor=correo or uid, accion="auto_registro", entidad=f"usuario:{usuario.usuario_id}", detalle={"correo": correo})
+        await db.commit()
+    except IntegrityError as exc:
+        # Carrera: otra petición concurrente registró el mismo uid/correo entre el chequeo de dedup y el commit.
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "YA_REGISTRADO", "mensaje": "Esta cuenta ya está registrada."}) from exc
 
     # Aviso a admins — best-effort: nunca rompe el registro.
     try:

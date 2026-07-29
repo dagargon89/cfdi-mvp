@@ -14,6 +14,11 @@ const FIREBASE_ERROR_MENSAJE: Record<string, string> = {
   'auth/invalid-email': 'Ese correo no tiene un formato válido.',
 };
 
+const API_ERROR_MENSAJE: Record<string, string> = {
+  YA_REGISTRADO: 'Ya existe una cuenta con ese correo.',
+  REGISTRO_NO_DISPONIBLE: 'El registro no está disponible todavía; el primer usuario es el administrador.',
+};
+
 export function RegistroPage() {
   const [nombre, setNombre] = useState('');
   const [correo, setCorreo] = useState('');
@@ -40,7 +45,7 @@ export function RegistroPage() {
       setOk(true);
     } catch (err) {
       if (err instanceof ApiError) {
-        setError(err.codigo === 'YA_REGISTRADO' ? 'Ya existe una cuenta con ese correo.' : err.message);
+        setError(API_ERROR_MENSAJE[err.codigo] ?? err.message);
       } else {
         const codigo = err instanceof Error && 'code' in err ? String((err as { code: string }).code) : '';
         setError(FIREBASE_ERROR_MENSAJE[codigo] ?? 'No se pudo completar el registro.');

@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.enums import RolGlobal
 from app.models.usuario import Usuario
 from app.repositories import usuarios as usuarios_repo
-from tests.factories import crear_usuario
 
 
 async def _usuario(db: AsyncSession, *, uid: str, correo: str, rol=RolGlobal.CONSULTA, activo=True, aprobado=True) -> Usuario:
@@ -96,6 +95,15 @@ def smtp_espia(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], str]]:
     return envios
 
 
+async def test_registro_bd_vacia_403_registro_no_disponible(client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object]) -> None:
+    # Sin usuarios en BD: /registro debe rechazarse para no bloquear el bootstrap del primer admin.
+    assert await usuarios_repo.contar(db) == 0
+    res = await client.post("/v1/auth/registro", json={"nombre": "Nuevo"}, headers={"Authorization": "Bearer uid-nuevo"})
+    assert res.status_code == 403
+    assert res.json()["error"]["codigo"] == "REGISTRO_NO_DISPONIBLE"
+    assert await usuarios_repo.contar(db) == 0  # no se creó nada
+
+
 async def test_registro_crea_pendiente_consulta(
     client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object], smtp_espia: list[tuple[list[str], str]]
 ) -> None:
@@ -109,6 +117,7 @@ async def test_registro_crea_pendiente_consulta(
 
 
 async def test_registro_correo_de_firebase_no_del_body(client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object]) -> None:
+    await _usuario(db, uid="admin1", correo="admin@example.com", rol=RolGlobal.ADMIN)  # BD no vacía (evita REGISTRO_NO_DISPONIBLE)
     res = await client.post("/v1/auth/registro", json={"nombre": "X", "correo": "otro@intruso.com"}, headers={"Authorization": "Bearer uid-nuevo"})
     assert res.status_code == 201
     assert await usuarios_repo.por_correo(db, "nuevo@example.com") is not None  # ganó el de Firebase
@@ -158,3 +167,20 @@ async def test_delete_ultimo_admin_409(client: AsyncClient, db: AsyncSession, fi
     admin = await _usuario(db, uid="admin1", correo="admin@example.com", rol=RolGlobal.ADMIN)
     res = await client.delete(f"/v1/usuarios/{admin.usuario_id}", headers={"Authorization": "Bearer admin1"})
     assert res.status_code == 409  # no puede eliminarse a sí mismo / último admin
+
+
+async def test_delete_ultimo_admin_admin_inactivo_409(client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object]) -> None:
+    """Ejercita el branch ULTIMO_ADMIN con actor != objetivo.
+
+    `require_admin` obliga a que el actor sea SIEMPRE un ADMIN activo+aprobado, así que si el
+    objetivo también fuera un ADMIN activo+aprobado, `contar_admins_activos()` ya los contaría a
+    ambos (>=2) y el guard nunca se dispararía para ese caso (siempre gana el borrado feliz). El
+    único camino real para disparar ULTIMO_ADMIN sin auto-eliminación es un objetivo ADMIN que NO
+    cuenta en `contar_admins_activos` (aquí, desactivado) mientras el actor es el único admin activo.
+    """
+    actor = await _usuario(db, uid="admin-a", correo="a@example.com", rol=RolGlobal.ADMIN, activo=True, aprobado=True)
+    objetivo = await _usuario(db, uid="admin-b", correo="b@example.com", rol=RolGlobal.ADMIN, activo=False, aprobado=True)
+    assert await usuarios_repo.contar_admins_activos(db) == 1  # solo `actor` cuenta; `objetivo` está inactivo
+    res = await client.delete(f"/v1/usuarios/{objetivo.usuario_id}", headers={"Authorization": f"Bearer {actor.firebase_uid}"})
+    assert res.status_code == 409
+    assert res.json()["error"]["codigo"] == "ULTIMO_ADMIN"
