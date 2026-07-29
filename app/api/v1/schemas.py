@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from app.models.enums import RolEmpresa, RolGlobal, SolicitudTipo, TipoEvento, TipoJob
 
@@ -52,6 +52,17 @@ class EfirmaMetaOut(BaseModel):
     num_serie: str
     not_before: str
     not_after: str
+
+
+class BootstrapStatusOut(BaseModel):
+    needs_bootstrap: bool
+
+
+class BootstrapAdminIn(BaseModel):
+    correo: EmailStr
+    nombre: str
+    password: str = Field(min_length=8)
+    token: str
 
 
 class UsuarioCrearIn(BaseModel):

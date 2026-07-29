@@ -32,6 +32,11 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # Token de un solo uso para el signup de arranque del primer admin (spec 2026-07-29).
+    # Vacío = bootstrap deshabilitado (fail-closed). Poner un valor largo y aleatorio solo
+    # durante el alta inicial; una vez creado el admin, puede quitarse del entorno.
+    bootstrap_admin_token: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

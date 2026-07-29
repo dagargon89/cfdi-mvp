@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +37,11 @@ async def actualizar(db: AsyncSession, usuario: Usuario, *, activo: bool | None 
         usuario.rol_global = rol_global
     await db.flush()
     return usuario
+
+
+async def contar(db: AsyncSession) -> int:
+    total = await db.scalar(select(func.count()).select_from(Usuario))
+    return int(total or 0)
 
 
 async def listar_con_permisos(db: AsyncSession) -> list[Usuario]:
