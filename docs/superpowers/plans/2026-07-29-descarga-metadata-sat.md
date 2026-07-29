@@ -305,7 +305,9 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from app.models.enums import RolGlobal  # noqa: E402
 from tests.factories import crear_empresa, crear_usuario  # noqa: E402
 
-pytestmark = pytest.mark.asyncio
+# Nota: el proyecto usa `asyncio_mode = "auto"` (pyproject), así que los tests `async def` se
+# detectan solos. NO declarar `pytestmark = pytest.mark.asyncio` a nivel módulo: marcaría también
+# los tests síncronos del servicio (arriba) y los rompería.
 
 
 async def _empresa_con_job_metadata(db: AsyncSession, storage_root: str, *, estado=EstadoJob.DESCARGADO) -> Job:
