@@ -3,18 +3,21 @@ POST .../jobs/{job_id}/reintentar — doc 05 §5, máquina de estados doc 01 §1
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_empresa
 from app.api.v1.composers import job_a_out
-from app.api.v1.schemas import DescargaCrearIn, DescargaCrearOut, JobOut, JobPageOut
+from app.api.v1.schemas import DescargaCrearIn, DescargaCrearOut, JobOut, JobPageOut, MetadataPreviewOut
+from app.core.config import get_settings
 from app.models.enums import EstadoJob, OrigenJob, RolEmpresa
 from app.repositories import empresas as empresas_repo
 from app.repositories import jobs as jobs_repo
 from app.sat_hub.errors import FielVencidaError, TransicionIlegalError
 from app.services import bitacora as bitacora_service
+from app.services import metadata_export
 from app.services.descargas import EfirmaAusenteError, EmpresaInactivaError, RangoInvalidoError, crear_descarga
+from app.services.metadata_export import MetadataNoAplicableError, MetadataNoDisponibleError
 from app.worker.tasks import ejecutar_job
 
 router = APIRouter(prefix="/empresas/{empresa_id}", tags=["descargas"])
@@ -106,3 +109,62 @@ async def reintentar_job_endpoint(
     await bitacora_service.registrar(db, actor=ctx.usuario.correo, accion="reintento_job", entidad=f"job:{job_id}", detalle={"empresa_id": empresa_id})
     await db.commit()
     ejecutar_job.delay(job_id)
+
+
+_METADATA_PER_PAGE = 100
+
+
+def _job_o_404(job: object | None) -> None:
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+
+
+def _mapear_error_metadata(exc: Exception) -> HTTPException:
+    if isinstance(exc, MetadataNoAplicableError):
+        return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"codigo": "METADATA_NO_APLICABLE", "mensaje": str(exc)})
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"codigo": "METADATA_NO_DISPONIBLE", "mensaje": str(exc)})
+
+
+@router.get("/jobs/{job_id}/metadata", response_model=MetadataPreviewOut)
+async def preview_metadata_endpoint(
+    empresa_id: int,
+    job_id: int,
+    page: int = 1,
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
+    db: AsyncSession = Depends(get_db),
+) -> MetadataPreviewOut:
+    job = await jobs_repo.por_id_de_empresa(db, empresa_id, job_id)
+    _job_o_404(job)
+    try:
+        headers, filas = metadata_export.parsear_metadata(get_settings().storage_root, job)
+    except (MetadataNoAplicableError, MetadataNoDisponibleError) as exc:
+        raise _mapear_error_metadata(exc) from exc
+
+    inicio = max(page - 1, 0) * _METADATA_PER_PAGE
+    return MetadataPreviewOut(
+        headers=headers,
+        filas=filas[inicio : inicio + _METADATA_PER_PAGE],
+        total=len(filas),
+        page=page,
+        per_page=_METADATA_PER_PAGE,
+    )
+
+
+@router.get("/jobs/{job_id}/metadata.csv")
+async def descargar_metadata_csv_endpoint(
+    empresa_id: int,
+    job_id: int,
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    job = await jobs_repo.por_id_de_empresa(db, empresa_id, job_id)
+    _job_o_404(job)
+    try:
+        csv_bytes = metadata_export.generar_csv_metadata(get_settings().storage_root, job)
+    except (MetadataNoAplicableError, MetadataNoDisponibleError) as exc:
+        raise _mapear_error_metadata(exc) from exc
+    return Response(
+        csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="metadata_job{job_id}.csv"'},
+    )

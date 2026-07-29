@@ -126,6 +126,14 @@ class JobPageOut(BaseModel):
     total: int
 
 
+class MetadataPreviewOut(BaseModel):
+    headers: list[str]
+    filas: list[list[str]]
+    total: int
+    page: int
+    per_page: int
+
+
 class ComprobanteOut(BaseModel):
     comprobante_id: int
     uuid: str
