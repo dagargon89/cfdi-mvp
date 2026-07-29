@@ -68,7 +68,7 @@ export function LoginPage() {
                   required
                   value={correo}
                   onChange={(e) => setCorreo(e.target.value)}
-                  placeholder="usuario@demo.test"
+                  placeholder="tu@correo.com"
                   className="h-9 border border-border rounded px-2.5"
                 />
               </div>
@@ -98,10 +98,6 @@ export function LoginPage() {
             </form>
           )}
         </div>
-
-        <p className="m-0 text-xs text-text-muted text-center text-pretty">
-          Datos simulados sin persistencia. Sin PII real: dominios <span className="font-mono">@demo.test</span> y RFC de prueba del SAT.
-        </p>
       </div>
     </div>
   );
