@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import os
 import zipfile
 
 from app.models.enums import EstadoJob, SolicitudTipo
 from app.models.job import Job
+
+logger = logging.getLogger(__name__)
 
 _DELIMITADOR = "~"
 
@@ -67,8 +70,8 @@ def parsear_metadata(storage_root: str, job: Job) -> tuple[list[str], list[list[
                     if headers is None:
                         headers = lineas[0].split(_DELIMITADOR)
                     filas.extend(ln.split(_DELIMITADOR) for ln in lineas[1:])
-        except zipfile.BadZipFile:
-            continue
+        except zipfile.BadZipFile as exc:
+            logger.warning("parsear_metadata: %s no es un zip válido (job %s): %s", os.path.join(carpeta, nombre_zip), job.job_id, exc)
 
     if not encontro_txt or headers is None:
         raise MetadataNoDisponibleError("Los paquetes de este job no contienen metadata.")
