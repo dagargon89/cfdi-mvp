@@ -92,9 +92,8 @@ export function LoginPage() {
               <Button type="submit" loading={enviando} className="justify-center">
                 Entrar
               </Button>
-              <div className="flex justify-between text-[13px]">
+              <div className="flex text-[13px]">
                 <Link to="/registro" className="text-primary">Crear cuenta</Link>
-                <Link to="/recuperar" className="text-primary">¿Olvidaste tu contraseña?</Link>
               </div>
             </form>
           )}
