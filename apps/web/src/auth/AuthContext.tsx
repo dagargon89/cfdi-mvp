@@ -59,7 +59,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         setUsuario(await api.me());
       } catch (e) {
-        setLoginError(e instanceof ApiError ? 'No existe un usuario de Hub CFDI para este correo en este entorno.' : 'No se pudo iniciar sesión.');
+        const codigo = e instanceof ApiError ? e.codigo : '';
+        const msg =
+          codigo === 'CUENTA_PENDIENTE' ? 'Tu cuenta está pendiente de aprobación por un administrador.'
+          : codigo === 'CUENTA_INACTIVA' ? 'Tu cuenta está desactivada. Contacta al administrador.'
+          : 'No existe un usuario de Hub CFDI para este correo en este entorno.';
+        setLoginError(msg);
         await signOut(auth);
         setUsuario(null);
       } finally {

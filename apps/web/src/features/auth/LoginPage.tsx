@@ -2,7 +2,7 @@
 // sustituye por un formulario real de Firebase Auth (decisión de David: Firebase real desde ahora).
 import { AlertTriangle } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
-import { Navigate } from 'react-router';
+import { Link, Navigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/auth/AuthContext';
 
@@ -84,6 +84,10 @@ export function LoginPage() {
               <Button type="submit" loading={enviando} className="justify-center">
                 Entrar
               </Button>
+              <div className="flex justify-between text-[13px]">
+                <Link to="/registro" className="text-primary">Crear cuenta</Link>
+                <Link to="/recuperar" className="text-primary">¿Olvidaste tu contraseña?</Link>
+              </div>
             </form>
           )}
         </div>
