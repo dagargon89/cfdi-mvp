@@ -117,6 +117,17 @@ def enviar_correo(destino: "NotificacionDestino", evento: "Evento", credenciales
     _enviar(mensaje, credenciales)
 
 
+def enviar_aviso_registro(destinos: list[str], solicitante_correo: str, solicitante_nombre: str, credenciales: SmtpCredenciales) -> None:
+    """Aviso a los admins tras un auto-registro (RF-AUTH-02, spec 2026-07-29) — best-effort,
+    el caller decide qué hacer si falla o si no hay SMTP configurado."""
+    mensaje = EmailMessage()
+    mensaje["Subject"] = "Hub CFDI — nueva solicitud de acceso"
+    mensaje["From"] = credenciales.remitente
+    mensaje["To"] = ", ".join(destinos)
+    mensaje.set_content(f"{solicitante_nombre} ({solicitante_correo}) solicitó acceso a Hub CFDI.\n\nRevísalo y apruébalo en la sección Usuarios.")
+    _enviar(mensaje, credenciales)
+
+
 def enviar_correo_prueba(correo_destino: str, credenciales: SmtpCredenciales) -> None:
     """Botón "Enviar correo de prueba" del panel — valida host/usuario/contraseña de
     aplicación en vivo, antes de depender de que dispare una alerta real."""

@@ -65,6 +65,14 @@ class BootstrapAdminIn(BaseModel):
     token: str
 
 
+class RegistroIn(BaseModel):
+    nombre: str
+
+
+class RegistroOut(BaseModel):
+    estado: str
+
+
 class UsuarioCrearIn(BaseModel):
     correo: EmailStr
     nombre: str

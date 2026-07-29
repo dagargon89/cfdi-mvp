@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import Boolean, DateTime, String, func
 from sqlalchemy.dialects.mysql import TINYINT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,7 +22,10 @@ class Usuario(Base):
     nombre: Mapped[str] = mapped_column(String(120), nullable=False)
     rol_global: Mapped[RolGlobal] = mapped_column(enum_column(RolGlobal), nullable=False, default=RolGlobal.CONSULTA)
     activo: Mapped[bool] = mapped_column(TINYINT(1), nullable=False, default=1)
-    aprobado: Mapped[bool] = mapped_column(TINYINT(1), nullable=False, default=False)
+    # `Boolean` (no `TINYINT(1)` como `activo`): MySQL compila ambos a la misma columna física
+    # (`BOOL` es sinónimo de `TINYINT(1)`), pero `Boolean` sí trae result_processor que convierte
+    # el 0/1 crudo del DBAPI (asyncmy) a `bool` de Python — necesario para `usuario.aprobado is False/True`.
+    aprobado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
 
     permisos: Mapped[list["UsuarioEmpresa"]] = relationship(back_populates="usuario", cascade="all, delete-orphan")

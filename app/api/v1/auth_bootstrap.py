@@ -14,13 +14,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db
-from app.api.v1.schemas import BootstrapAdminIn, BootstrapStatusOut, UsuarioOut
+from app.api.deps import get_db, uid_del_token
+from app.api.v1.schemas import BootstrapAdminIn, BootstrapStatusOut, RegistroIn, RegistroOut, UsuarioOut
 from app.core.config import get_settings
 from app.core.security import firebase_app
 from app.models.enums import RolGlobal
 from app.repositories import usuarios as usuarios_repo
-from app.services import bitacora
+from app.services import bitacora, notificaciones
+from app.services.notificaciones import SmtpNoConfiguradoError
 
 logger = logging.getLogger("app")
 
@@ -62,3 +63,34 @@ async def bootstrap_admin(body: BootstrapAdminIn, db: AsyncSession = Depends(get
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"codigo": "BOOTSTRAP_FALLIDO", "mensaje": "No se pudo completar el alta de arranque."}) from exc
 
     return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)
+
+
+@router.post("/registro", status_code=status.HTTP_201_CREATED, response_model=RegistroOut)
+async def registro(body: RegistroIn, uid: str = Depends(uid_del_token), db: AsyncSession = Depends(get_db)) -> RegistroOut:
+    """Auto-registro (excepción explícita a RF-AUTH-02): el correo SIEMPRE viene de Firebase
+    (nunca del body, para que nadie pueda declarar un correo ajeno) y el usuario local se
+    crea `aprobado=False` — sin acceso hasta que un admin lo apruebe (`PATCH /usuarios/{id}`)."""
+    try:
+        cuenta = firebase_auth.get_user(uid, app=firebase_app())
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"codigo": "FIREBASE_ERROR", "mensaje": "No se pudo verificar la cuenta de Firebase."}) from exc
+    correo = cuenta.email
+    if await usuarios_repo.por_firebase_uid(db, uid) or (correo and await usuarios_repo.por_correo(db, correo)):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "YA_REGISTRADO", "mensaje": "Esta cuenta ya está registrada."})
+
+    usuario = await usuarios_repo.crear(db, firebase_uid=uid, correo=correo or f"{uid}@sin-correo.local", nombre=body.nombre, rol_global=RolGlobal.CONSULTA, aprobado=False)
+    await bitacora.registrar(db, actor=correo or uid, accion="auto_registro", entidad=f"usuario:{usuario.usuario_id}", detalle={"correo": correo})
+    await db.commit()
+
+    # Aviso a admins — best-effort: nunca rompe el registro.
+    try:
+        destinos = await usuarios_repo.correos_admins(db)
+        if destinos:
+            credenciales = await notificaciones.resolver_credenciales(db)
+            notificaciones.enviar_aviso_registro(destinos, correo or "", body.nombre, credenciales)
+    except SmtpNoConfiguradoError:
+        logger.info("registro: SMTP no configurado; no se envió aviso a admins.")
+    except Exception:  # noqa: BLE001
+        logger.warning("registro: fallo enviando el aviso a admins.", exc_info=True)
+
+    return RegistroOut(estado="pendiente")

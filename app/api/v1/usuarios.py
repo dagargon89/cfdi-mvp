@@ -8,6 +8,8 @@ correo (fuera de alcance de Sprint 1, ver notificaciones en Sprint 4).
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from firebase_admin import auth as firebase_auth
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,10 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require_admin
 from app.api.v1.schemas import PermisoEmpresaOut, PermisosIn, UsuarioAdminOut, UsuarioCrearIn, UsuarioOut, UsuarioPatchIn
 from app.core.security import firebase_app
+from app.models.enums import RolGlobal
 from app.models.usuario import Usuario
 from app.repositories import permisos as permisos_repo
 from app.repositories import usuarios as usuarios_repo
 from app.services import bitacora
+
+logger_usuarios = logging.getLogger("app")
 
 router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 
@@ -82,7 +87,28 @@ async def actualizar_usuario(
     await usuarios_repo.actualizar(db, usuario, activo=body.activo, rol_global=body.rol_global, aprobado=body.aprobado)
     await bitacora.registrar(
         db, actor=admin.correo, accion="editar_usuario", entidad=f"usuario:{usuario_id}",
-        detalle={"activo": body.activo, "rol_global": body.rol_global.value if body.rol_global else None},
+        detalle={"activo": body.activo, "rol_global": body.rol_global.value if body.rol_global else None, "aprobado": body.aprobado},
     )
     await db.commit()
     return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo, aprobado=usuario.aprobado)
+
+
+@router.delete("/{usuario_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_usuario(usuario_id: int, admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)) -> None:
+    usuario = await usuarios_repo.por_id(db, usuario_id)
+    if usuario is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    if usuario.usuario_id == admin.usuario_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "NO_AUTO_ELIMINACION", "mensaje": "No puedes eliminar tu propia cuenta."})
+    if usuario.rol_global == RolGlobal.ADMIN and await usuarios_repo.contar_admins_activos(db) <= 1:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "ULTIMO_ADMIN", "mensaje": "No puedes eliminar al último administrador."})
+
+    firebase_uid = usuario.firebase_uid
+    await usuarios_repo.eliminar(db, usuario)
+    await bitacora.registrar(db, actor=admin.correo, accion="eliminar_usuario", entidad=f"usuario:{usuario_id}", detalle={"correo": usuario.correo})
+    await db.commit()
+    # Borra la cuenta de Firebase best-effort (la eliminación local ya es efectiva).
+    try:
+        firebase_auth.delete_user(firebase_uid, app=firebase_app())
+    except Exception:  # noqa: BLE001
+        logger_usuarios.warning("eliminar_usuario: no se pudo borrar la cuenta Firebase %s.", firebase_uid, exc_info=True)
