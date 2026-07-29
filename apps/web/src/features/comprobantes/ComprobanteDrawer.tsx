@@ -2,10 +2,10 @@
 // Descargar PDF/Detalle/Zip añadido tras el freeze (2026-07-28, RF-RES-03/D2) — a diferencia
 // del XML (ya una URL firmada), estos se generan al vuelo detrás de auth normal, así que se
 // piden como Blob y se disparan como descarga (ver lib/descargarBlob.ts).
-// Cada botón (salvo el .zip) es un "split": la parte grande descarga y la pestaña del ojo
-// previsualiza el documento en una pestaña nueva sin descargarlo.
-import { Eye, Loader2 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+// Cada documento es un "split" con color/ícono propios: la parte grande descarga y la pestaña
+// del ojo previsualiza en una pestaña nueva (el .zip no se previsualiza).
+import { Archive, Eye, FileCheck2, FileCode2, FileText, Loader2, type LucideIcon } from 'lucide-react';
+import { useState } from 'react';
 import { Drawer, DrawerHeader } from '@/components/ui/Drawer';
 import { EstadoChip } from '@/components/ui/EstadoChip';
 import { useToast } from '@/components/ui/ToastProvider';
@@ -17,31 +17,49 @@ import { money } from '@/lib/domain';
 
 type Doc = 'pdf' | 'detalle' | 'zip';
 type Previsualizable = 'pdf' | 'detalle';
+type Tono = 'info' | 'primary' | 'success' | 'warning';
 
-const MAIN =
-  'inline-flex items-center gap-2 h-9 px-3.5 text-sm font-semibold text-text-strong ' +
-  'hover:bg-surface-alt disabled:opacity-50 disabled:pointer-events-none';
+const TONO: Record<Tono, { wrap: string; main: string }> = {
+  info: { wrap: 'border-info/30', main: 'text-info bg-info-soft hover:bg-info/15' },
+  primary: { wrap: 'border-primary/30', main: 'text-primary bg-primary-soft hover:bg-primary/15' },
+  success: { wrap: 'border-success/30', main: 'text-success bg-success-soft hover:bg-success/15' },
+  warning: { wrap: 'border-warning/40', main: 'text-warning bg-warning-soft hover:bg-warning/15' },
+};
 
-/** Botón dividido: acción principal (descargar) + pestaña opcional con ojo (previsualizar). */
-function SplitDescarga({ main, onPreview, previewLoading, disabled }: {
-  main: ReactNode;
+function SplitDescarga({ tono, Icon, label, href, onDescargar, onPreview, descargando, previsualizando, disabled }: {
+  tono: Tono;
+  Icon: LucideIcon;
+  label: string;
+  href?: string;
+  onDescargar?: () => void;
   onPreview?: () => void;
-  previewLoading?: boolean;
+  descargando?: boolean;
+  previsualizando?: boolean;
   disabled?: boolean;
 }) {
+  const t = TONO[tono];
+  const mainCls = `flex-1 inline-flex items-center justify-center gap-2 h-9 px-3 text-[13px] font-semibold ${t.main} disabled:opacity-50 disabled:pointer-events-none`;
   return (
-    <div className="inline-flex rounded-md border border-border overflow-hidden bg-surface">
-      {main}
+    <div className={`flex w-full rounded-md border ${t.wrap} overflow-hidden`}>
+      {href ? (
+        <a href={href} target="_blank" rel="noreferrer" className={mainCls}>
+          <Icon className="size-4 shrink-0" aria-hidden /> {label}
+        </a>
+      ) : (
+        <button type="button" onClick={onDescargar} disabled={disabled || !onDescargar} className={mainCls}>
+          {descargando ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Icon className="size-4 shrink-0" aria-hidden />} {label}
+        </button>
+      )}
       {onPreview && (
         <button
           type="button"
           onClick={onPreview}
           disabled={disabled}
           title="Previsualizar"
-          aria-label="Previsualizar documento"
-          className="inline-flex items-center justify-center h-9 px-2.5 border-l border-border text-text-strong hover:bg-surface-alt disabled:opacity-50 disabled:pointer-events-none"
+          aria-label={`Previsualizar ${label}`}
+          className={`inline-flex items-center justify-center h-9 px-2.5 border-l ${t.wrap} ${t.main} disabled:opacity-50 disabled:pointer-events-none`}
         >
-          {previewLoading ? <Loader2 className="size-[15px] animate-spin" aria-hidden /> : <Eye className="size-[15px]" aria-hidden />}
+          {previsualizando ? <Loader2 className="size-[15px] animate-spin" aria-hidden /> : <Eye className="size-[15px]" aria-hidden />}
         </button>
       )}
     </div>
@@ -55,7 +73,7 @@ export function ComprobanteDrawer({ comprobante, esEfos, onClose }: { comprobant
   const [previsualizando, setPrevisualizando] = useState<Previsualizable | null>(null);
   const ocupado = descargando !== null || previsualizando !== null;
 
-  async function pedirBlob(tipo: Previsualizable) {
+  function pedirBlob(tipo: Previsualizable) {
     return tipo === 'pdf'
       ? api.descargarComprobantePdf(empresa.empresa_id, comprobante.comprobante_id)
       : api.descargarComprobanteDetalle(empresa.empresa_id, comprobante.comprobante_id);
@@ -117,52 +135,57 @@ export function ComprobanteDrawer({ comprobante, esEfos, onClose }: { comprobant
           <div><dt className="text-xs text-text-muted font-semibold">Estatus verificado</dt><dd className="mt-0.5 mb-0 font-mono text-xs">{comprobante.estatus_verificado_at ?? '—'}</dd></div>
         </dl>
       </div>
-      <div className="border-t border-border p-4 flex gap-2 flex-wrap">
-        {comprobante.xml_path ? (
+      <div className="border-t border-border p-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-text-muted">Descargar documentos</span>
+          <span className="text-[11px] text-text-muted inline-flex items-center gap-1">
+            <Eye className="size-3.5" aria-hidden /> previsualizar
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
           <SplitDescarga
-            onPreview={() => {
-              const url = comprobante.xml_path!;
-              window.open(`${url}${url.includes('?') ? '&' : '?'}inline=1`, '_blank', 'noreferrer');
-            }}
-            main={
-              <a href={comprobante.xml_path} target="_blank" rel="noreferrer" className={MAIN}>
-                Descargar XML
-              </a>
+            tono="info"
+            Icon={FileCode2}
+            label="XML"
+            href={comprobante.xml_path ?? undefined}
+            onPreview={
+              comprobante.xml_path
+                ? () => {
+                    const u = comprobante.xml_path!;
+                    window.open(`${u}${u.includes('?') ? '&' : '?'}inline=1`, '_blank', 'noreferrer');
+                  }
+                : undefined
             }
           />
-        ) : (
-          <SplitDescarga main={<span className={`${MAIN} opacity-50 pointer-events-none`}>Descargar XML</span>} />
-        )}
-
-        <SplitDescarga
-          disabled={ocupado}
-          previewLoading={previsualizando === 'pdf'}
-          onPreview={() => previsualizar('pdf')}
-          main={
-            <button type="button" onClick={() => descargar('pdf')} disabled={ocupado} className={MAIN}>
-              {descargando === 'pdf' && <Loader2 className="size-4 animate-spin" aria-hidden />} Descargar PDF
-            </button>
-          }
-        />
-
-        <SplitDescarga
-          disabled={ocupado}
-          previewLoading={previsualizando === 'detalle'}
-          onPreview={() => previsualizar('detalle')}
-          main={
-            <button type="button" onClick={() => descargar('detalle')} disabled={ocupado} className={MAIN}>
-              {descargando === 'detalle' && <Loader2 className="size-4 animate-spin" aria-hidden />} Descargar Detalle
-            </button>
-          }
-        />
-
-        <SplitDescarga
-          main={
-            <button type="button" onClick={() => descargar('zip')} disabled={ocupado} className={MAIN}>
-              {descargando === 'zip' && <Loader2 className="size-4 animate-spin" aria-hidden />} Descargar todo (.zip)
-            </button>
-          }
-        />
+          <SplitDescarga
+            tono="primary"
+            Icon={FileText}
+            label="PDF"
+            onDescargar={() => descargar('pdf')}
+            descargando={descargando === 'pdf'}
+            onPreview={() => previsualizar('pdf')}
+            previsualizando={previsualizando === 'pdf'}
+            disabled={ocupado}
+          />
+          <SplitDescarga
+            tono="success"
+            Icon={FileCheck2}
+            label="Detalle"
+            onDescargar={() => descargar('detalle')}
+            descargando={descargando === 'detalle'}
+            onPreview={() => previsualizar('detalle')}
+            previsualizando={previsualizando === 'detalle'}
+            disabled={ocupado}
+          />
+          <SplitDescarga
+            tono="warning"
+            Icon={Archive}
+            label="Todo (.zip)"
+            onDescargar={() => descargar('zip')}
+            descargando={descargando === 'zip'}
+            disabled={ocupado}
+          />
+        </div>
       </div>
     </Drawer>
   );
