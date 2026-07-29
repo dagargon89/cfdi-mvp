@@ -99,6 +99,7 @@ export interface UsuarioAdmin {
   nombre: string;
   rol_global: Rol;
   activo: boolean;
+  aprobado: boolean;
   permisos: { empresa_id: number; empresa_nombre: string; rol: Rol }[];
 }
 
@@ -206,6 +207,9 @@ export interface ApiClient {
   guardarNotificaciones(empresaId: number, destinos: NotificacionDestino[]): Promise<void>;
   // Administración (añadido en el freeze — doc 05 §2/§8, consumido por P10/P11)
   listarUsuarios(): Promise<UsuarioAdmin[]>;
+  registrarUsuario(body: { nombre: string }): Promise<void>;
+  actualizarUsuario(id: number, body: { activo?: boolean; rol_global?: Rol; aprobado?: boolean }): Promise<void>;
+  eliminarUsuario(id: number): Promise<void>;
   listarConfiguracion(): Promise<ConfiguracionItem[]>;
   listarBitacora(f?: { page?: number }): Promise<Page<BitacoraEntrada>>;
   /** Añadidos tras el freeze (2026-07-28) — RF-NOT-01, Configuración → Correo. */

@@ -29,7 +29,7 @@ import { maxMesesVentana, ventanasDe } from './domain';
 
 // --- fixtures (db.json espejo del DDL, doc 03 — mismos datos que demo.html:945-996) -----------------
 
-interface DbUsuario { usuario_id: number; correo: string; nombre: string; rol_global: Rol; activo: 0 | 1 }
+interface DbUsuario { usuario_id: number; correo: string; nombre: string; rol_global: Rol; activo: 0 | 1; aprobado: 0 | 1 }
 interface DbEmpresa { empresa_id: number; nombre: string; rfc: string; activo: 0 | 1 }
 interface DbUsuarioEmpresa { usuario_id: number; empresa_id: number; rol: Rol }
 interface DbEfirma { efirma_id: number; empresa_id: number; num_serie: string; not_before: string; not_after: string }
@@ -51,9 +51,9 @@ interface DbConfig { clave: string; ejercicio_fiscal: string; valor: string | nu
 
 const db = {
   usuarios: [
-    { usuario_id: 1, correo: 'dgarcia@planjuarez.org', nombre: 'David García', rol_global: 'admin', activo: 1 },
-    { usuario_id: 2, correo: 'ana@demo.test', nombre: 'Ana Torres', rol_global: 'operador', activo: 1 },
-    { usuario_id: 3, correo: 'beto@demo.test', nombre: 'Beto Ruiz', rol_global: 'consulta', activo: 1 },
+    { usuario_id: 1, correo: 'dgarcia@planjuarez.org', nombre: 'David García', rol_global: 'admin', activo: 1, aprobado: 1 },
+    { usuario_id: 2, correo: 'ana@demo.test', nombre: 'Ana Torres', rol_global: 'operador', activo: 1, aprobado: 1 },
+    { usuario_id: 3, correo: 'beto@demo.test', nombre: 'Beto Ruiz', rol_global: 'consulta', activo: 1, aprobado: 1 },
   ] as DbUsuario[],
   empresas: [
     { empresa_id: 7, nombre: 'Comercializadora Demo Norte', rfc: 'EKU9003173C9', activo: 1 },
@@ -487,10 +487,41 @@ export const apiMock: ApiClient = {
       nombre: x.nombre,
       rol_global: x.rol_global,
       activo: !!x.activo,
+      aprobado: !!x.aprobado,
       permisos: db.usuario_empresa
         .filter((a) => a.usuario_id === x.usuario_id)
         .map((a) => ({ empresa_id: a.empresa_id, empresa_nombre: db.empresas.find((e) => e.empresa_id === a.empresa_id)?.nombre ?? '—', rol: a.rol })),
     }));
+  },
+
+  async registrarUsuario(body): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede registrar usuarios.');
+    const usuario_id = Math.max(...db.usuarios.map((x) => x.usuario_id)) + 1;
+    const correo = `usuario${usuario_id}@demo.test`;
+    db.usuarios.push({ usuario_id, correo, nombre: body.nombre, rol_global: 'consulta', activo: 1, aprobado: 0 });
+    logBitacora(u.correo, 'registrar_usuario', `usuario:${usuario_id}`, { nombre: body.nombre, correo });
+  },
+
+  async actualizarUsuario(id, body): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede actualizar usuarios.');
+    const usuario = db.usuarios.find((x) => x.usuario_id === id);
+    if (!usuario) throw new ApiError(404, 'NO_ENCONTRADO', 'El usuario no existe.');
+    if (body.activo !== undefined) usuario.activo = body.activo ? 1 : 0;
+    if (body.rol_global !== undefined) usuario.rol_global = body.rol_global;
+    if (body.aprobado !== undefined) usuario.aprobado = body.aprobado ? 1 : 0;
+    logBitacora(u.correo, 'actualizar_usuario', `usuario:${id}`, { activo: body.activo, rol_global: body.rol_global, aprobado: body.aprobado });
+  },
+
+  async eliminarUsuario(id): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede eliminar usuarios.');
+    const usuario = db.usuarios.find((x) => x.usuario_id === id);
+    if (!usuario) throw new ApiError(404, 'NO_ENCONTRADO', 'El usuario no existe.');
+    db.usuarios = db.usuarios.filter((x) => x.usuario_id !== id);
+    db.usuario_empresa = db.usuario_empresa.filter((x) => x.usuario_id !== id);
+    logBitacora(u.correo, 'eliminar_usuario', `usuario:${id}`, { correo: usuario.correo });
   },
 
   async listarConfiguracion(): Promise<ConfiguracionItem[]> {

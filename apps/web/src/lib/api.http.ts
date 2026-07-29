@@ -83,6 +83,9 @@ type ApiClientHttpSubset = Pick<
   | 'obtenerMetadata'
   | 'descargarMetadataCsv'
   | 'listarUsuarios'
+  | 'registrarUsuario'
+  | 'actualizarUsuario'
+  | 'eliminarUsuario'
   | 'listarBitacora'
   | 'listarEventos'
   | 'obtenerNotificaciones'
@@ -179,6 +182,12 @@ export const apiHttp: ApiClientHttpSubset = {
     requestBlob(`/v1/empresas/${empresaId}/jobs/${jobId}/metadata.csv`),
 
   listarUsuarios: () => request<UsuarioAdmin[]>('/v1/usuarios'),
+
+  registrarUsuario: (body) => request<void>(`/v1/auth/registro`, { method: 'POST', body: JSON.stringify(body) }),
+
+  actualizarUsuario: (id, body) => request<void>(`/v1/usuarios/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+  eliminarUsuario: (id) => request<void>(`/v1/usuarios/${id}`, { method: 'DELETE' }),
 
   listarBitacora: (f) => {
     const params = f?.page ? `?page=${f.page}` : '';
