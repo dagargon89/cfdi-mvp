@@ -1,9 +1,10 @@
 // Signup de arranque del primer administrador (spec 2026-07-29). Solo se muestra cuando la BD no tiene
 // usuarios; crea la cuenta Firebase (con contraseña) + el registro local admin vía POST /v1/auth/bootstrap.
 import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router';
+import { Navigate, useNavigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/ToastProvider';
+import { useAuth } from '@/auth/AuthContext';
 import { ApiError } from '@/lib/api';
 import { api } from '@/lib/client';
 
@@ -17,6 +18,7 @@ const ERROR_MENSAJE: Record<string, string> = {
 export function SignupPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { needsBootstrap } = useAuth();
   const [correo, setCorreo] = useState('');
   const [nombre, setNombre] = useState('');
   const [password, setPassword] = useState('');
@@ -24,6 +26,8 @@ export function SignupPage() {
   const [token, setToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
+
+  if (needsBootstrap === false) return <Navigate to="/login" replace />;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

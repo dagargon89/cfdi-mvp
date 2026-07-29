@@ -7,11 +7,13 @@ import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/auth/AuthContext';
 
 export function LoginPage() {
-  const { firebaseConfigured, usuario, loginError, login } = useAuth();
+  const { firebaseConfigured, usuario, loginError, login, needsBootstrap } = useAuth();
   const [correo, setCorreo] = useState('');
   const [password, setPassword] = useState('');
   const [enviando, setEnviando] = useState(false);
 
+  if (needsBootstrap === null) return null; // aún cargando el estado de bootstrap
+  if (needsBootstrap) return <Navigate to="/bootstrap" replace />;
   if (usuario) return <Navigate to="/empresas" replace />;
 
   async function onSubmit(e: FormEvent) {

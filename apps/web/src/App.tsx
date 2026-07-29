@@ -12,6 +12,7 @@ import { ConfigBitacoraPage } from '@/features/admin/ConfigBitacoraPage';
 import { UsuariosPage } from '@/features/admin/UsuariosPage';
 import { AlertasPage } from '@/features/alertas/AlertasPage';
 import { LoginPage } from '@/features/auth/LoginPage';
+import { SignupPage } from '@/features/auth/SignupPage';
 import { ComprobantesPage } from '@/features/comprobantes/ComprobantesPage';
 import { DescargasPage } from '@/features/descargas/DescargasPage';
 import { EfirmaPage } from '@/features/efirma/EfirmaPage';
@@ -28,6 +29,7 @@ export function App() {
           <AuthProvider>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
+              <Route path="/bootstrap" element={<SignupPage />} />
               <Route element={<RequireAuth />}>
                 {/* La empresa "pegajosa" del sidebar vive aquí: se resetea sola al cerrar sesión
                     (todo este subárbol se desmonta cuando RequireAuth redirige a /login). */}

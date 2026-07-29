@@ -16,6 +16,7 @@ interface AuthApi {
   loading: boolean;
   usuario: Usuario | null;
   loginError: string | null;
+  needsBootstrap: boolean | null;
   login: (correo: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -33,6 +34,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [usuario, setUsuario] = useState<Usuario | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [needsBootstrap, setNeedsBootstrap] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    api.estadoBootstrap()
+      .then((r) => setNeedsBootstrap(r.needs_bootstrap))
+      .catch(() => setNeedsBootstrap(false)); // ante fallo, no bloquear el login
+  }, []);
 
   useEffect(() => {
     if (!firebaseConfigured) {
@@ -79,7 +87,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, login, logout }}>
+    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, needsBootstrap, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
