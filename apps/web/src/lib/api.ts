@@ -211,7 +211,7 @@ export interface ApiClient {
   actualizarUsuario(id: number, body: { activo?: boolean; rol_global?: Rol; aprobado?: boolean }): Promise<void>;
   eliminarUsuario(id: number): Promise<void>;
   listarConfiguracion(): Promise<ConfiguracionItem[]>;
-  listarBitacora(f?: { page?: number }): Promise<Page<BitacoraEntrada>>;
+  listarBitacora(f?: { page?: number; per_page?: number }): Promise<Page<BitacoraEntrada>>;
   /** Añadidos tras el freeze (2026-07-28) — RF-NOT-01, Configuración → Correo. */
   obtenerConfigSmtp(): Promise<ConfigSmtp>;
   guardarConfigSmtp(input: ConfigSmtpIn): Promise<void>;

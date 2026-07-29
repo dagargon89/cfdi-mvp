@@ -17,7 +17,7 @@ router = APIRouter(prefix="/bitacora", tags=["bitacora"])
 @router.get("", response_model=BitacoraPageOut)
 async def listar_bitacora(
     page: int = Query(default=1, ge=1),
-    per_page: int = Query(default=50, ge=1, le=200),
+    per_page: int = Query(default=50, ge=1, le=100_000),  # tope alto: el frontend manda un valor grande para "Todos"
     admin: Usuario = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> BitacoraPageOut:

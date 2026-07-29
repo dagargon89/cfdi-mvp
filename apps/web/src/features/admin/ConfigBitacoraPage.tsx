@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router';
 import { Button } from '@/components/ui/Button';
-import { Paginador } from '@/components/ui/Paginador';
+import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError } from '@/lib/api';
 import { api } from '@/lib/client';
@@ -16,11 +16,13 @@ export function ConfigBitacoraPage() {
   const enBitacora = pathname.startsWith('/admin/bitacora');
   const enCorreo = pathname.startsWith('/admin/correo');
   const [pagina, setPagina] = useState(1);
+  const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
+  const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion(), enabled: !enBitacora && !enCorreo });
   const { data: bitacoraPage } = useQuery({
-    queryKey: ['bitacora', pagina],
-    queryFn: () => api.listarBitacora({ page: pagina }),
+    queryKey: ['bitacora', pagina, perPageEfectivo],
+    queryFn: () => api.listarBitacora({ page: pagina, per_page: perPageEfectivo }),
     enabled: enBitacora,
   });
 
@@ -103,7 +105,17 @@ export function ConfigBitacoraPage() {
               ))}
             </tbody>
           </table>
-          {bitacoraPage && <Paginador page={pagina} perPage={bitacoraPage.per_page} total={bitacoraPage.total} onChange={setPagina} />}
+          {bitacoraPage && (
+            <Paginador
+              page={pagina}
+              perPage={bitacoraPage.per_page}
+              total={bitacoraPage.total}
+              onChange={setPagina}
+              pageSize={porPagina}
+              pageSizeOptions={[10, 25, 50, 100, 'todos']}
+              onPageSizeChange={(v) => { setPorPagina(v); setPagina(1); }}
+            />
+          )}
         </div>
       )}
     </div>

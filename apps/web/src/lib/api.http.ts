@@ -192,8 +192,11 @@ export const apiHttp: ApiClientHttpSubset = {
   eliminarUsuario: (id) => request<void>(`/v1/usuarios/${id}`, { method: 'DELETE' }),
 
   listarBitacora: (f) => {
-    const params = f?.page ? `?page=${f.page}` : '';
-    return request<Page<BitacoraEntrada>>(`/v1/bitacora${params}`);
+    const params = new URLSearchParams();
+    if (f?.page) params.set('page', String(f.page));
+    if (f?.per_page) params.set('per_page', String(f.per_page));
+    const qs = params.toString();
+    return request<Page<BitacoraEntrada>>(`/v1/bitacora${qs ? `?${qs}` : ''}`);
   },
 
   listarEventos: (empresaId, f) => {
