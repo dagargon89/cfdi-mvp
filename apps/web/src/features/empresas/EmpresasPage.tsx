@@ -70,13 +70,13 @@ function EmpresaCard({ empresa, umbral, esAdmin }: { empresa: EmpresaResumen; um
   });
 
   return (
-    <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-3" style={{ opacity: inactiva ? 0.6 : 1 }}>
-      <div className="flex items-start gap-2.5">
-        <div className="flex-1 min-w-0">
-          <div className="font-semibold text-[15px] text-pretty">{empresa.nombre}</div>
-          <div className="font-mono text-xs text-text-muted mt-0.5">{empresa.rfc}</div>
+    <div className="bg-surface border border-border rounded-lg p-5 flex flex-col gap-4 h-full transition-shadow hover:shadow-sm" style={{ opacity: inactiva ? 0.6 : 1 }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="font-semibold text-[15px] leading-snug text-pretty">{empresa.nombre}</div>
+          <div className="font-mono text-xs text-text-muted mt-1">{empresa.rfc}</div>
         </div>
-        <span className="text-[11px] font-semibold text-text-muted bg-surface-alt rounded-md px-2 py-0.5 whitespace-nowrap">{empresa.rol}</span>
+        <span className="shrink-0 text-[11px] font-semibold text-text-muted bg-surface-alt rounded-full px-2.5 py-1 whitespace-nowrap capitalize">{empresa.rol}</span>
       </div>
       <div className="flex flex-wrap gap-1.5">
         <ChipEfirma empresa={empresa} umbral={umbral} />
@@ -85,24 +85,24 @@ function EmpresaCard({ empresa, umbral, esAdmin }: { empresa: EmpresaResumen; um
           <span className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold text-danger bg-danger-soft">{eventos.total} alertas</span>
         )}
       </div>
-      <div className="flex flex-wrap gap-2 mt-0.5">
-        <Button disabled={inactiva} onClick={() => navigate(`/e/${empresa.empresa_id}`)}>
+      <div className="mt-auto pt-4 border-t border-border flex flex-col gap-2">
+        <Button className="w-full justify-center" disabled={inactiva} onClick={() => navigate(`/e/${empresa.empresa_id}`)}>
           Abrir
         </Button>
         {sinEfirma && (
-          <Button variant="secondary" disabled={inactiva} onClick={() => navigate(`/e/${empresa.empresa_id}/efirma`)}>
+          <Button variant="secondary" className="w-full justify-center" disabled={inactiva} onClick={() => navigate(`/e/${empresa.empresa_id}/efirma`)}>
             Dar de alta e.firma
           </Button>
         )}
         {esAdmin && (
-          <Button variant="secondary" onClick={() => toggleActivo.mutate()} loading={toggleActivo.isPending} disabled={toggleActivo.isPending}>
-            <Power className="size-3.5" aria-hidden /> {inactiva ? 'Activar' : 'Desactivar'}
-          </Button>
-        )}
-        {esAdmin && (
-          <Button variant="danger" onClick={() => setModalBorrar(true)}>
-            <Trash2 className="size-3.5" aria-hidden /> Eliminar
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="secondary" className="flex-1 justify-center" onClick={() => toggleActivo.mutate()} loading={toggleActivo.isPending} disabled={toggleActivo.isPending}>
+              <Power className="size-3.5" aria-hidden /> {inactiva ? 'Activar' : 'Desactivar'}
+            </Button>
+            <Button variant="danger" className="flex-1 justify-center" onClick={() => setModalBorrar(true)}>
+              <Trash2 className="size-3.5" aria-hidden /> Eliminar
+            </Button>
+          </div>
         )}
       </div>
       {modalBorrar && (
