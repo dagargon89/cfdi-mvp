@@ -1,16 +1,24 @@
 // Puerto de demo.html:32-70 (P1 Login) — el selector de "cuentas de demostración" del prototipo se
 // sustituye por un formulario real de Firebase Auth (decisión de David: Firebase real desde ahora).
 import { AlertTriangle } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/auth/AuthContext';
 
 export function LoginPage() {
-  const { firebaseConfigured, usuario, loginError, login, needsBootstrap } = useAuth();
+  const { firebaseConfigured, usuario, loginError, login, needsBootstrap, limpiarLoginError } = useAuth();
   const [correo, setCorreo] = useState('');
   const [password, setPassword] = useState('');
   const [enviando, setEnviando] = useState(false);
+
+  // Una visita fresca a /login no debe arrastrar un loginError dejado por el onAuthStateChanged
+  // global (p. ej. tras registrarse: la cuenta queda pendiente y ese listener setea el error en
+  // segundo plano). Limpiar solo al montar no afecta el caso de un intento de login real, que
+  // vuelve a setear el mensaje a través de login() -> onAuthStateChanged.
+  useEffect(() => {
+    limpiarLoginError();
+  }, [limpiarLoginError]);
 
   if (needsBootstrap === null) return null; // aún cargando el estado de bootstrap
   if (needsBootstrap) return <Navigate to="/bootstrap" replace />;

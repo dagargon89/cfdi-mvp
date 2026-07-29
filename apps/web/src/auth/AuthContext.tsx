@@ -3,7 +3,7 @@
 // real con el uid de Firebase (doc 02 §4.1). Si el correo no tiene usuario local, se cierra la sesión
 // de Firebase y se muestra un error, en vez de dejar pasar a alguien sin registro en el sistema.
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { ApiError } from '@/lib/api';
 import type { ApiClient } from '@/lib/api';
 import { api } from '@/lib/client';
@@ -20,6 +20,7 @@ interface AuthApi {
   setNeedsBootstrap: (v: boolean) => void;
   login: (correo: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  limpiarLoginError: () => void;
 }
 
 const AuthContext = createContext<AuthApi | null>(null);
@@ -92,8 +93,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsuario(null);
   }
 
+  // useCallback con identidad estable: LoginPage lo usa como dependencia de un useEffect que solo
+  // debe correr al montar (limpiar el loginError heredado del onAuthStateChanged global), no en
+  // cada re-render de AuthProvider — si la referencia cambiara cada vez, ese efecto podría volver
+  // a limpiar el mensaje justo después de que login() lo setee tras un intento real.
+  const limpiarLoginError = useCallback(() => setLoginError(null), []);
+
   return (
-    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, needsBootstrap, setNeedsBootstrap, login, logout }}>
+    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, needsBootstrap, setNeedsBootstrap, login, logout, limpiarLoginError }}>
       {children}
     </AuthContext.Provider>
   );
