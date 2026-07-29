@@ -26,7 +26,7 @@ export function DescargasPage() {
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion() });
   const [pagina, setPagina] = useState(1);
-  const [porPagina, setPorPagina] = useState<TamañoPagina>(50);
+  const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
   const [filtroSolicitud, setFiltroSolicitud] = useState<'' | 'CFDI' | 'METADATA'>('');
   const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
   const { data: jobsPage } = useJobs(empresa.empresa_id, pagina, filtroSolicitud || undefined, perPageEfectivo);

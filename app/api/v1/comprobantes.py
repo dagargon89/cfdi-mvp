@@ -49,9 +49,12 @@ async def listar_comprobantes_endpoint(
     direccion: Literal["emitido", "recibido"] | None = None,
     q: str | None = None,
     page: int = 1,
+    per_page: int = 50,
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> ComprobantePageOut:
+    # `per_page` acotado a [1, 100000]: el frontend manda un valor grande para "Todos" (una sola página).
+    per_page = max(1, min(per_page, 100_000))
     rfc_empresa = None
     if direccion is not None:
         empresa = await empresas_repo.por_id(db, empresa_id)
@@ -69,8 +72,9 @@ async def listar_comprobantes_endpoint(
         rfc_empresa=rfc_empresa,
         q=q,
         page=page,
+        per_page=per_page,
     )
-    return ComprobantePageOut(data=[comprobante_a_out(c) for c in filas], page=page, per_page=50, total=total)
+    return ComprobantePageOut(data=[comprobante_a_out(c) for c in filas], page=page, per_page=per_page, total=total)
 
 
 @router.post("/validar", status_code=status.HTTP_202_ACCEPTED, response_model=TareaCrearOut)

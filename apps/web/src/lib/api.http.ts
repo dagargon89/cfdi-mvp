@@ -149,6 +149,7 @@ export const apiHttp: ApiClientHttpSubset = {
     if (f?.direccion) params.set('direccion', f.direccion);
     if (f?.q) params.set('q', f.q);
     if (f?.page) params.set('page', String(f.page));
+    if (f?.per_page) params.set('per_page', String(f.per_page));
     const qs = params.toString();
     return request<Page<Comprobante>>(`/v1/empresas/${empresaId}/comprobantes${qs ? `?${qs}` : ''}`);
   },

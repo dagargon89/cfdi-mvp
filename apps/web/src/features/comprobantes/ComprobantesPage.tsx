@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { EstadoChip } from '@/components/ui/EstadoChip';
-import { Paginador } from '@/components/ui/Paginador';
+import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -27,6 +27,7 @@ export function ComprobantesPage() {
   const [desde, setDesde] = useState('');
   const [direccion, setDireccion] = useState<'emitido' | 'recibido' | ''>('');
   const [pagina, setPagina] = useState(1);
+  const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
   const [abierto, setAbierto] = useState<Comprobante | null>(null);
   const [exportando, setExportando] = useState(false);
   const [validando, setValidando] = useState(false);
@@ -45,9 +46,10 @@ export function ComprobantesPage() {
     desde: desde || undefined,
     direccion: direccion || undefined,
   };
+  const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
   const { data: page } = useQuery({
-    queryKey: ['comprobantes', empresa.empresa_id, filtros, pagina],
-    queryFn: () => api.listarComprobantes(empresa.empresa_id, { ...filtros, page: pagina }),
+    queryKey: ['comprobantes', empresa.empresa_id, filtros, pagina, perPageEfectivo],
+    queryFn: () => api.listarComprobantes(empresa.empresa_id, { ...filtros, page: pagina, per_page: perPageEfectivo }),
   });
   const { data: totalEmpresa } = useQuery({ queryKey: ['comprobantes', empresa.empresa_id], queryFn: () => api.listarComprobantes(empresa.empresa_id) });
   const { data: efosPage } = useQuery({ queryKey: ['eventos', empresa.empresa_id, 'efos'], queryFn: () => api.listarEventos(empresa.empresa_id, { tipo: 'efos' }) });
@@ -281,7 +283,17 @@ export function ComprobantesPage() {
           </div>
         )}
 
-        {page && <Paginador page={pagina} perPage={page.per_page} total={page.total} onChange={setPagina} />}
+        {page && (
+          <Paginador
+            page={pagina}
+            perPage={page.per_page}
+            total={page.total}
+            onChange={setPagina}
+            pageSize={porPagina}
+            pageSizeOptions={[10, 25, 50, 100, 'todos']}
+            onPageSizeChange={(v) => { setPorPagina(v); setPagina(1); }}
+          />
+        )}
       </div>
 
       {abierto && <ComprobanteDrawer comprobante={abierto} esEfos={efosUuids.has(abierto.uuid)} onClose={() => setAbierto(null)} />}

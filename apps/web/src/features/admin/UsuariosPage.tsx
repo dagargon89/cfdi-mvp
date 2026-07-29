@@ -2,20 +2,22 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
-import { Paginador } from '@/components/ui/Paginador';
+import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { api } from '@/lib/client';
 
-// `listarUsuarios()` devuelve el arreglo completo (no está paginado en el backend — la
-// lista de usuarios internos del despacho es chica); se pagina aquí solo en cliente para
-// que la tabla se vea consistente con el resto del proyecto.
-const POR_PAGINA = 20;
+// `listarUsuarios()` devuelve el arreglo completo (no está paginado en el backend — la lista de
+// usuarios internos del despacho es chica); se pagina aquí solo en cliente, con el mismo selector
+// de tamaño (incluida la opción "Todos") que el resto de las tablas.
 
 export function UsuariosPage() {
   const { data: usuarios } = useQuery({ queryKey: ['usuarios'], queryFn: () => api.listarUsuarios() });
   const [pagina, setPagina] = useState(1);
-  const usuariosPagina = (usuarios ?? []).slice((pagina - 1) * POR_PAGINA, pagina * POR_PAGINA);
-  const pendientes = (usuarios ?? []).filter((u) => !u.aprobado).length;
+  const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
+  const lista = usuarios ?? [];
+  const perPageEfectivo = porPagina === 'todos' ? Math.max(lista.length, 1) : porPagina;
+  const usuariosPagina = porPagina === 'todos' ? lista : lista.slice((pagina - 1) * perPageEfectivo, pagina * perPageEfectivo);
+  const pendientes = lista.filter((u) => !u.aprobado).length;
 
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -111,7 +113,15 @@ export function UsuariosPage() {
             })}
           </tbody>
         </table>
-        <Paginador page={pagina} perPage={POR_PAGINA} total={usuarios?.length ?? 0} onChange={setPagina} />
+        <Paginador
+          page={pagina}
+          perPage={perPageEfectivo}
+          total={lista.length}
+          onChange={setPagina}
+          pageSize={porPagina}
+          pageSizeOptions={[10, 25, 50, 100, 'todos']}
+          onPageSizeChange={(v) => { setPorPagina(v); setPagina(1); }}
+        />
       </div>
     </div>
   );
