@@ -1,5 +1,5 @@
 // demo.html:1209-1221 (alertaVista) — compartido entre TableroPage (preview) y AlertasPage (lista completa).
-import { AlertTriangle, Clock, KeyRound, type LucideIcon } from 'lucide-react';
+import { AlertTriangle, Clock, KeyRound, RefreshCw, type LucideIcon } from 'lucide-react';
 import type { Evento } from '@/lib/api';
 import { money } from '@/lib/domain';
 
@@ -40,11 +40,35 @@ export function alertaVista(ev: Evento, empresaId: number): AlertaVista {
       accionHref: `/e/${empresaId}/comprobantes?q=${encodeURIComponent(d.uuid)}`,
     };
   }
-  const d = ev.detalle as { not_after: string; dias_restantes: number };
+  if (ev.tipo === 'resumen_sync') {
+    const d = ev.detalle as { fecha?: string; empresas?: number };
+    return {
+      fg: 'text-info', bg: 'bg-info-soft', Icon: RefreshCw, tipo: 'resumen_sync',
+      titulo: 'Sincronización diaria',
+      detalle: `Sincronización del ${d.fecha ?? '—'}: ${d.empresas ?? 0} empresa(s) procesada(s).`,
+      uuids: null, createdAt,
+      accionTexto: 'Ver descargas',
+      accionHref: `/e/${empresaId}/descargas`,
+    };
+  }
+  if (ev.tipo === 'error_descarga') {
+    const d = ev.detalle as { mensaje?: string };
+    return {
+      fg: 'text-danger', bg: 'bg-danger-soft', Icon: AlertTriangle, tipo: 'error_descarga',
+      titulo: 'Error en una descarga',
+      detalle: d.mensaje ?? 'Ocurrió un error al descargar del SAT.',
+      uuids: null, createdAt,
+      accionTexto: 'Ver descargas',
+      accionHref: `/e/${empresaId}/descargas`,
+    };
+  }
+  // efirma_por_vencer: el backend crea este evento cuando la e.firma bloquea la sincronización
+  // (ausente o vencida) y guarda el motivo en `detalle.mensaje` — no trae fecha ni días.
+  const d = ev.detalle as { mensaje?: string };
   return {
     fg: 'text-warning', bg: 'bg-warning-soft', Icon: KeyRound, tipo: 'efirma_por_vencer',
-    titulo: 'e.firma por vencer',
-    detalle: `Vence el ${d.not_after} — quedan ${d.dias_restantes} días.`,
+    titulo: 'Problema con la e.firma',
+    detalle: d.mensaje ?? 'Revisa la vigencia de la e.firma de esta empresa.',
     uuids: null, createdAt,
     accionTexto: 'Ir a la bóveda',
     accionHref: `/e/${empresaId}/efirma`,

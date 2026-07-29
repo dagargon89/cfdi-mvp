@@ -179,7 +179,7 @@ export interface ApiClient {
       simVencidaDemo?: boolean;
     },
   ): Promise<{ job_ids: number[]; ventanas: number }>;
-  listarJobs(empresaId: number, f?: { estado?: EstadoJob; origen?: 'manual' | 'sync'; solicitud?: 'CFDI' | 'METADATA'; page?: number }): Promise<Page<Job>>;
+  listarJobs(empresaId: number, f?: { estado?: EstadoJob; origen?: 'manual' | 'sync'; solicitud?: 'CFDI' | 'METADATA'; page?: number; per_page?: number }): Promise<Page<Job>>;
   reintentarJob(empresaId: number, jobId: number): Promise<void>;
   // Comprobantes (prioridades 2–3)
   listarComprobantes(

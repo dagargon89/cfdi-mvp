@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { EstadoChip } from '@/components/ui/EstadoChip';
-import { Paginador } from '@/components/ui/Paginador';
+import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -26,8 +26,10 @@ export function DescargasPage() {
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion() });
   const [pagina, setPagina] = useState(1);
+  const [porPagina, setPorPagina] = useState<TamañoPagina>(50);
   const [filtroSolicitud, setFiltroSolicitud] = useState<'' | 'CFDI' | 'METADATA'>('');
-  const { data: jobsPage } = useJobs(empresa.empresa_id, pagina, filtroSolicitud || undefined);
+  const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
+  const { data: jobsPage } = useJobs(empresa.empresa_id, pagina, filtroSolicitud || undefined, perPageEfectivo);
   const jobs = jobsPage?.data ?? [];
 
   const [tipo, setTipo] = useState<'recibido' | 'emitido'>('recibido');
@@ -203,7 +205,17 @@ export function DescargasPage() {
 
         {jobs.length === 0 && <div className="p-8 text-center text-text-muted text-[13px]">Aún no hay descargas para esta empresa.</div>}
 
-        {jobsPage && <Paginador page={pagina} perPage={jobsPage.per_page} total={jobsPage.total} onChange={setPagina} />}
+        {jobsPage && (
+          <Paginador
+            page={pagina}
+            perPage={jobsPage.per_page}
+            total={jobsPage.total}
+            onChange={setPagina}
+            pageSize={porPagina}
+            pageSizeOptions={[10, 25, 50, 100, 'todos']}
+            onPageSizeChange={(v) => { setPorPagina(v); setPagina(1); }}
+          />
+        )}
       </div>
 
       {jobDrawer && (

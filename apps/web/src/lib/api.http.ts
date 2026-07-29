@@ -133,6 +133,7 @@ export const apiHttp: ApiClientHttpSubset = {
     if (f?.origen) params.set('origen', f.origen);
     if (f?.solicitud) params.set('solicitud', f.solicitud);
     if (f?.page) params.set('page', String(f.page));
+    if (f?.per_page) params.set('per_page', String(f.per_page));
     const qs = params.toString();
     return request<Page<Job>>(`/v1/empresas/${empresaId}/jobs${qs ? `?${qs}` : ''}`);
   },

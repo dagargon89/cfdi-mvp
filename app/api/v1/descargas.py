@@ -70,11 +70,14 @@ async def listar_jobs_endpoint(
     origen: OrigenJob | None = None,
     solicitud: SolicitudTipo | None = None,
     page: int = 1,
+    per_page: int = 50,
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> JobPageOut:
-    jobs, total = await jobs_repo.listar(db, empresa_id, estado=estado, origen=origen, solicitud=solicitud, page=page)
-    return JobPageOut(data=[job_a_out(j) for j in jobs], page=page, per_page=50, total=total)
+    # `per_page` acotado a [1, 100000]: el frontend manda un valor grande para "Todos" (una sola página).
+    per_page = max(1, min(per_page, 100_000))
+    jobs, total = await jobs_repo.listar(db, empresa_id, estado=estado, origen=origen, solicitud=solicitud, page=page, per_page=per_page)
+    return JobPageOut(data=[job_a_out(j) for j in jobs], page=page, per_page=per_page, total=total)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
