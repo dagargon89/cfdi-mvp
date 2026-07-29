@@ -105,6 +105,7 @@ async def listar(
     *,
     estado: EstadoJob | None = None,
     origen: OrigenJob | None = None,
+    solicitud: SolicitudTipo | None = None,
     page: int = 1,
     per_page: int = 50,
 ) -> tuple[list[Job], int]:
@@ -113,6 +114,8 @@ async def listar(
         filtros.append(Job.estado == estado)
     if origen is not None:
         filtros.append(Job.origen == origen)
+    if solicitud is not None:
+        filtros.append(Job.solicitud == solicitud)
 
     total = await db.scalar(select(func.count()).select_from(Job).where(*filtros)) or 0
     result = await db.scalars(

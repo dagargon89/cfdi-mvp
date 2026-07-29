@@ -191,3 +191,19 @@ async def test_endpoint_csv_ok(client: AsyncClient, db: AsyncSession, monkeypatc
     assert res.headers["content-type"].startswith("text/csv")
     assert f"metadata_job{job.job_id}.csv" in res.headers["content-disposition"]
     assert res.content.startswith(b"\xef\xbb\xbf")
+
+
+async def test_listar_jobs_filtra_por_solicitud(client: AsyncClient, db: AsyncSession) -> None:
+    await crear_usuario(db, uid="uid-filtro", correo="filtro@demo.test", rol_global=RolGlobal.ADMIN)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    for sol in (SolicitudTipo.CFDI, SolicitudTipo.METADATA):
+        db.add(Job(
+            empresa_id=empresa.empresa_id, tipo=TipoJob.RECIBIDO, solicitud=sol, origen=OrigenJob.MANUAL,
+            fecha_inicial=date(2026, 1, 1), fecha_final=date(2026, 1, 31), estado=EstadoJob.DESCARGADO,
+            intentos=0, paquetes=1,
+        ))
+    await db.commit()
+    res = await client.get(f"/v1/empresas/{empresa.empresa_id}/jobs?solicitud=METADATA", headers={"Authorization": "Bearer uid-filtro"})
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) == 1 and data[0]["solicitud"] == "METADATA"

@@ -10,7 +10,7 @@ from app.api.deps import ContextoEmpresa, get_db, require_empresa
 from app.api.v1.composers import job_a_out
 from app.api.v1.schemas import DescargaCrearIn, DescargaCrearOut, JobOut, JobPageOut, MetadataPreviewOut
 from app.core.config import get_settings
-from app.models.enums import EstadoJob, OrigenJob, RolEmpresa
+from app.models.enums import EstadoJob, OrigenJob, RolEmpresa, SolicitudTipo
 from app.repositories import empresas as empresas_repo
 from app.repositories import jobs as jobs_repo
 from app.sat_hub.errors import FielVencidaError, TransicionIlegalError
@@ -67,11 +67,12 @@ async def listar_jobs_endpoint(
     empresa_id: int,
     estado: EstadoJob | None = None,
     origen: OrigenJob | None = None,
+    solicitud: SolicitudTipo | None = None,
     page: int = 1,
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> JobPageOut:
-    jobs, total = await jobs_repo.listar(db, empresa_id, estado=estado, origen=origen, page=page)
+    jobs, total = await jobs_repo.listar(db, empresa_id, estado=estado, origen=origen, solicitud=solicitud, page=page)
     return JobPageOut(data=[job_a_out(j) for j in jobs], page=page, per_page=50, total=total)
 
 
