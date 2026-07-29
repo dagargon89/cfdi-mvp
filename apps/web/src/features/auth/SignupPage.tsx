@@ -18,7 +18,7 @@ const ERROR_MENSAJE: Record<string, string> = {
 export function SignupPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { needsBootstrap } = useAuth();
+  const { needsBootstrap, setNeedsBootstrap } = useAuth();
   const [correo, setCorreo] = useState('');
   const [nombre, setNombre] = useState('');
   const [password, setPassword] = useState('');
@@ -27,6 +27,7 @@ export function SignupPage() {
   const [error, setError] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
 
+  if (needsBootstrap === null) return null; // aún cargando el estado de bootstrap
   if (needsBootstrap === false) return <Navigate to="/login" replace />;
 
   async function onSubmit(e: FormEvent) {
@@ -40,6 +41,7 @@ export function SignupPage() {
     try {
       await api.crearAdminBootstrap({ correo, nombre, password, token });
       toast('Administrador creado. Inicia sesión con tus credenciales.', 'ok');
+      setNeedsBootstrap(false);
       navigate('/login', { replace: true });
     } catch (err) {
       if (err instanceof ApiError) setError(ERROR_MENSAJE[err.codigo] ?? err.message);

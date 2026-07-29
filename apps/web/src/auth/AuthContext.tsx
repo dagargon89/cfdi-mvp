@@ -17,6 +17,7 @@ interface AuthApi {
   usuario: Usuario | null;
   loginError: string | null;
   needsBootstrap: boolean | null;
+  setNeedsBootstrap: (v: boolean) => void;
   login: (correo: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -87,7 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, needsBootstrap, login, logout }}>
+    <AuthContext.Provider value={{ firebaseConfigured, loading, usuario, loginError, needsBootstrap, setNeedsBootstrap, login, logout }}>
       {children}
     </AuthContext.Provider>
   );

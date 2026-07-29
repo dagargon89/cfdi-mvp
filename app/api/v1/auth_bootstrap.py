@@ -7,6 +7,7 @@ esté vacía. Protegidos por un token de arranque del servidor (BOOTSTRAP_ADMIN_
 
 from __future__ import annotations
 
+import logging
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,6 +21,8 @@ from app.core.security import firebase_app
 from app.models.enums import RolGlobal
 from app.repositories import usuarios as usuarios_repo
 from app.services import bitacora
+
+logger = logging.getLogger("app")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -52,7 +55,10 @@ async def bootstrap_admin(body: BootstrapAdminIn, db: AsyncSession = Depends(get
         await db.commit()
     except Exception as exc:  # noqa: BLE001 — no dejar cuenta huérfana en Firebase si el registro local falla
         await db.rollback()
-        firebase_auth.delete_user(cuenta.uid, app=firebase_app())
+        try:
+            firebase_auth.delete_user(cuenta.uid, app=firebase_app())
+        except Exception:  # noqa: BLE001 — no enmascarar el 500 BOOTSTRAP_FALLIDO si la limpieza falla
+            logger.warning("No se pudo eliminar la cuenta huérfana de Firebase uid=%s tras fallo de bootstrap", cuenta.uid, exc_info=True)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"codigo": "BOOTSTRAP_FALLIDO", "mensaje": "No se pudo completar el alta de arranque."}) from exc
 
     return UsuarioOut(usuario_id=usuario.usuario_id, correo=usuario.correo, nombre=usuario.nombre, rol_global=usuario.rol_global.value, activo=usuario.activo)
