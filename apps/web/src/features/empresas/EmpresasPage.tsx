@@ -2,8 +2,8 @@
 // Alta/baja de empresa (RF-EMP-01/02) no estaban en el prototipo — se agregaron cuando el
 // backend real ya las soportaba y David preguntó cómo hacerlo.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, Clock, Power, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
-import { useState } from 'react';
+import { Building2, Clock, Power, Search, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { ConfirmarRfcModal } from '@/components/ui/ConfirmarRfcModal';
@@ -37,6 +37,13 @@ function ChipEfirma({ empresa, umbral }: { empresa: EmpresaResumen; umbral: numb
       <ShieldCheck className="size-3.5" aria-hidden /> e.firma vigente
     </span>
   );
+}
+
+type EstadoEfirma = 'vigente' | 'por_vencer' | 'sin';
+
+function estadoEfirma(empresa: EmpresaResumen, umbral: number): EstadoEfirma {
+  if (!empresa.efirma?.presente) return 'sin';
+  return diasParaVencer(empresa.efirma.not_after!) <= umbral ? 'por_vencer' : 'vigente';
 }
 
 function EmpresaCard({ empresa, umbral, esAdmin }: { empresa: EmpresaResumen; umbral: number; esAdmin: boolean }) {
@@ -124,6 +131,8 @@ function EmpresaCard({ empresa, umbral, esAdmin }: { empresa: EmpresaResumen; um
   );
 }
 
+const SELECT = 'h-9 border border-border rounded-md bg-surface px-2.5 text-[13px] text-text-strong';
+
 export function EmpresasPage() {
   const { usuario } = useAuth();
   const { data: empresas } = useEmpresas();
@@ -132,20 +141,79 @@ export function EmpresasPage() {
   const esAdmin = usuario?.rol_global === 'admin';
   const [modalAbierto, setModalAbierto] = useState(false);
 
+  const [q, setQ] = useState('');
+  const [fEstado, setFEstado] = useState<'todas' | 'activas' | 'inactivas'>('todas');
+  const [fEfirma, setFEfirma] = useState<'todas' | EstadoEfirma>('todas');
+
+  const total = empresas?.length ?? 0;
+  const filtradas = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return (empresas ?? []).filter((e) => {
+      if (term && !(e.nombre.toLowerCase().includes(term) || e.rfc.toLowerCase().includes(term))) return false;
+      if (fEstado === 'activas' && !e.activo) return false;
+      if (fEstado === 'inactivas' && e.activo) return false;
+      if (fEfirma !== 'todas' && estadoEfirma(e, umbral) !== fEfirma) return false;
+      return true;
+    });
+  }, [empresas, q, fEstado, fEfirma, umbral]);
+
+  const hayFiltros = q.trim() !== '' || fEstado !== 'todas' || fEfirma !== 'todas';
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-end gap-3">
         <div className="flex-1">
           <h2 className="m-0 text-[22px] font-bold">Mis empresas</h2>
           <p className="mt-1 mb-0 text-text-muted">
-            {empresas?.length ?? 0} empresa(s) con acceso · rol global {usuario?.rol_global}
+            {hayFiltros ? `${filtradas.length} de ${total}` : total} empresa(s) con acceso · rol global {usuario?.rol_global}
           </p>
         </div>
         {esAdmin && <Button onClick={() => setModalAbierto(true)}>Nueva empresa</Button>}
       </div>
+
+      {total > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-text-muted" aria-hidden />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Buscar por nombre o RFC…"
+              aria-label="Buscar empresas"
+              className="w-full h-9 border border-border rounded-md bg-surface pl-8 pr-3 text-[13px]"
+            />
+          </div>
+          <select aria-label="Filtrar por estado" value={fEstado} onChange={(e) => setFEstado(e.target.value as typeof fEstado)} className={SELECT}>
+            <option value="todas">Estado: todas</option>
+            <option value="activas">Activas</option>
+            <option value="inactivas">Inactivas</option>
+          </select>
+          <select aria-label="Filtrar por e.firma" value={fEfirma} onChange={(e) => setFEfirma(e.target.value as typeof fEfirma)} className={SELECT}>
+            <option value="todas">e.firma: todas</option>
+            <option value="vigente">Vigente</option>
+            <option value="por_vencer">Por vencer</option>
+            <option value="sin">Sin e.firma</option>
+          </select>
+          {hayFiltros && (
+            <button
+              onClick={() => { setQ(''); setFEstado('todas'); setFEfirma('todas'); }}
+              className="h-9 px-2.5 text-[13px] text-primary hover:bg-primary-soft rounded-md"
+            >
+              Limpiar
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))' }}>
-        {empresas?.map((e) => <EmpresaCard key={e.empresa_id} empresa={e} umbral={umbral} esAdmin={esAdmin} />)}
+        {filtradas.map((e) => <EmpresaCard key={e.empresa_id} empresa={e} umbral={umbral} esAdmin={esAdmin} />)}
       </div>
+      {total > 0 && filtradas.length === 0 && (
+        <div className="bg-surface border border-border rounded-lg p-8 text-center text-text-muted text-sm flex flex-col items-center gap-2">
+          <Search className="size-4" aria-hidden />
+          <span>Ninguna empresa coincide con la búsqueda o los filtros.</span>
+        </div>
+      )}
       {modalAbierto && <NuevaEmpresaModal onClose={() => setModalAbierto(false)} />}
       {usuario?.rol_global === 'consulta' && (
         <div className="bg-surface border border-dashed border-border rounded-lg px-4 py-3 flex items-center gap-3">
