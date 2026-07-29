@@ -528,4 +528,12 @@ export const apiMock: ApiClient = {
     if (!password) throw new ApiError(422, 'SMTP_SIN_CONTRASENA', 'Escribe la contraseña de aplicación para probar (todavía no hay ninguna guardada).');
     // Mock: no hay servidor SMTP real que probar — simula éxito siempre.
   },
+
+  async estadoBootstrap(): Promise<{ needs_bootstrap: boolean }> {
+    return { needs_bootstrap: false };
+  },
+
+  async crearAdminBootstrap(): Promise<void> {
+    throw new ApiError(409, 'BOOTSTRAP_YA_REALIZADO', 'El mock ya tiene un administrador.');
+  },
 };

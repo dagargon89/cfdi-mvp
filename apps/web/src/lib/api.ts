@@ -143,6 +143,8 @@ export interface BitacoraEntrada {
 export interface ApiClient {
   // Sesión (prioridad 1)
   me(): Promise<{ usuario_id: number; correo: string; nombre: string; rol_global: Rol; empresas: EmpresaResumen[] }>;
+  estadoBootstrap(): Promise<{ needs_bootstrap: boolean }>;
+  crearAdminBootstrap(body: { correo: string; nombre: string; password: string; token: string }): Promise<void>;
   // Empresas
   listarEmpresas(): Promise<EmpresaResumen[]>;
   crearEmpresa(input: { nombre: string; rfc: string }): Promise<EmpresaResumen>;

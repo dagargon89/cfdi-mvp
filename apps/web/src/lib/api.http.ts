@@ -60,6 +60,8 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
 type ApiClientHttpSubset = Pick<
   ApiClient,
   | 'me'
+  | 'estadoBootstrap'
+  | 'crearAdminBootstrap'
   | 'listarEmpresas'
   | 'crearEmpresa'
   | 'actualizarEmpresa'
@@ -92,6 +94,10 @@ type ApiClientHttpSubset = Pick<
 
 export const apiHttp: ApiClientHttpSubset = {
   me: () => request('/v1/me'),
+
+  estadoBootstrap: () => request<{ needs_bootstrap: boolean }>(`/v1/auth/bootstrap-status`),
+
+  crearAdminBootstrap: (body) => request<void>(`/v1/auth/bootstrap`, { method: 'POST', body: JSON.stringify(body) }),
 
   listarEmpresas: () => request<EmpresaResumen[]>('/v1/empresas'),
 
