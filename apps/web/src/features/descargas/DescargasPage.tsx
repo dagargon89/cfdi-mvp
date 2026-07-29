@@ -26,7 +26,8 @@ export function DescargasPage() {
 
   const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion() });
   const [pagina, setPagina] = useState(1);
-  const { data: jobsPage } = useJobs(empresa.empresa_id, pagina);
+  const [filtroSolicitud, setFiltroSolicitud] = useState<'' | 'CFDI' | 'METADATA'>('');
+  const { data: jobsPage } = useJobs(empresa.empresa_id, pagina, filtroSolicitud || undefined);
   const jobs = jobsPage?.data ?? [];
 
   const [tipo, setTipo] = useState<'recibido' | 'emitido'>('recibido');
@@ -129,6 +130,16 @@ export function DescargasPage() {
       <div className="bg-surface border border-border rounded-lg overflow-hidden">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
           <h3 className="m-0 text-[15px] font-semibold flex-1">Monitoreo de jobs</h3>
+          <select
+            aria-label="Filtrar por tipo de solicitud"
+            value={filtroSolicitud}
+            onChange={(e) => { setFiltroSolicitud(e.target.value as typeof filtroSolicitud); setPagina(1); }}
+            className="h-8 border border-border rounded px-2 text-[13px]"
+          >
+            <option value="">Todas</option>
+            <option value="CFDI">CFDI</option>
+            <option value="METADATA">Metadata</option>
+          </select>
         </div>
 
         {esEscritorio && !esMovil && jobs.length > 0 && (
