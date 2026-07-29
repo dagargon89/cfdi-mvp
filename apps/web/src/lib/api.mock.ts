@@ -18,6 +18,7 @@ import type {
   EstatusCfdi,
   Evento,
   Job,
+  MetadataPreview,
   NotificacionDestino,
   Page,
   Rol,
@@ -357,6 +358,7 @@ export const apiMock: ApiClient = {
     let rows = db.jobs.filter((j) => j.empresa_id === empresaId);
     if (f?.estado) rows = rows.filter((j) => j.estado === f.estado);
     if (f?.origen) rows = rows.filter((j) => j.origen === f.origen);
+    if (f?.solicitud) rows = rows.filter((j) => j.solicitud === f.solicitud);
     return paginate(rows.map(jobToApi), f?.page);
   },
 
@@ -426,6 +428,32 @@ export const apiMock: ApiClient = {
     tareas.set(tarea_id, { estado: 'pendiente' });
     setTimeout(() => tareas.set(tarea_id, { estado: 'completada', descarga_url: `/mock-descargas/lote_empresa${empresaId}.zip` }), 1200);
     return { tarea_id };
+  },
+
+  async obtenerMetadata(empresaId, jobId, page): Promise<MetadataPreview> {
+    requireRol(empresaId, 'consulta');
+    const job = db.jobs.find((j) => j.job_id === jobId && j.empresa_id === empresaId);
+    if (!job) throw new ApiError(404, 'NO_ENCONTRADO', 'El job no existe o no pertenece a esta empresa.');
+    const perPage = 50;
+    const pageNum = page ?? 1;
+    const mockHeaders = ['RFC', 'Razon Social', 'Folios Emitidos', 'Folios Recibidos'];
+    const mockFilas: string[][] = [
+      ['AAA010101AAA', 'Proveedora del Norte Demo', '100', '50'],
+      ['BBB020202BB2', 'Insumos Fronterizos Demo', '200', '75'],
+      ['CCC030303CC3', 'Comercial EFOS Demo', '150', '60'],
+    ];
+    const total = mockFilas.length;
+    const start = (pageNum - 1) * perPage;
+    const filas = mockFilas.slice(start, start + perPage);
+    return { headers: mockHeaders, filas, total, page: pageNum, per_page: perPage };
+  },
+
+  async descargarMetadataCsv(empresaId, jobId): Promise<Blob> {
+    requireRol(empresaId, 'consulta');
+    const job = db.jobs.find((j) => j.job_id === jobId && j.empresa_id === empresaId);
+    if (!job) throw new ApiError(404, 'NO_ENCONTRADO', 'El job no existe o no pertenece a esta empresa.');
+    const csv = 'RFC,Razon Social,Folios Emitidos,Folios Recibidos\nAAA010101AAA,Proveedora del Norte Demo,100,50\nBBB020202BB2,Insumos Fronterizos Demo,200,75\nCCC030303CC3,Comercial EFOS Demo,150,60\n';
+    return new Blob([csv], { type: 'text/csv' });
   },
 
   async listarEventos(empresaId, f) {

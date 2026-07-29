@@ -51,6 +51,14 @@ export interface Job {
   id_solicitud: string | null;
 }
 
+export interface MetadataPreview {
+  headers: string[];
+  filas: string[][];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
 export interface Comprobante {
   comprobante_id: number;
   uuid: string;
@@ -168,7 +176,7 @@ export interface ApiClient {
       simVencidaDemo?: boolean;
     },
   ): Promise<{ job_ids: number[]; ventanas: number }>;
-  listarJobs(empresaId: number, f?: { estado?: EstadoJob; origen?: 'manual' | 'sync'; page?: number }): Promise<Page<Job>>;
+  listarJobs(empresaId: number, f?: { estado?: EstadoJob; origen?: 'manual' | 'sync'; solicitud?: 'CFDI' | 'METADATA'; page?: number }): Promise<Page<Job>>;
   reintentarJob(empresaId: number, jobId: number): Promise<void>;
   // Comprobantes (prioridades 2–3)
   listarComprobantes(
@@ -188,6 +196,8 @@ export interface ApiClient {
   descargarComprobanteDetalle(empresaId: number, comprobanteId: number): Promise<Blob>;
   descargarComprobanteZip(empresaId: number, comprobanteId: number): Promise<Blob>;
   descargarLoteZip(empresaId: number, comprobanteIds: number[]): Promise<{ tarea_id: string }>;
+  obtenerMetadata(empresaId: number, jobId: number, page?: number): Promise<MetadataPreview>;
+  descargarMetadataCsv(empresaId: number, jobId: number): Promise<Blob>;
   // Vigilancia y notificaciones (prioridad 3)
   listarEventos(empresaId: number, f?: { tipo?: TipoEvento; page?: number }): Promise<Page<Evento>>;
   obtenerNotificaciones(empresaId: number): Promise<{ destinos: NotificacionDestino[] }>;

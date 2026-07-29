@@ -4,7 +4,7 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, BitacoraEntrada, Comprobante, ConfigSmtp, EmpresaResumen, Evento, Job, Page, UsuarioAdmin } from './api';
+import type { ApiClient, BitacoraEntrada, Comprobante, ConfigSmtp, EmpresaResumen, Evento, Job, MetadataPreview, Page, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -78,6 +78,8 @@ type ApiClientHttpSubset = Pick<
   | 'descargarComprobanteDetalle'
   | 'descargarComprobanteZip'
   | 'descargarLoteZip'
+  | 'obtenerMetadata'
+  | 'descargarMetadataCsv'
   | 'listarUsuarios'
   | 'listarBitacora'
   | 'listarEventos'
@@ -120,6 +122,7 @@ export const apiHttp: ApiClientHttpSubset = {
     const params = new URLSearchParams();
     if (f?.estado) params.set('estado', f.estado);
     if (f?.origen) params.set('origen', f.origen);
+    if (f?.solicitud) params.set('solicitud', f.solicitud);
     if (f?.page) params.set('page', String(f.page));
     const qs = params.toString();
     return request<Page<Job>>(`/v1/empresas/${empresaId}/jobs${qs ? `?${qs}` : ''}`);
@@ -162,6 +165,12 @@ export const apiHttp: ApiClientHttpSubset = {
 
   descargarLoteZip: (empresaId, comprobanteIds) =>
     request(`/v1/empresas/${empresaId}/comprobantes/descargar-zip`, { method: 'POST', body: JSON.stringify({ comprobante_ids: comprobanteIds }) }),
+
+  obtenerMetadata: (empresaId, jobId, page) =>
+    request<MetadataPreview>(`/v1/empresas/${empresaId}/jobs/${jobId}/metadata${page ? `?page=${page}` : ''}`),
+
+  descargarMetadataCsv: (empresaId, jobId) =>
+    requestBlob(`/v1/empresas/${empresaId}/jobs/${jobId}/metadata.csv`),
 
   listarUsuarios: () => request<UsuarioAdmin[]>('/v1/usuarios'),
 
