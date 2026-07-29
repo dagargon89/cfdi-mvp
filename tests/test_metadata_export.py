@@ -180,6 +180,33 @@ async def test_endpoint_preview_job_inexistente_404(client: AsyncClient, db: Asy
     assert res.status_code == 404
 
 
+async def test_endpoint_preview_sin_txt_422(client: AsyncClient, db: AsyncSession, monkeypatch, tmp_path) -> None:
+    from app.core.config import get_settings
+
+    root = str(tmp_path)
+    monkeypatch.setattr(get_settings(), "storage_root", root)
+    await crear_usuario(db, uid="uid-meta4", correo="meta4@demo.test", rol_global=RolGlobal.ADMIN)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    job = Job(
+        empresa_id=empresa.empresa_id, tipo=TipoJob.RECIBIDO, solicitud=SolicitudTipo.METADATA,
+        origen=OrigenJob.MANUAL, fecha_inicial=date(2026, 1, 1), fecha_final=date(2026, 1, 31),
+        estado=EstadoJob.DESCARGADO, intentos=0, paquetes=1,
+    )
+    db.add(job)
+    await db.flush()
+    await db.commit()
+    carpeta = os.path.join(root, str(empresa.empresa_id), str(job.job_id))
+    os.makedirs(carpeta, exist_ok=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("algo.xml", b"<x/>")  # solo XML, ningún .txt (caso SAT 5004)
+    with open(os.path.join(carpeta, "paquete_1.zip"), "wb") as f:
+        f.write(buf.getvalue())
+    res = await client.get(f"/v1/empresas/{empresa.empresa_id}/jobs/{job.job_id}/metadata", headers={"Authorization": "Bearer uid-meta4"})
+    assert res.status_code == 422
+    assert res.json()["error"]["codigo"] == "METADATA_NO_DISPONIBLE"
+
+
 async def test_endpoint_csv_ok(client: AsyncClient, db: AsyncSession, monkeypatch, tmp_path) -> None:
     from app.core.config import get_settings
 

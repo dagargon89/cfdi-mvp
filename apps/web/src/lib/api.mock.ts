@@ -434,7 +434,7 @@ export const apiMock: ApiClient = {
     requireRol(empresaId, 'consulta');
     const job = db.jobs.find((j) => j.job_id === jobId && j.empresa_id === empresaId);
     if (!job) throw new ApiError(404, 'NO_ENCONTRADO', 'El job no existe o no pertenece a esta empresa.');
-    const perPage = 50;
+    const perPage = 100;
     const pageNum = page ?? 1;
     const mockHeaders = ['RFC', 'Razon Social', 'Folios Emitidos', 'Folios Recibidos'];
     const mockFilas: string[][] = [

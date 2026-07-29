@@ -11,6 +11,7 @@ from app.api.v1.composers import job_a_out
 from app.api.v1.schemas import DescargaCrearIn, DescargaCrearOut, JobOut, JobPageOut, MetadataPreviewOut
 from app.core.config import get_settings
 from app.models.enums import EstadoJob, OrigenJob, RolEmpresa, SolicitudTipo
+from app.models.job import Job
 from app.repositories import empresas as empresas_repo
 from app.repositories import jobs as jobs_repo
 from app.sat_hub.errors import FielVencidaError, TransicionIlegalError
@@ -115,9 +116,10 @@ async def reintentar_job_endpoint(
 _METADATA_PER_PAGE = 100
 
 
-def _job_o_404(job: object | None) -> None:
+def _job_o_404(job: Job | None) -> Job:
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    return job
 
 
 def _mapear_error_metadata(exc: Exception) -> HTTPException:
@@ -134,8 +136,7 @@ async def preview_metadata_endpoint(
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> MetadataPreviewOut:
-    job = await jobs_repo.por_id_de_empresa(db, empresa_id, job_id)
-    _job_o_404(job)
+    job = _job_o_404(await jobs_repo.por_id_de_empresa(db, empresa_id, job_id))
     try:
         headers, filas = metadata_export.parsear_metadata(get_settings().storage_root, job)
     except (MetadataNoAplicableError, MetadataNoDisponibleError) as exc:
@@ -158,8 +159,7 @@ async def descargar_metadata_csv_endpoint(
     ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    job = await jobs_repo.por_id_de_empresa(db, empresa_id, job_id)
-    _job_o_404(job)
+    job = _job_o_404(await jobs_repo.por_id_de_empresa(db, empresa_id, job_id))
     try:
         csv_bytes = metadata_export.generar_csv_metadata(get_settings().storage_root, job)
     except (MetadataNoAplicableError, MetadataNoDisponibleError) as exc:
