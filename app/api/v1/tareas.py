@@ -37,7 +37,7 @@ async def estado_tarea_endpoint(tarea_id: str) -> TareaEstadoOut:
 
 
 @router.get("/descargas-archivo/{token}")
-async def descargar_archivo_endpoint(token: str) -> FileResponse:
+async def descargar_archivo_endpoint(token: str, inline: bool = False) -> FileResponse:
     try:
         payload = enlaces.verificar(token)
     except enlaces.EnlaceInvalidoError as exc:
@@ -50,4 +50,7 @@ async def descargar_archivo_endpoint(token: str) -> FileResponse:
     if not ruta_absoluta.startswith(storage_root + os.sep) or not os.path.isfile(ruta_absoluta):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
 
+    # `inline=1`: previsualización en el navegador (el XML se renderiza en vez de descargarse).
+    if inline:
+        return FileResponse(ruta_absoluta, media_type="application/xml", content_disposition_type="inline")
     return FileResponse(ruta_absoluta, filename=os.path.basename(ruta_absoluta))
