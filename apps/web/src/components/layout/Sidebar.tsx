@@ -1,5 +1,5 @@
 // demo.html:172-260 (aside de navegación, selector de empresa, colapsar, usuario/logout).
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { Building2, ChevronsLeft, LogOut } from 'lucide-react';
@@ -22,8 +22,19 @@ function iniciales(nombre: string): string {
   return nombre.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase();
 }
 
+// El estado de colapso se persiste: hay dos instancias de <AppShell> (rutas con/sin empresa),
+// así que al cruzar entre ellas el Sidebar se remonta — sin persistir, se perdería el colapso.
+const CLAVE_COLAPSO = 'hubcfdi.sidebar-abierto';
+function leerColapso(): boolean {
+  try {
+    return localStorage.getItem(CLAVE_COLAPSO) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
 export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
-  const [abierto, setAbierto] = useState(true);
+  const [abierto, setAbierto] = useState(leerColapso);
   const [selectorAbierto, setSelectorAbierto] = useState(false);
   const [buscar, setBuscar] = useState('');
   const { usuario, logout } = useAuth();
@@ -31,6 +42,14 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
   const { empresaId } = useCurrentEmpresaId();
   const location = useLocation();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CLAVE_COLAPSO, String(abierto));
+    } catch {
+      /* almacenamiento no disponible — se pierde solo la persistencia, no rompe nada */
+    }
+  }, [abierto]);
 
   const sidebarOpen = esCompacto ? false : abierto;
   const width = sidebarOpen ? 264 : 72;
