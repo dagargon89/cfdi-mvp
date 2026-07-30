@@ -53,7 +53,6 @@ export function ConfigBitacoraPage() {
   const { toast } = useToast();
   const enConfig = !enBitacora && !enCorreo;
 
-  const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion(), enabled: enConfig });
   const { data: autos } = useQuery({ queryKey: ['automatizaciones'], queryFn: () => api.obtenerAutomatizaciones(), enabled: enConfig });
   const { data: bitacoraPage } = useQuery({
     queryKey: ['bitacora', pagina, perPageEfectivo],
@@ -121,32 +120,6 @@ export function ConfigBitacoraPage() {
               );
             })}
           </div>
-        </div>
-      )}
-
-      {enConfig && (
-        <div className="bg-surface border border-border rounded-lg overflow-hidden">
-          <table>
-            <caption className="sr-only">Parámetros de configuración</caption>
-            <thead>
-              <tr className="bg-surface-alt">
-                <th scope="col" className="text-left text-xs font-semibold px-3 py-2">Clave</th>
-                <th scope="col" className="text-left text-xs font-semibold px-3 py-2">Ejercicio fiscal</th>
-                <th scope="col" className="text-left text-xs font-semibold px-3 py-2">Valor</th>
-                <th scope="col" className="text-left text-xs font-semibold px-3 py-2">Descripción</th>
-              </tr>
-            </thead>
-            <tbody>
-              {config?.map((c) => (
-                <tr key={c.clave} className="border-t border-border h-10">
-                  <td className="px-3 font-mono text-[13px]">{c.clave}</td>
-                  <td className="px-3 font-mono text-xs text-text-muted">{c.ejercicio_fiscal}</td>
-                  <td className="px-3 font-mono text-[13px] font-medium">{c.valor}</td>
-                  <td className="px-3 py-2 text-xs text-text-muted text-pretty">{c.descripcion}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       )}
 
