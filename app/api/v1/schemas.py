@@ -64,6 +64,7 @@ class AutomatizacionesConfig(BaseModel):
     sync_diaria: bool
     lista_69b: bool
     re_verificar: bool
+    limpieza: bool
 
 
 class BootstrapAdminIn(BaseModel):

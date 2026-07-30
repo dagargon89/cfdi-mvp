@@ -33,6 +33,12 @@ const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: 
     queHace: 'Revisa periódicamente si tus comprobantes vigentes fueron cancelados después.',
     consecuencia: 'Dejará de revisarse si un comprobante fue cancelado tras emitirse; su estatus podría quedar desactualizado.',
   },
+  {
+    key: 'limpieza',
+    nombre: 'Limpieza automática de almacenamiento',
+    queHace: 'Libera disco a diario borrando archivos temporales: exports de descarga masiva viejos y paquetes crudos del SAT ya indexados. Nunca borra tus XML fiscales.',
+    consecuencia: 'El servidor dejará de liberar espacio solo; los exports y paquetes descargados se irán acumulando en disco.',
+  },
 ];
 
 export function ConfigBitacoraPage() {

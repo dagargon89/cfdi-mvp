@@ -8,7 +8,7 @@ ver `app/sat_hub/errors.TransicionIlegalError`).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -92,6 +92,13 @@ async def ultima_ventana_sincronizada(db: AsyncSession, empresa_id: int, tipo: T
         )
     )
     return resultado
+
+
+async def descargados_antes_de(db: AsyncSession, limite: datetime) -> list[Job]:
+    """Jobs ya DESCARGADO (con XML indexados) y con `updated_at` anterior al límite — sus paquetes
+    crudos del SAT ya son redundantes y se pueden purgar (limpieza de almacenamiento)."""
+    result = await db.scalars(select(Job).where(Job.estado == EstadoJob.DESCARGADO, Job.updated_at < limite))
+    return list(result.all())
 
 
 async def por_id_de_empresa(db: AsyncSession, empresa_id: int, job_id: int) -> Job | None:

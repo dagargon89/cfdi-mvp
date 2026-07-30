@@ -20,6 +20,7 @@ _CLAVES = {
     "sync_diaria": "auto_sync_diaria",
     "lista_69b": "auto_lista_69b",
     "re_verificar": "auto_re_verificar",
+    "limpieza": "auto_limpieza",
 }
 
 
@@ -31,6 +32,7 @@ async def obtener_automatizaciones(
         sync_diaria=bool(await config_repo.valor(db, _CLAVES["sync_diaria"], True)),
         lista_69b=bool(await config_repo.valor(db, _CLAVES["lista_69b"], True)),
         re_verificar=bool(await config_repo.valor(db, _CLAVES["re_verificar"], True)),
+        limpieza=bool(await config_repo.valor(db, _CLAVES["limpieza"], True)),
     )
 
 
@@ -41,12 +43,13 @@ async def guardar_automatizaciones(
     await config_repo.establecer(db, _CLAVES["sync_diaria"], body.sync_diaria)
     await config_repo.establecer(db, _CLAVES["lista_69b"], body.lista_69b)
     await config_repo.establecer(db, _CLAVES["re_verificar"], body.re_verificar)
+    await config_repo.establecer(db, _CLAVES["limpieza"], body.limpieza)
     await bitacora_service.registrar(
         db,
         actor=admin.correo,
         accion="editar_automatizaciones",
         entidad="config",
-        detalle={"sync_diaria": body.sync_diaria, "lista_69b": body.lista_69b, "re_verificar": body.re_verificar},
+        detalle={"sync_diaria": body.sync_diaria, "lista_69b": body.lista_69b, "re_verificar": body.re_verificar, "limpieza": body.limpieza},
     )
     await db.commit()
     return body

@@ -17,4 +17,5 @@ celery_app.conf.beat_schedule = {
     "disparar-sync-diaria": {"task": "app.worker.tasks.disparar_sync_diaria", "schedule": crontab(minute=0)},
     "actualizar-lista-69b": {"task": "app.worker.tasks.actualizar_lista_69b", "schedule": crontab(hour=1, minute=30)},
     "re-verificar-vigentes": {"task": "app.worker.tasks.re_verificar_vigentes", "schedule": crontab(hour=4, minute=0)},
+    "limpiar-almacenamiento": {"task": "app.worker.tasks.limpiar_almacenamiento", "schedule": crontab(hour=3, minute=0)},
 }

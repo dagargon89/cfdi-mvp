@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import glob
 import io
 import logging
 import os
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -451,6 +453,73 @@ async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int])
 @celery_app.task(name="app.worker.tasks.descargar_zip_lote")  # type: ignore[untyped-decorator]
 def descargar_zip_lote(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
     return asyncio.run(_descargar_zip_lote_async(empresa_id, comprobante_ids))
+
+
+# --------------------------------------------------------------------------- #
+# Limpieza de almacenamiento (tarea diaria, beat) — libera disco sin tocar los XML de
+# comprobantes (documentos fiscales, conservación legal ~5 años). Solo purga artefactos
+# derivados/redundantes: (1) exports de descarga masiva/Excel viejos, (2) paquetes crudos
+# del SAT de jobs ya DESCARGADO (los XML ya se extrajeron e indexaron). Config editable.
+# --------------------------------------------------------------------------- #
+
+
+def _borrar_si_existe(ruta: str) -> int:
+    """Borra un archivo y devuelve los bytes liberados (0 si no se pudo)."""
+    try:
+        tam = os.path.getsize(ruta)
+        os.remove(ruta)
+        return tam
+    except OSError as exc:  # noqa: BLE001 — un archivo que no se pudo borrar no aborta la limpieza
+        logger.warning("limpiar_almacenamiento: no se pudo borrar %s: %s", ruta, exc)
+        return 0
+
+
+async def _limpiar_almacenamiento_async() -> dict[str, Any]:
+    storage_root = get_settings().storage_root
+    async with SessionLocal() as db:
+        if not bool(await config_repo.valor(db, "auto_limpieza", True)):
+            return {"limpiado": False, "razon": "desactivada"}
+        horas_exports = int(await config_repo.valor(db, "retencion_exports_horas", 48))
+        dias_paquetes = int(await config_repo.valor(db, "retencion_paquetes_dias", 30))
+        limite_paquetes = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=dias_paquetes)
+        jobs_a_purgar = await jobs_repo.descargados_antes_de(db, limite_paquetes)
+
+    bytes_liberados = 0
+    exports_borrados = 0
+    paquetes_borrados = 0
+
+    # Nivel 1: exports (zips de descarga masiva + Excel) más viejos que el umbral, de todas las empresas.
+    limite_exports = time.time() - horas_exports * 3600
+    for ruta in glob.glob(os.path.join(storage_root, "*", "exports", "*")):
+        try:
+            if os.path.isfile(ruta) and os.path.getmtime(ruta) < limite_exports:
+                bytes_liberados += _borrar_si_existe(ruta)
+                exports_borrados += 1
+        except OSError as exc:  # noqa: BLE001
+            logger.warning("limpiar_almacenamiento: %s: %s", ruta, exc)
+
+    # Nivel 2: paquetes crudos del SAT de jobs ya DESCARGADO y viejos (los XML ya están indexados).
+    for job in jobs_a_purgar:
+        carpeta = os.path.join(storage_root, str(job.empresa_id), str(job.job_id))
+        for ruta in glob.glob(os.path.join(carpeta, "paquete_*.zip")):
+            bytes_liberados += _borrar_si_existe(ruta)
+            paquetes_borrados += 1
+        try:
+            if os.path.isdir(carpeta) and not os.listdir(carpeta):
+                os.rmdir(carpeta)  # carpeta del job vacía tras purgar sus paquetes
+        except OSError:
+            pass
+
+    logger.info(
+        "limpiar_almacenamiento: %s exports + %s paquetes borrados, %s KB liberados.",
+        exports_borrados, paquetes_borrados, bytes_liberados // 1024,
+    )
+    return {"exports": exports_borrados, "paquetes": paquetes_borrados, "kb_liberados": bytes_liberados // 1024}
+
+
+@celery_app.task(name="app.worker.tasks.limpiar_almacenamiento")  # type: ignore[untyped-decorator]
+def limpiar_almacenamiento() -> dict[str, Any]:
+    return asyncio.run(_limpiar_almacenamiento_async())
 
 
 # --------------------------------------------------------------------------- #

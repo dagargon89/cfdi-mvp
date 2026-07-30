@@ -100,7 +100,7 @@ const db = {
     { clave: 'hora_sync', ejercicio_fiscal: 'vigente', valor: '02:00' },
   ] as DbConfig[],
   configSmtp: null as DbConfigSmtp | null,
-  automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true } as Automatizaciones,
+  automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true, limpieza: true } as Automatizaciones,
 };
 
 const CONFIG_DESC: Record<string, string> = {

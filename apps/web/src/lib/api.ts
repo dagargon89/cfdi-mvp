@@ -114,6 +114,7 @@ export interface Automatizaciones {
   sync_diaria: boolean;
   lista_69b: boolean;
   re_verificar: boolean;
+  limpieza: boolean;
 }
 
 /** Añadido tras el freeze (2026-07-28) — RF-NOT-01: correo saliente configurable desde la UI
