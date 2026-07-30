@@ -85,6 +85,7 @@ type ApiClientHttpSubset = Pick<
   | 'listarUsuarios'
   | 'registrarUsuario'
   | 'actualizarUsuario'
+  | 'guardarPermisos'
   | 'eliminarUsuario'
   | 'listarBitacora'
   | 'listarEventos'
@@ -190,6 +191,7 @@ export const apiHttp: ApiClientHttpSubset = {
   registrarUsuario: (body) => request<void>(`/v1/auth/registro`, { method: 'POST', body: JSON.stringify(body) }),
 
   actualizarUsuario: (id, body) => request<void>(`/v1/usuarios/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  guardarPermisos: (id, permisos) => request<void>(`/v1/usuarios/${id}/permisos`, { method: 'PUT', body: JSON.stringify({ permisos }) }),
 
   eliminarUsuario: (id) => request<void>(`/v1/usuarios/${id}`, { method: 'DELETE' }),
 

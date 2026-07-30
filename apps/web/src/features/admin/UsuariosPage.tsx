@@ -4,7 +4,9 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
 import { useToast } from '@/components/ui/ToastProvider';
+import type { UsuarioAdmin } from '@/lib/api';
 import { api } from '@/lib/client';
+import { EditarUsuarioModal } from './EditarUsuarioModal';
 
 // `listarUsuarios()` devuelve el arreglo completo (no está paginado en el backend — la lista de
 // usuarios internos del despacho es chica); se pagina aquí solo en cliente, con el mismo selector
@@ -14,6 +16,7 @@ export function UsuariosPage() {
   const { data: usuarios } = useQuery({ queryKey: ['usuarios'], queryFn: () => api.listarUsuarios() });
   const [pagina, setPagina] = useState(1);
   const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
+  const [editando, setEditando] = useState<UsuarioAdmin | null>(null);
   const lista = usuarios ?? [];
   const perPageEfectivo = porPagina === 'todos' ? Math.max(lista.length, 1) : porPagina;
   const usuariosPagina = porPagina === 'todos' ? lista : lista.slice((pagina - 1) * perPageEfectivo, pagina * perPageEfectivo);
@@ -81,7 +84,7 @@ export function UsuariosPage() {
                     <span className={`text-xs font-semibold rounded-md px-2 py-0.5 ${estado.fg} ${estado.bg}`}>{estado.texto}</span>
                   </td>
                   <td className="px-3">
-                    {!u.aprobado && (
+                    {!u.aprobado ? (
                       <div className="flex items-center gap-2">
                         <Button
                           variant="primary"
@@ -106,6 +109,10 @@ export function UsuariosPage() {
                           Rechazar
                         </Button>
                       </div>
+                    ) : (
+                      <Button variant="secondary" className="h-7 px-2.5 text-xs" onClick={() => setEditando(u)}>
+                        Editar
+                      </Button>
                     )}
                   </td>
                 </tr>
@@ -123,6 +130,8 @@ export function UsuariosPage() {
           onPageSizeChange={(v) => { setPorPagina(v); setPagina(1); }}
         />
       </div>
+
+      {editando && <EditarUsuarioModal usuario={editando} onClose={() => setEditando(null)} />}
     </div>
   );
 }

@@ -84,6 +84,15 @@ async def actualizar_usuario(
     usuario = await usuarios_repo.por_id(db, usuario_id)
     if usuario is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    # No dejar el sistema sin ningún administrador: si el objetivo es el último admin activo/aprobado,
+    # bloquear degradarlo (rol distinto de admin), desactivarlo o desaprobarlo.
+    quita_admin = (
+        (body.rol_global is not None and body.rol_global is not RolGlobal.ADMIN)
+        or body.activo is False
+        or body.aprobado is False
+    )
+    if usuario.rol_global is RolGlobal.ADMIN and quita_admin and await usuarios_repo.contar_admins_activos(db) <= 1:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "ULTIMO_ADMIN", "mensaje": "No puedes quitar el rol de administrador al último administrador."})
     await usuarios_repo.actualizar(db, usuario, activo=body.activo, rol_global=body.rol_global, aprobado=body.aprobado)
     await bitacora.registrar(
         db, actor=admin.correo, accion="editar_usuario", entidad=f"usuario:{usuario_id}",

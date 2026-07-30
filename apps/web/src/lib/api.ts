@@ -216,6 +216,7 @@ export interface ApiClient {
   listarUsuarios(): Promise<UsuarioAdmin[]>;
   registrarUsuario(body: { nombre: string }): Promise<void>;
   actualizarUsuario(id: number, body: { activo?: boolean; rol_global?: Rol; aprobado?: boolean }): Promise<void>;
+  guardarPermisos(id: number, permisos: { empresa_id: number; rol: Rol }[]): Promise<void>;
   eliminarUsuario(id: number): Promise<void>;
   listarConfiguracion(): Promise<ConfiguracionItem[]>;
   listarBitacora(f?: { page?: number; per_page?: number }): Promise<Page<BitacoraEntrada>>;

@@ -184,3 +184,20 @@ async def test_delete_ultimo_admin_admin_inactivo_409(client: AsyncClient, db: A
     res = await client.delete(f"/v1/usuarios/{objetivo.usuario_id}", headers={"Authorization": f"Bearer {actor.firebase_uid}"})
     assert res.status_code == 409
     assert res.json()["error"]["codigo"] == "ULTIMO_ADMIN"
+
+
+async def test_patch_no_degrada_ultimo_admin_409(client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object]) -> None:
+    admin = await _usuario(db, uid="admin1", correo="admin@example.com", rol=RolGlobal.ADMIN)
+    res = await client.patch(f"/v1/usuarios/{admin.usuario_id}", json={"rol_global": "consulta"}, headers={"Authorization": "Bearer admin1"})
+    assert res.status_code == 409
+    assert res.json()["error"]["codigo"] == "ULTIMO_ADMIN"
+
+
+async def test_patch_degrada_admin_si_hay_otro_ok(client: AsyncClient, db: AsyncSession, firebase_reg: dict[str, object]) -> None:
+    await _usuario(db, uid="admin1", correo="admin@example.com", rol=RolGlobal.ADMIN)
+    admin_b = await _usuario(db, uid="adminB", correo="b@example.com", rol=RolGlobal.ADMIN)
+    # con dos admins activos, degradar a uno sí se permite
+    res = await client.patch(f"/v1/usuarios/{admin_b.usuario_id}", json={"rol_global": "consulta"}, headers={"Authorization": "Bearer admin1"})
+    assert res.status_code == 200
+    await db.refresh(admin_b)
+    assert admin_b.rol_global == RolGlobal.CONSULTA

@@ -516,6 +516,16 @@ export const apiMock: ApiClient = {
     logBitacora(u.correo, 'actualizar_usuario', `usuario:${id}`, { activo: body.activo, rol_global: body.rol_global, aprobado: body.aprobado });
   },
 
+  async guardarPermisos(id, permisos): Promise<void> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede asignar permisos.');
+    const usuario = db.usuarios.find((x) => x.usuario_id === id);
+    if (!usuario) throw new ApiError(404, 'NO_ENCONTRADO', 'El usuario no existe.');
+    db.usuario_empresa = db.usuario_empresa.filter((x) => x.usuario_id !== id);
+    db.usuario_empresa.push(...permisos.map((p) => ({ usuario_id: id, empresa_id: p.empresa_id, rol: p.rol })));
+    logBitacora(u.correo, 'asignar_permisos', `usuario:${id}`, { permisos });
+  },
+
   async eliminarUsuario(id): Promise<void> {
     const u = requireUsuario();
     if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede eliminar usuarios.');
