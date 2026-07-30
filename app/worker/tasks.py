@@ -132,7 +132,7 @@ async def _paso_nuevo(db: AsyncSession, job: Job) -> ResultadoPaso:
     # SatReintentableError se deja propagar sin tocar el job (sigue en NUEVO); el
     # adaptador Celery decide el backoff vía `autoretry_for`.
 
-    espera = await config_repo.valor(db, "polling_espera_seg", 60)
+    espera = await config_repo.valor(db, "polling_espera_seg", 20)
     await jobs_repo.transicion(db, job, EstadoJob.SOLICITADO, id_solicitud=id_solicitud)  # T1
     await db.commit()
     return ResultadoPaso("reintentar", countdown=espera)
@@ -142,7 +142,14 @@ async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids
     escritos = 0
     try:
         for idx, id_paquete in enumerate(ids_paquetes, start=1):
-            _, paquete_b64 = facade.descargar(id_paquete)
+            meta, paquete_b64 = facade.descargar(id_paquete)
+            if paquete_b64 is None:
+                # El SAT respondió con el elemento <Paquete> vacío. El motivo real viene en el
+                # encabezado (CodEstatus/Mensaje); sin exponerlo, `base64.b64decode(None)` truena
+                # con un error opaco ("not 'NoneType'"). Se corta el job con el detalle del SAT.
+                cod = (meta or {}).get("CodEstatus", "sin código")
+                msg = (meta or {}).get("Mensaje") or "el SAT devolvió un paquete sin contenido"
+                raise RuntimeError(f"el SAT devolvió el paquete {idx} vacío (CodEstatus={cod}: {msg})")
             _escribir_paquete(job.empresa_id, job.job_id, idx, paquete_b64)
             escritos += 1
     except Exception as exc:  # noqa: BLE001 — cualquier fallo de escritura/descarga es terminal (T10)
@@ -239,7 +246,7 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         # Código desconocido SIN mensaje (silencio, no un error explícito) — sí es transitorio.
         logger.warning("ejecutar_job: EstadoSolicitud %s no catalogado para job %s; se trata como 'en proceso'.", resultado.estado_solicitud, job.job_id)
 
-    max_reintentos = await config_repo.valor(db, "max_reintentos", 60)
+    max_reintentos = await config_repo.valor(db, "max_reintentos", 180)
     intentos = job.intentos + 1
     if intentos >= max_reintentos:
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=f"Se agotaron los reintentos de sondeo sin que el SAT terminara la solicitud (último EstadoSolicitud={resultado.estado_solicitud}).", intentos=intentos)  # T8
@@ -247,7 +254,7 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         return ResultadoPaso("hecho")
     await jobs_repo.transicion(db, job, EstadoJob.EN_PROCESO, intentos=intentos)  # T3/T6
     await db.commit()
-    espera = await config_repo.valor(db, "polling_espera_seg", 60)
+    espera = await config_repo.valor(db, "polling_espera_seg", 20)
     return ResultadoPaso("reintentar", countdown=espera)
 
 

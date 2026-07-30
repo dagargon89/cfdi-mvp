@@ -67,7 +67,7 @@ services:
     dns:
       - 8.8.8.8
       - 1.1.1.1
-    command: celery -A app.worker.celery_app worker -l info
+    command: celery -A app.worker.celery_app worker -l info --concurrency=4 --prefetch-multiplier=1
     volumes:
       - ./app:/srv/app
       - ./secrets:/srv/secrets

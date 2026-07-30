@@ -200,6 +200,28 @@ async def test_sin_resultados_pasa_a_descargado_con_cero_paquetes(db: AsyncSessi
     assert job.mensaje is None
 
 
+async def test_paquete_vacio_pasa_a_error_con_detalle_del_sat(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """El SAT reporta la solicitud TERMINADA con un id de paquete, pero al descargarlo devuelve
+    el <Paquete> vacío (base64 = None). El motivo real llega en el encabezado (CodEstatus/Mensaje);
+    el job debe pasar a ERROR con ESE detalle, no reventar con el opaco 'not NoneType' de base64."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+
+    class FacadePaqueteVacio(FakeFacade):
+        def descargar(self, id_paquete: str) -> tuple[dict[str, object], str | None]:
+            return {"CodEstatus": "5002", "Mensaje": "Se han agotado las solicitudes de por vida"}, None
+
+    worker_tasks.SatFacade = FacadePaqueteVacio  # type: ignore[misc,assignment]
+    FakeFacade.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_TERMINADA, ids_paquetes=["PAQ-1"], num_cfdis=1)]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
+    assert job.estado is EstadoJob.ERROR
+    assert "5002" in (job.mensaje or "")
+    assert "Se han agotado las solicitudes de por vida" in (job.mensaje or "")
+    assert "NoneType" not in (job.mensaje or "")  # el error opaco de base64 no debe filtrarse
+
+
 async def test_estado_no_catalogado_con_mensaje_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
     """Visto en producción con una solicitud de METADATA: el SAT respondió
     EstadoSolicitud=0/CodEstatus=404/"Error no controlado" en cada sondeo durante más de una

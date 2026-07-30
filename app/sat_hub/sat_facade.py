@@ -182,11 +182,14 @@ class SatFacade:
 
     # ---- Descarga -------------------------------------------------------- #
 
-    def descargar(self, id_paquete: str) -> tuple[dict[str, Any], str]:
+    def descargar(self, id_paquete: str) -> tuple[dict[str, Any], str | None]:
         """Descarga un paquete; devuelve ``(meta, paquete_base64)``.
 
         ``satcfdi`` entrega el paquete como cadena base64; el ``Engine`` la
-        decodifica a bytes antes de escribir el ``.zip`` (RF-DESC-06).
+        decodifica a bytes antes de escribir el ``.zip`` (RF-DESC-06). El base64
+        puede venir ``None`` cuando el SAT responde con el ``<Paquete>`` vacío
+        (el motivo llega en ``meta`` como ``CodEstatus``/``Mensaje``); quien
+        consume decide qué hacer con ese caso.
         """
         meta, paquete_b64 = self._sat.recover_comprobante_download(id_paquete)
         return meta, paquete_b64

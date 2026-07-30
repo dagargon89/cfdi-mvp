@@ -74,7 +74,7 @@ async def crear_descarga(
         # ya rechaza `hasta < desde`; esto cubre el caso que se le escapa (`hasta == desde`).
         raise RangoInvalidoError("El rango debe cubrir al menos 2 días distintos — el SAT no acepta una sola fecha para inicio y fin.")
 
-    ventana_meses = await config_repo.valor(db, "max_meses_ventana", 12)
+    ventana_meses = await config_repo.valor(db, "max_meses_ventana", 2)
     antiguedad_anios = await config_repo.valor(db, "max_anios_antiguedad", 5)
     try:
         ventanas = trocear(desde, hasta, hoy=hoy or date.today(), ventana_meses=ventana_meses, antiguedad_anios=antiguedad_anios)

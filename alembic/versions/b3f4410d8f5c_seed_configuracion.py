@@ -27,14 +27,19 @@ _TABLA = sa.table(
 # umbral de alerta de vigencia de e.firma. `ejercicio_fiscal="vigente"` = configuración
 # activa sin versionar por año fiscal (RF-CFG-01 completo queda para un sprint futuro).
 #
-# polling_espera_seg=60 / max_reintentos=60 (~1 hora de sondeo): un ciclo real contra el
-# SAT (Sprint 2, empresa de producción) mostró que 15s/20 intentos (~5 min) es demasiado
-# agresivo — el WS del SAT puede tardar varios minutos en terminar de generar los paquetes.
+# polling_espera_seg × max_reintentos = ventana total de sondeo (~1 hora). Un ciclo real
+# contra el SAT (Sprint 2, empresa de producción) mostró que 15s/20 intentos (~5 min) es
+# demasiado agresivo — el WS del SAT puede tardar varios minutos en terminar de generar los
+# paquetes. Por eso, al bajar el sondeo a 20s (para detectar antes que esté listo), se sube
+# max_reintentos a 180 y se conserva la ventana total de ~60 min (20 × 180 = 3600 s).
+# max_meses_ventana=2 (antes 12): troceo más fino → más jobs en paralelo, solicitudes más
+# chicas (el SAT las prepara más rápido) y se esquivan los topes por solicitud (CodEstatus
+# 5002/5003 que devuelven un <Paquete> vacío).
 _DEFAULTS = {
-    "max_meses_ventana": 12,
+    "max_meses_ventana": 2,
     "max_anios_antiguedad": 5,
-    "polling_espera_seg": 60,
-    "max_reintentos": 60,
+    "polling_espera_seg": 20,
+    "max_reintentos": 180,
     "umbral_vigencia_dias": 15,
     "hora_sync": "02:00",
 }
