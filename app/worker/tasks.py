@@ -412,11 +412,16 @@ def exportar_excel(empresa_id: int, filtros: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+_TIPO_TEXTO = {"I": "Ingreso", "E": "Egreso", "N": "Nómina", "P": "Pago", "T": "Traslado"}
+
+
 async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
     storage_root = get_settings().storage_root
     incluidos = 0
     buffer = io.BytesIO()
     async with SessionLocal() as db:
+        empresa = await empresas_repo.por_id(db, empresa_id)
+        rfc_empresa = empresa.rfc if empresa else None
         comprobantes = await comprobantes_repo.por_ids(db, empresa_id, comprobante_ids)
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for c in comprobantes:
@@ -424,9 +429,14 @@ async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int])
                 if xml_bytes is None:
                     logger.warning("descargar_zip_lote: comprobante %s sin XML en disco, se omite.", c.comprobante_id)
                     continue
-                zf.writestr(f"{c.uuid}.xml", xml_bytes)
-                zf.writestr(f"{c.uuid}.pdf", representaciones.generar_pdf(xml_bytes))
-                zf.writestr(f"{c.uuid}_detalle.pdf", representaciones.generar_detalle(xml_bytes, c.estatus))
+                # Organización del zip: Emitidos|Recibidos / año-mes / tipo (mejora de UX 2026-07-30).
+                direccion = "Emitidos" if rfc_empresa and c.rfc_emisor == rfc_empresa else "Recibidos"
+                periodo = c.fecha_emision.strftime("%Y-%m") if c.fecha_emision else "sin-fecha"
+                tipo = _TIPO_TEXTO.get(c.tipo_comprobante or "", "Otro")
+                carpeta = f"{direccion}/{periodo}/{tipo}"
+                zf.writestr(f"{carpeta}/{c.uuid}.xml", xml_bytes)
+                zf.writestr(f"{carpeta}/{c.uuid}.pdf", representaciones.generar_pdf(xml_bytes))
+                zf.writestr(f"{carpeta}/{c.uuid}_detalle.pdf", representaciones.generar_detalle(xml_bytes, c.estatus))
                 incluidos += 1
 
     carpeta = os.path.join(storage_root, str(empresa_id), "exports")

@@ -149,8 +149,16 @@ async def test_descargar_zip_lote_incluye_los_seleccionados(db: AsyncSession) ->
     empresa = await crear_empresa(db, rfc="EKU9003173C9")
     ruta1 = _escribir_xml_valido(empresa.empresa_id, "AAAA1111-1111-1111-1111-111111111111", "uno.xml")
     ruta2 = _escribir_xml_valido(empresa.empresa_id, "BBBB2222-2222-2222-2222-222222222222", "dos.xml")
-    c1 = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="AAAA1111-1111-1111-1111-111111111111", xml_path=ruta1)
-    c2 = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="BBBB2222-2222-2222-2222-222222222222", xml_path=ruta2)
+    # c1 = EMITIDO (rfc_emisor == RFC de la empresa), abril 2026, Ingreso -> Emitidos/2026-04/Ingreso/
+    c1 = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="AAAA1111-1111-1111-1111-111111111111", xml_path=ruta1,
+        rfc_emisor="EKU9003173C9", rfc_receptor="XAXX010101000", fecha_emision=datetime(2026, 4, 15), tipo_comprobante="I",
+    )
+    # c2 = RECIBIDO (la empresa es el receptor), mayo 2026, Egreso -> Recibidos/2026-05/Egreso/
+    c2 = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="BBBB2222-2222-2222-2222-222222222222", xml_path=ruta2,
+        rfc_emisor="XAXX010101000", rfc_receptor="EKU9003173C9", fecha_emision=datetime(2026, 5, 20), tipo_comprobante="E",
+    )
 
     resultado = await worker_tasks._descargar_zip_lote_async(empresa.empresa_id, [c1.comprobante_id, c2.comprobante_id])
     assert resultado["solicitados"] == 2
@@ -161,12 +169,12 @@ async def test_descargar_zip_lote_incluye_los_seleccionados(db: AsyncSession) ->
     with zipfile.ZipFile(ruta_zip) as zf:
         nombres = set(zf.namelist())
         assert nombres == {
-            "AAAA1111-1111-1111-1111-111111111111.xml",
-            "AAAA1111-1111-1111-1111-111111111111.pdf",
-            "AAAA1111-1111-1111-1111-111111111111_detalle.pdf",
-            "BBBB2222-2222-2222-2222-222222222222.xml",
-            "BBBB2222-2222-2222-2222-222222222222.pdf",
-            "BBBB2222-2222-2222-2222-222222222222_detalle.pdf",
+            "Emitidos/2026-04/Ingreso/AAAA1111-1111-1111-1111-111111111111.xml",
+            "Emitidos/2026-04/Ingreso/AAAA1111-1111-1111-1111-111111111111.pdf",
+            "Emitidos/2026-04/Ingreso/AAAA1111-1111-1111-1111-111111111111_detalle.pdf",
+            "Recibidos/2026-05/Egreso/BBBB2222-2222-2222-2222-222222222222.xml",
+            "Recibidos/2026-05/Egreso/BBBB2222-2222-2222-2222-222222222222.pdf",
+            "Recibidos/2026-05/Egreso/BBBB2222-2222-2222-2222-222222222222_detalle.pdf",
         }
 
 
