@@ -32,6 +32,11 @@ services:
   api:
     build: .
     restart: unless-stopped
+    # DNS público fijo: en WSL2 el resolver del host (10.255.255.254) es intermitente y
+    # rompe la verificación de tokens de Firebase (fetch de certs a www.googleapis.com).
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./app:/srv/app
@@ -59,6 +64,9 @@ services:
   worker:
     build: .
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: celery -A app.worker.celery_app worker -l info
     volumes:
       - ./app:/srv/app
@@ -83,6 +91,9 @@ services:
   beat:
     build: .
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: celery -A app.worker.celery_app beat -l info
     volumes:
       - ./app:/srv/app
