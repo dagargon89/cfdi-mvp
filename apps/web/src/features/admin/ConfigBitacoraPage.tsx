@@ -6,10 +6,34 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router';
 import { Button } from '@/components/ui/Button';
+import { ConfirmarModal } from '@/components/ui/ConfirmarModal';
 import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
+import { Switch } from '@/components/ui/Switch';
 import { useToast } from '@/components/ui/ToastProvider';
-import { ApiError } from '@/lib/api';
+import { ApiError, type Automatizaciones } from '@/lib/api';
 import { api } from '@/lib/client';
+
+// Tareas automáticas (beat) que el admin puede apagar/prender, con lo que pasa al desactivarlas.
+const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: string; consecuencia: string }[] = [
+  {
+    key: 'sync_diaria',
+    nombre: 'Descarga diaria del SAT',
+    queHace: 'Baja automáticamente tus comprobantes nuevos del SAT cada día.',
+    consecuencia: 'Dejarán de descargarse comprobantes nuevos por sí solos; tendrás que iniciar cada descarga manualmente desde la sección Descargas.',
+  },
+  {
+    key: 'lista_69b',
+    nombre: 'Actualización de la lista 69-B (EFOS)',
+    queHace: 'Actualiza a diario la lista negra del SAT (69-B) y la cruza con tus comprobantes.',
+    consecuencia: 'Dejará de actualizarse la lista 69-B y de cruzarse con tus comprobantes; podrías no enterarte de emisores que entren a la lista negra.',
+  },
+  {
+    key: 're_verificar',
+    nombre: 'Re-verificación de vigencia',
+    queHace: 'Revisa periódicamente si tus comprobantes vigentes fueron cancelados después.',
+    consecuencia: 'Dejará de revisarse si un comprobante fue cancelado tras emitirse; su estatus podría quedar desactualizado.',
+  },
+];
 
 export function ConfigBitacoraPage() {
   const { pathname } = useLocation();
@@ -19,12 +43,30 @@ export function ConfigBitacoraPage() {
   const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
   const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
 
-  const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion(), enabled: !enBitacora && !enCorreo });
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const enConfig = !enBitacora && !enCorreo;
+
+  const { data: config } = useQuery({ queryKey: ['config'], queryFn: () => api.listarConfiguracion(), enabled: enConfig });
+  const { data: autos } = useQuery({ queryKey: ['automatizaciones'], queryFn: () => api.obtenerAutomatizaciones(), enabled: enConfig });
   const { data: bitacoraPage } = useQuery({
     queryKey: ['bitacora', pagina, perPageEfectivo],
     queryFn: () => api.listarBitacora({ page: pagina, per_page: perPageEfectivo }),
     enabled: enBitacora,
   });
+
+  const [confirmar, setConfirmar] = useState<null | (typeof AUTOMATIZACIONES)[number]>(null);
+  const guardarAutos = useMutation({
+    mutationFn: (next: Automatizaciones) => api.guardarAutomatizaciones(next),
+    onSuccess: (data) => { qc.setQueryData(['automatizaciones'], data); toast('Automatizaciones actualizadas', 'ok'); },
+    onError: () => toast('No se pudo guardar el cambio', 'error'),
+  });
+
+  function alternar(item: (typeof AUTOMATIZACIONES)[number], activoActual: boolean) {
+    if (!autos) return;
+    if (activoActual) setConfirmar(item); // desactivar -> pedir confirmación
+    else guardarAutos.mutate({ ...autos, [item.key]: true }); // activar -> directo
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -52,7 +94,31 @@ export function ConfigBitacoraPage() {
         </Link>
       </div>
 
-      {!enBitacora && !enCorreo && (
+      {enConfig && (
+        <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-1">
+          <h3 className="m-0 text-[15px] font-semibold">Automatizaciones</h3>
+          <p className="m-0 text-xs text-text-muted">Tareas que Hub CFDI ejecuta solo, en segundo plano. Puedes apagarlas cuando lo necesites.</p>
+          <div className="mt-3 flex flex-col divide-y divide-border">
+            {AUTOMATIZACIONES.map((item) => {
+              const activo = autos ? autos[item.key] : true;
+              return (
+                <div key={item.key} className="flex items-start justify-between gap-4 py-3.5 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <div className="text-[14px] font-semibold">{item.nombre}</div>
+                    <p className="m-0 mt-0.5 text-[13px] text-text-muted text-pretty">{item.queHace}</p>
+                    {autos && !activo && (
+                      <p className="m-0 mt-1.5 text-[12px] text-warning text-pretty">Desactivada · {item.consecuencia}</p>
+                    )}
+                  </div>
+                  <Switch checked={activo} disabled={!autos || guardarAutos.isPending} onChange={() => alternar(item, activo)} label={item.nombre} />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {enConfig && (
         <div className="bg-surface border border-border rounded-lg overflow-hidden">
           <table>
             <caption className="sr-only">Parámetros de configuración</caption>
@@ -117,6 +183,20 @@ export function ConfigBitacoraPage() {
             />
           )}
         </div>
+      )}
+
+      {confirmar && (
+        <ConfirmarModal
+          titulo={`Desactivar "${confirmar.nombre}"`}
+          mensaje={<>{confirmar.consecuencia} ¿Seguro que quieres desactivarla?</>}
+          textoConfirmar="Desactivar"
+          tono="danger"
+          onCancelar={() => setConfirmar(null)}
+          onConfirmar={() => {
+            if (autos) guardarAutos.mutate({ ...autos, [confirmar.key]: false });
+            setConfirmar(null);
+          }}
+        />
       )}
     </div>
   );

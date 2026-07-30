@@ -510,6 +510,8 @@ def sync_diaria_empresa(empresa_id: int) -> dict[str, Any]:
 async def _disparar_sync_diaria_async() -> dict[str, Any]:
     hoy = date.today()
     async with SessionLocal() as db:
+        if not bool(await config_repo.valor(db, "auto_sync_diaria", True)):
+            return {"disparado": False, "razon": "desactivada"}
         hora_sync = str(await config_repo.valor(db, "hora_sync", "02:00"))
         try:
             hora_objetivo = int(hora_sync.split(":")[0])
@@ -551,6 +553,9 @@ def disparar_sync_diaria() -> dict[str, Any]:
 
 
 async def _actualizar_lista_69b_async() -> dict[str, Any]:
+    async with SessionLocal() as db:
+        if not bool(await config_repo.valor(db, "auto_lista_69b", True)):
+            return {"actualizado": False, "razon": "desactivada"}
     filas = descargar_lista_69b()
     hoy = date.today()
     async with SessionLocal() as db:
@@ -584,6 +589,8 @@ def actualizar_lista_69b() -> dict[str, Any]:
 
 async def _re_verificar_vigentes_async() -> dict[str, Any]:
     async with SessionLocal() as db:
+        if not bool(await config_repo.valor(db, "auto_re_verificar", True)):
+            return {"revalidados": 0, "razon": "desactivada"}
         dias = int(await config_repo.valor(db, "dias_re_verificacion", 30))
         empresas = await empresas_repo.listar_activas(db)
     limite = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=dias)

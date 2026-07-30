@@ -110,6 +110,12 @@ export interface ConfiguracionItem {
   descripcion: string;
 }
 
+export interface Automatizaciones {
+  sync_diaria: boolean;
+  lista_69b: boolean;
+  re_verificar: boolean;
+}
+
 /** Añadido tras el freeze (2026-07-28) — RF-NOT-01: correo saliente configurable desde la UI
  * (Configuración → Correo), no por variable de entorno. `configurado=false` cuando nadie lo
  * ha guardado todavía; la contraseña de aplicación nunca viaja de vuelta desde el backend. */
@@ -215,5 +221,7 @@ export interface ApiClient {
   /** Añadidos tras el freeze (2026-07-28) — RF-NOT-01, Configuración → Correo. */
   obtenerConfigSmtp(): Promise<ConfigSmtp>;
   guardarConfigSmtp(input: ConfigSmtpIn): Promise<void>;
+  obtenerAutomatizaciones(): Promise<Automatizaciones>;
+  guardarAutomatizaciones(input: Automatizaciones): Promise<Automatizaciones>;
   probarConfigSmtp(input: ConfigSmtpIn & { correo_destino: string }): Promise<void>;
 }

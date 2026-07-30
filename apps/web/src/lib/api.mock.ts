@@ -8,6 +8,7 @@ import { firebaseConfigured, getFirebaseAuth } from './firebase';
 import { ApiError } from './api';
 import type {
   ApiClient,
+  Automatizaciones,
   BitacoraEntrada,
   Comprobante,
   ConfigSmtp,
@@ -99,6 +100,7 @@ const db = {
     { clave: 'hora_sync', ejercicio_fiscal: 'vigente', valor: '02:00' },
   ] as DbConfig[],
   configSmtp: null as DbConfigSmtp | null,
+  automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true } as Automatizaciones,
 };
 
 const CONFIG_DESC: Record<string, string> = {
@@ -533,6 +535,19 @@ export const apiMock: ApiClient = {
     const u = requireUsuario();
     if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede ver esta pantalla.');
     return paginate(db.bitacora as BitacoraEntrada[], f?.page);
+  },
+
+  async obtenerAutomatizaciones(): Promise<Automatizaciones> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede ver esta pantalla.');
+    return { ...db.automatizaciones };
+  },
+
+  async guardarAutomatizaciones(input: Automatizaciones): Promise<Automatizaciones> {
+    const u = requireUsuario();
+    if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', 'Solo un administrador puede realizar esta acción.');
+    db.automatizaciones = { ...input };
+    return { ...input };
   },
 
   async obtenerConfigSmtp(): Promise<ConfigSmtp> {

@@ -58,6 +58,14 @@ class BootstrapStatusOut(BaseModel):
     needs_bootstrap: bool
 
 
+class AutomatizacionesConfig(BaseModel):
+    """Interruptores de las tareas automáticas (beat). True = activa (comportamiento por defecto)."""
+
+    sync_diaria: bool
+    lista_69b: bool
+    re_verificar: bool
+
+
 class BootstrapAdminIn(BaseModel):
     correo: EmailStr
     nombre: str

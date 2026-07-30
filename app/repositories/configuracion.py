@@ -22,3 +22,15 @@ async def valor(db: AsyncSession, clave: str, default: Any) -> Any:
         select(Configuracion).where(Configuracion.clave == clave, Configuracion.ejercicio_fiscal == EJERCICIO_VIGENTE)
     )
     return fila.valor if fila is not None else default
+
+
+async def establecer(db: AsyncSession, clave: str, valor_nuevo: Any) -> None:
+    """Upsert de una clave de configuración del ejercicio vigente (RF-CFG-01)."""
+    fila = await db.scalar(
+        select(Configuracion).where(Configuracion.clave == clave, Configuracion.ejercicio_fiscal == EJERCICIO_VIGENTE)
+    )
+    if fila is None:
+        db.add(Configuracion(clave=clave, ejercicio_fiscal=EJERCICIO_VIGENTE, valor=valor_nuevo))
+    else:
+        fila.valor = valor_nuevo
+    await db.flush()
