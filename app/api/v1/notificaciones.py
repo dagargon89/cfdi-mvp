@@ -17,7 +17,8 @@ router = APIRouter(prefix="/empresas/{empresa_id}/notificaciones", tags=["notifi
 @router.get("", response_model=NotificacionesOut)
 async def obtener_notificaciones_endpoint(
     empresa_id: int,
-    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
+    # Gestionar destinos es tarea de operador/admin; el rol de solo consulta no ve esta sección.
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.OPERADOR)),
     db: AsyncSession = Depends(get_db),
 ) -> NotificacionesOut:
     destinos = await notificaciones_repo.listar_destinos(db, empresa_id)

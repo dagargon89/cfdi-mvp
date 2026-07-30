@@ -1,13 +1,16 @@
 // demo.html:609-643 (P8 Alertas) + lógica demo.html:1209-1222.
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router';
+import { Link, Navigate } from 'react-router';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { api } from '@/lib/client';
 import { alertaVista } from './alertaVista';
 
 export function AlertasPage() {
-  const { empresa } = useEmpresaCtx();
-  const { data: eventosPage } = useQuery({ queryKey: ['eventos', empresa.empresa_id], queryFn: () => api.listarEventos(empresa.empresa_id) });
+  const { empresa, rol } = useEmpresaCtx();
+  const { data: eventosPage } = useQuery({ queryKey: ['eventos', empresa.empresa_id], queryFn: () => api.listarEventos(empresa.empresa_id), enabled: rol !== 'consulta' });
+
+  // El rol de solo consulta no tiene acceso a Alertas — si entra por URL directa, al tablero.
+  if (rol === 'consulta') return <Navigate to={`/e/${empresa.empresa_id}`} replace />;
   const alertas = (eventosPage?.data ?? []).map((e) => alertaVista(e, empresa.empresa_id));
 
   return (

@@ -70,9 +70,14 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       { key: 'efirma', label: 'Bóveda e.firma', Icon: NAV_ICON.llave, href: `${base}/efirma`, active: path.startsWith(`${base}/efirma`) },
       { key: 'descargas', label: 'Descargas', Icon: NAV_ICON.descarga, href: `${base}/descargas`, active: path.startsWith(`${base}/descargas`) },
       { key: 'comprobantes', label: 'Comprobantes', Icon: NAV_ICON.lista, href: `${base}/comprobantes`, active: path.startsWith(`${base}/comprobantes`) },
-      { key: 'alertas', label: 'Alertas', Icon: NAV_ICON.triangulo, href: `${base}/alertas`, active: path.startsWith(`${base}/alertas`), badge: eventos?.total },
-      { key: 'notificaciones', label: 'Notificaciones', Icon: NAV_ICON.campana, href: `${base}/notificaciones`, active: path.startsWith(`${base}/notificaciones`) },
     );
+    // Alertas y Notificaciones no aplican al rol de solo consulta en esa empresa.
+    if (empresaActiva.rol !== 'consulta') {
+      items.push(
+        { key: 'alertas', label: 'Alertas', Icon: NAV_ICON.triangulo, href: `${base}/alertas`, active: path.startsWith(`${base}/alertas`), badge: eventos?.total },
+        { key: 'notificaciones', label: 'Notificaciones', Icon: NAV_ICON.campana, href: `${base}/notificaciones`, active: path.startsWith(`${base}/notificaciones`) },
+      );
+    }
   }
   if (usuario?.rol_global === 'admin') {
     items.push(

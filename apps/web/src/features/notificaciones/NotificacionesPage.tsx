@@ -1,6 +1,7 @@
 // demo.html:646-692 (P9 Notificaciones) + lógica demo.html:1372-1386.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Navigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
@@ -17,11 +18,11 @@ const EVENTOS_LABEL: Record<TipoEvento, string> = {
 const EVENTOS_DISPONIBLES: TipoEvento[] = ['efos', 'cancelacion_tardia', 'error_descarga', 'efirma_por_vencer'];
 
 export function NotificacionesPage() {
-  const { empresa, puedeMutar } = useEmpresaCtx();
+  const { empresa, puedeMutar, rol } = useEmpresaCtx();
   const { toast } = useToast();
   const qc = useQueryClient();
 
-  const { data } = useQuery({ queryKey: ['notificaciones', empresa.empresa_id], queryFn: () => api.obtenerNotificaciones(empresa.empresa_id) });
+  const { data } = useQuery({ queryKey: ['notificaciones', empresa.empresa_id], queryFn: () => api.obtenerNotificaciones(empresa.empresa_id), enabled: rol !== 'consulta' });
   const destinos = data?.destinos ?? [];
 
   const [correo, setCorreo] = useState('');
@@ -36,6 +37,9 @@ export function NotificacionesPage() {
       toast('Destino agregado', 'ok');
     },
   });
+
+  // El rol de solo consulta no gestiona notificaciones — si entra por URL directa, al tablero.
+  if (rol === 'consulta') return <Navigate to={`/e/${empresa.empresa_id}`} replace />;
 
   function agregar() {
     if (!correo.trim().includes('@')) {

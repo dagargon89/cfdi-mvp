@@ -4,7 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Building2, Clock, Power, Search, ShieldCheck, ShieldX, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { useNavigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { ConfirmarRfcModal } from '@/components/ui/ConfirmarRfcModal';
 import { useToast } from '@/components/ui/ToastProvider';
@@ -215,19 +215,6 @@ export function EmpresasPage() {
         </div>
       )}
       {modalAbierto && <NuevaEmpresaModal onClose={() => setModalAbierto(false)} />}
-      {usuario?.rol_global === 'consulta' && (
-        <div className="bg-surface border border-dashed border-border rounded-lg px-4 py-3 flex items-center gap-3">
-          <span className="text-xs text-text-muted flex-1 text-pretty">
-            Prueba de permisos del guion de validación: intentar entrar a una empresa sin asignación.
-          </span>
-          <Link
-            to="/e/8"
-            className="h-8 border border-border bg-surface rounded-md px-3 text-[13px] font-semibold inline-flex items-center hover:bg-surface-alt"
-          >
-            Abrir empresa 8 sin permiso
-          </Link>
-        </div>
-      )}
       {empresas?.length === 0 && (
         <div className="bg-surface border border-border rounded-lg p-8 text-center text-text-muted text-sm flex items-center justify-center gap-2">
           <Building2 className="size-4" aria-hidden /> No tienes empresas asignadas.
