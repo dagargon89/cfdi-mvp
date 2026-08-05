@@ -148,6 +148,17 @@ export interface BitacoraEntrada {
   created_at: string;
 }
 
+/** Entrada del catálogo de informes (doc: spec §7.2). `parametros` es un JSON Schema — la pantalla
+ * de Informes construye el formulario a partir de `parametros.properties`/`required`, sin conocer
+ * de antemano qué informe es (B-02 hoy, ocho más en fases 2-3, ninguno hardcodeado en la UI). */
+export interface InformeCatalogo {
+  clave: string;
+  nombre: string;
+  grupo: string;
+  descripcion: string;
+  parametros: Record<string, unknown>;
+}
+
 export interface ApiClient {
   // Sesión (prioridad 1)
   me(): Promise<{ usuario_id: number; correo: string; nombre: string; rol_global: Rol; empresas: EmpresaResumen[] }>;
@@ -208,6 +219,9 @@ export interface ApiClient {
   descargarLoteZip(empresaId: number, comprobanteIds: number[]): Promise<{ tarea_id: string }>;
   obtenerMetadata(empresaId: number, jobId: number, page?: number): Promise<MetadataPreview>;
   descargarMetadataCsv(empresaId: number, jobId: number): Promise<Blob>;
+  // Informes (doc spec §7.2): catálogo + generación asíncrona, misma tarea que exportarExcel/validarLote.
+  listarInformes(): Promise<InformeCatalogo[]>;
+  generarInforme(empresaId: number, clave: string, parametros: Record<string, unknown>): Promise<{ tarea_id: string }>;
   // Vigilancia y notificaciones (prioridad 3)
   listarEventos(empresaId: number, f?: { tipo?: TipoEvento; page?: number }): Promise<Page<Evento>>;
   obtenerNotificaciones(empresaId: number): Promise<{ destinos: NotificacionDestino[] }>;

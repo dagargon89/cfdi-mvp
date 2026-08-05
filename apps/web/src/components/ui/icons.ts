@@ -39,6 +39,7 @@ export const NAV_ICON = {
   usuarios: Users,
   engrane: Settings,
   pergamino: ScrollText,
+  informes: FileSpreadsheet,
 } satisfies Record<string, LucideIcon>;
 
 export const CHIP_ICON = {

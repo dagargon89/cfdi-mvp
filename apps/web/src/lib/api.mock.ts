@@ -18,6 +18,7 @@ import type {
   EstadoJob,
   EstatusCfdi,
   Evento,
+  InformeCatalogo,
   Job,
   MetadataPreview,
   NotificacionDestino,
@@ -108,6 +109,28 @@ const CONFIG_DESC: Record<string, string> = {
   umbral_vigencia_dias: 'Días de anticipación para avisar que la e.firma vence',
   hora_sync: 'Hora del sync diario automático',
 };
+
+/** Catálogo de informes (doc spec §7.2) — hoy solo B-02; las fases 2-3 solo agregan entradas
+ * aquí, la pantalla de Informes no cambia. `parametros` es el JSON Schema real que arma el
+ * formulario del lado del cliente. */
+const CATALOGO_INFORMES: InformeCatalogo[] = [
+  {
+    clave: 'B-02',
+    nombre: 'Nómina agrupada por conceptos del patrón',
+    grupo: 'B',
+    descripcion: 'Una fila por CFDI de nómina, con una columna por cada concepto del patrón.',
+    parametros: {
+      properties: {
+        fecha_desde: { type: 'string', format: 'date' },
+        fecha_hasta: { type: 'string', format: 'date' },
+        tipo_nomina: { enum: ['O', 'E', 'AMBOS'], default: 'AMBOS' },
+        incluir_cancelados: { type: 'boolean', default: false },
+        enmascarar_datos_personales: { type: 'boolean', default: true },
+      },
+      required: ['fecha_desde', 'fecha_hasta'],
+    },
+  },
+];
 
 const EFIRMA_ERRORES: Record<string, string> = {
   EFIRMA_NO_ABRE: 'La contraseña no abre la llave privada. Verifica que corresponda al archivo .key seleccionado.',
@@ -456,6 +479,22 @@ export const apiMock: ApiClient = {
     if (!job) throw new ApiError(404, 'NO_ENCONTRADO', 'El job no existe o no pertenece a esta empresa.');
     const csv = 'RFC,Razon Social,Folios Emitidos,Folios Recibidos\nAAA010101AAA,Proveedora del Norte Demo,100,50\nBBB020202BB2,Insumos Fronterizos Demo,200,75\nCCC030303CC3,Comercial EFOS Demo,150,60\n';
     return new Blob([csv], { type: 'text/csv' });
+  },
+
+  async listarInformes(): Promise<InformeCatalogo[]> {
+    requireUsuario();
+    return CATALOGO_INFORMES;
+  },
+
+  async generarInforme(empresaId, clave, parametros) {
+    const u = requireRol(empresaId, 'operador');
+    const informe = CATALOGO_INFORMES.find((i) => i.clave === clave);
+    if (!informe) throw new ApiError(404, 'NO_ENCONTRADO', 'El informe no existe en el catálogo.');
+    const tarea_id = crypto.randomUUID();
+    tareas.set(tarea_id, { estado: 'pendiente' });
+    setTimeout(() => tareas.set(tarea_id, { estado: 'completada', descarga_url: `/mock-descargas/informe_${clave}_empresa${empresaId}.xlsx` }), 1400);
+    logBitacora(u.correo, 'generar_informe', `empresa:${empresaId}`, { clave, parametros });
+    return { tarea_id };
   },
 
   async listarEventos(empresaId, f) {

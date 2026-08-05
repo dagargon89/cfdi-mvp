@@ -70,6 +70,7 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       { key: 'efirma', label: 'Bóveda e.firma', Icon: NAV_ICON.llave, href: `${base}/efirma`, active: path.startsWith(`${base}/efirma`) },
       { key: 'descargas', label: 'Descargas', Icon: NAV_ICON.descarga, href: `${base}/descargas`, active: path.startsWith(`${base}/descargas`) },
       { key: 'comprobantes', label: 'Comprobantes', Icon: NAV_ICON.lista, href: `${base}/comprobantes`, active: path.startsWith(`${base}/comprobantes`) },
+      { key: 'informes', label: 'Informes', Icon: NAV_ICON.informes, href: `${base}/informes`, active: path.startsWith(`${base}/informes`) },
     );
     // Alertas y Notificaciones no aplican al rol de solo consulta en esa empresa.
     if (empresaActiva.rol !== 'consulta') {

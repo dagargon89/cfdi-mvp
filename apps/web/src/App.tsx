@@ -18,6 +18,7 @@ import { ComprobantesPage } from '@/features/comprobantes/ComprobantesPage';
 import { DescargasPage } from '@/features/descargas/DescargasPage';
 import { EfirmaPage } from '@/features/efirma/EfirmaPage';
 import { EmpresasPage } from '@/features/empresas/EmpresasPage';
+import { InformesPage } from '@/features/informes/InformesPage';
 import { NotificacionesPage } from '@/features/notificaciones/NotificacionesPage';
 import { TableroPage } from '@/features/tablero/TableroPage';
 import { queryClient } from '@/lib/queryClient';
@@ -57,6 +58,7 @@ export function App() {
                         <Route path="descargas" element={<DescargasPage />} />
                         <Route path="descargas/:job" element={<DescargasPage />} />
                         <Route path="comprobantes" element={<ComprobantesPage />} />
+                        <Route path="informes" element={<InformesPage />} />
                         <Route path="alertas" element={<AlertasPage />} />
                         <Route path="notificaciones" element={<NotificacionesPage />} />
                       </Route>
