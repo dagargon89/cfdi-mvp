@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.informes import b02_conceptos_patron
 from app.informes.base import DefinicionInforme
 
-_MODULOS: tuple[Any, ...] = ()
+_MODULOS: tuple[Any, ...] = (b02_conceptos_patron,)
 
 REGISTRO: dict[str, DefinicionInforme] = {modulo.CLAVE: modulo for modulo in _MODULOS}
 

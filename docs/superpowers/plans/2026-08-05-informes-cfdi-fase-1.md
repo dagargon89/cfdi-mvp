@@ -4193,7 +4193,9 @@ async def _nomina(
         )
     )
     db.add(NominaTotales(comprobante_id=cid, total_gravado=Decimal(total_percepciones), total_exento=Decimal("0")))
-    for tipo, clave, concepto, gravado, exento in percepciones or [("001", "001", "Sueldo", total_percepciones, "0.00")]:
+    if percepciones is None:
+        percepciones = [("001", "001", "Sueldo", total_percepciones, "0.00")]
+    for tipo, clave, concepto, gravado, exento in percepciones:
         db.add(
             NominaPercepcion(
                 comprobante_id=cid,
@@ -4204,7 +4206,9 @@ async def _nomina(
                 importe_exento=Decimal(exento),
             )
         )
-    for tipo, clave, concepto, importe in deducciones or [("002", "045", "I.S.R. mes", total_deducciones)]:
+    if deducciones is None:
+        deducciones = [("002", "045", "I.S.R. mes", total_deducciones)]
+    for tipo, clave, concepto, importe in deducciones:
         db.add(NominaDeduccion(comprobante_id=cid, tipo_deduccion=tipo, clave=clave, concepto=concepto, importe=Decimal(importe)))
     for tipo, clave, concepto, importe in otros_pagos or []:
         db.add(NominaOtroPago(comprobante_id=cid, tipo_otro_pago=tipo, clave=clave, concepto=concepto, importe=Decimal(importe)))
@@ -4327,6 +4331,7 @@ async def test_concepto_inconsistente_usa_la_descripcion_mas_frecuente(db: Async
             uuid=f"7777777{indice}-7777-7777-7777-777777777777",
             rfc_receptor=f"XAXX01010100{indice}",
             percepciones=[("001", "001", concepto, "8000.00", "0.00")],
+            deducciones=[],
         )
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
@@ -4833,6 +4838,18 @@ Expected: PASS (11 tests)
 
 Si `test_orden_de_columnas_es_determinista` falla, revisar que `_ORDEN_NATURALEZA` ponga
 `O` antes de `D` y que el `sorted` compare `tipo` y `clave` **como texto**.
+
+**Desviación respecto al borrador original (solo en el fixture de prueba, no en el módulo
+de la consulta):** el helper `_nomina` usaba `deducciones or [(...)]` y `percepciones or [(...)]`
+para aplicar sus valores por defecto. Con listas, `or` trata `[]` como falso, así que un
+llamador que pasa explícitamente `deducciones=[]` para *suprimir* la deducción de ISR por
+defecto la seguía recibiendo de todos modos. Esto rompía
+`test_concepto_inconsistente_usa_la_descripcion_mas_frecuente`: el helper inyectaba una
+columna `D¦002¦045¦I.S.R. mes` que la prueba no esperaba. Se corrigió el helper a
+`if percepciones is None: ...` / `if deducciones is None: ...` (que sí distingue "no me
+importa" de "quiero una lista vacía") y se agregó `deducciones=[]` explícito en esa prueba.
+El módulo `b02_conceptos_patron.py` no cambió: la lógica de agrupación, suma y bandera
+`CONCEPTO_INCONSISTENTE` ya era correcta; el defecto estaba solo en el fixture de prueba.
 
 **Nota de alcance:** la ficha B-02 del documento fuente lista también la bandera
 `PERIODO_FALTANTE` ("hueco en la secuencia de periodos esperada según `periodicidad_pago`"),
