@@ -1,0 +1,148 @@
+"""Construcción del libro de Excel común a todos los informes (spec §10).
+
+Cuatro hojas siempre: `Datos`, `Parámetros`, `Banderas`, `Diccionario`. `openpyxl` en modo
+`write_only` para no cargar el libro completo en memoria — el mismo patrón que
+`exportar_excel` en `app/worker/tasks.py`.
+
+`ROUND_HALF_UP` explícito: el redondeo por defecto de Python es `ROUND_HALF_EVEN`, que
+para importes fiscales es incorrecto (⌊x⌉₂ del documento fuente es medio arriba).
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
+
+from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.styles import Font
+
+from app.informes.base import Bandera, ContextoInforme, EntradaDiccionario, ResultadoInforme
+
+_FORMATO = {
+    "monto": "#,##0.00",
+    "decimal": "#,##0.000",
+    "entero": "#,##0",
+    "fecha": "yyyy-mm-dd",
+    "fecha_hora": "yyyy-mm-dd hh:mm:ss",
+    "texto": "@",
+}
+_NEGRITA = Font(bold=True)
+_DOS_DECIMALES = Decimal("0.01")
+
+
+def enmascarar(valor: str | None) -> str | None:
+    """`****` conservando los últimos 4 caracteres (spec §8). Un valor de 4 o menos se
+    enmascara por completo: conservar 4 de 4 no enmascararía nada."""
+    if valor is None:
+        return None
+    texto = str(valor)
+    return "****" if len(texto) <= 4 else f"****{texto[-4:]}"
+
+
+def _celda(valor: Any, tipo: str) -> Any:
+    """Único punto donde se redondea (R-T4)."""
+    if valor is None:
+        return None
+    if tipo == "monto" and isinstance(valor, Decimal):
+        return valor.quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+    if isinstance(valor, Decimal):
+        return valor
+    if isinstance(valor, (datetime, date)):
+        return valor
+    return valor
+
+
+def _con_estilo(ws: Any, valor: Any, *, formato: str | None = None, negrita: bool = False) -> Any:
+    """En modo `write_only` no existe `ws.cell(...)`: el estilo se aplica al construir la
+    celda con `WriteOnlyCell` antes de hacer `append`."""
+    celda = WriteOnlyCell(ws, value=valor)
+    if formato:
+        celda.number_format = formato
+    if negrita:
+        celda.font = _NEGRITA
+    return celda
+
+
+def _escribir_datos(wb: Workbook, resultado: ResultadoInforme) -> None:
+    ws = wb.create_sheet("Datos")
+    ws.freeze_panes = "A2"
+
+    ws.append([_con_estilo(ws, columna.titulo, negrita=True) for columna in resultado.columnas])
+
+    for fila in resultado.filas:
+        ws.append(
+            [
+                _con_estilo(ws, _celda(valor, columna.tipo), formato=_FORMATO.get(columna.tipo))
+                for valor, columna in zip(fila, resultado.columnas)
+            ]
+        )
+
+
+def _escribir_parametros(wb: Workbook, resultado: ResultadoInforme, ctx: ContextoInforme) -> None:
+    ws = wb.create_sheet("Parámetros")
+    ws.append(["Informe", f"{ctx.clave} · {ctx.nombre}"])
+    ws.append(["Generado por", ctx.usuario])
+    ws.append(["Generado el", ctx.generado_en])
+    ws.append(["Versión del ETL", ctx.etl_version])
+    ws.append(["Filas", len(resultado.filas)])
+    if resultado.aviso:
+        ws.append(["Aviso", resultado.aviso])
+    ws.append([])
+    ws.append(["Parámetro", "Valor"])
+    for clave, valor in ctx.parametros.items():
+        ws.append([clave, "" if valor is None else str(valor)])
+
+
+def _escribir_banderas(wb: Workbook, banderas: list[Bandera]) -> None:
+    ws = wb.create_sheet("Banderas")
+    ws.append(["Bandera", "Severidad", "Ámbito", "Mensaje"])
+    for bandera in banderas:
+        ws.append([bandera.clave, bandera.severidad, bandera.ambito, bandera.mensaje])
+
+
+def _escribir_diccionario(wb: Workbook, entradas: list[EntradaDiccionario]) -> None:
+    ws = wb.create_sheet("Diccionario")
+    ws.append(
+        [
+            "Etiqueta",
+            "Naturaleza",
+            "Tipo SAT",
+            "Descripción SAT",
+            "Clave del patrón",
+            "Concepto canónico",
+            "Descripciones alternas",
+            "Núm. comprobantes",
+            "Importe del periodo",
+        ]
+    )
+    for entrada in entradas:
+        ws.append(
+            [
+                entrada.etiqueta,
+                entrada.naturaleza,
+                entrada.tipo,
+                entrada.descripcion_sat,
+                entrada.clave_patron,
+                entrada.concepto_canonico,
+                "; ".join(entrada.descripciones_alternas),
+                entrada.num_comprobantes,
+                _celda(entrada.importe_total, "monto"),
+            ]
+        )
+
+
+def escribir_libro(resultado: ResultadoInforme, ctx: ContextoInforme) -> bytes:
+    """Devuelve los bytes del `.xlsx`. Las cuatro hojas existen siempre, aunque estén
+    vacías: un consumidor automático no debería tener que comprobar si la hoja está."""
+    wb = Workbook(write_only=True)
+    _escribir_datos(wb, resultado)
+    _escribir_parametros(wb, resultado, ctx)
+    _escribir_banderas(wb, resultado.banderas)
+    _escribir_diccionario(wb, resultado.diccionario)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()

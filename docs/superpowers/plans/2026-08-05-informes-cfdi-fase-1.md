@@ -3789,7 +3789,7 @@ from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font
 
-from app.informes.base import Bandera, Columna, ContextoInforme, EntradaDiccionario, ResultadoInforme
+from app.informes.base import Bandera, ContextoInforme, EntradaDiccionario, ResultadoInforme
 
 _FORMATO = {
     "monto": "#,##0.00",
