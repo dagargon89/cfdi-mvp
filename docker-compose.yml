@@ -40,6 +40,10 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./app:/srv/app
+      # `alembic/` se copia en el Dockerfile, así que sin este montaje la imagen se
+      # desincroniza del host: `alembic current` falla por revisiones que el contenedor no
+      # conoce, y los archivos de `revision --autogenerate` quedan dentro del contenedor.
+      - ./alembic:/srv/alembic
       - ./secrets:/srv/secrets
       - ./storage:/srv/storage
     ports:
