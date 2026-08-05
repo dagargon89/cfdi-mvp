@@ -353,7 +353,7 @@ async def test_pago_con_documento_relacionado_e_impuestos(db: AsyncSession) -> N
         forma_de_pago_p="03",
         moneda_p="MXN",
         tipo_cambio_p=Decimal("1.000000"),
-        monto=Decimal("17393.400000"),
+        monto=Decimal("10800.000000"),
         num_operacion="123456",
     )
     db.add(pago)
@@ -364,12 +364,12 @@ async def test_pago_con_documento_relacionado_e_impuestos(db: AsyncSession) -> N
         comprobante_id=comprobante.comprobante_id,
         id_documento="66666666-6666-6666-6666-666666666666",
         serie="A",
-        folio="8602",
+        folio="1001",
         moneda_dr="MXN",
         equivalencia_dr=Decimal("1.0000000000"),
         num_parcialidad=1,
-        imp_saldo_ant=Decimal("17393.400000"),
-        imp_pagado=Decimal("17393.400000"),
+        imp_saldo_ant=Decimal("10800.000000"),
+        imp_pagado=Decimal("10800.000000"),
         imp_saldo_insoluto=Decimal("0.000000"),
         objeto_imp_dr="02",
     )
@@ -384,29 +384,29 @@ async def test_pago_con_documento_relacionado_e_impuestos(db: AsyncSession) -> N
             impuesto="002",
             tipo_factor="Tasa",
             tasa_o_cuota=Decimal("0.080000"),
-            base=Decimal("16105.000000"),
-            importe=Decimal("1288.400000"),
+            base=Decimal("10000.000000"),
+            importe=Decimal("800.000000"),
         )
     )
     db.add(
         PagoTotales(
             comprobante_id=comprobante.comprobante_id,
-            total_traslados_base_iva8=Decimal("16105.000000"),
-            total_traslados_impuesto_iva8=Decimal("1288.400000"),
-            monto_total_pagos=Decimal("17393.400000"),
+            total_traslados_base_iva8=Decimal("10000.000000"),
+            total_traslados_impuesto_iva8=Decimal("800.000000"),
+            monto_total_pagos=Decimal("10800.000000"),
         )
     )
     await db.commit()
 
     guardado = await db.scalar(select(PagoDocto).where(PagoDocto.pago_id == pago.id))
     assert guardado is not None
-    assert guardado.imp_pagado == Decimal("17393.400000")
+    assert guardado.imp_pagado == Decimal("10800.000000")
     # `equivalencia_dr` necesita 10 decimales, no 6 (§2.5 del documento fuente).
     assert guardado.equivalencia_dr == Decimal("1.0000000000")
 
     totales = await db.scalar(select(PagoTotales).where(PagoTotales.comprobante_id == comprobante.comprobante_id))
     assert totales is not None
-    assert totales.monto_total_pagos == Decimal("17393.400000")
+    assert totales.monto_total_pagos == Decimal("10800.000000")
     assert totales.total_traslados_base_iva16 is None  # no informado en este REP
 ```
 
@@ -1908,26 +1908,28 @@ def cfdi_pago(
     uuid: str = "55555555-5555-5555-5555-555555555555",
     fecha: str = "2026-07-22T14:11:39",
     fecha_pago: str = "2026-07-22T12:00:00",
-    monto: str = "17393.40",
+    monto: str = "10800.00",
     id_documento: str = "66666666-6666-6666-6666-666666666666",
-    imp_pagado: str = "17393.40",
+    imp_pagado: str = "10800.00",
     doctos_extra: str = "",
 ) -> bytes:
     """CFDI 4.0 tipo P con complemento de Pagos 2.0: un pago que cubre un documento con
-    IVA al 8 % y el nodo `Totales`."""
+    IVA al 8 % y el nodo `Totales`. Emisor, folio e importes son inventados y
+    aritméticamente coherentes (base 10000.00 × 8 % = 800.00; monto 10000.00 + 800.00 =
+    10800.00)."""
     docto = (
-        f'<pago20:DoctoRelacionado IdDocumento="{id_documento}" Serie="A" Folio="8602" '
+        f'<pago20:DoctoRelacionado IdDocumento="{id_documento}" Serie="A" Folio="1001" '
         f'MonedaDR="MXN" EquivalenciaDR="1" NumParcialidad="1" ImpSaldoAnt="{monto}" '
         f'ImpPagado="{imp_pagado}" ImpSaldoInsoluto="0.00" ObjetoImpDR="02">'
         "<pago20:ImpuestosDR><pago20:TrasladosDR>"
-        '<pago20:TrasladoDR BaseDR="16105.00" ImpuestoDR="002" TipoFactorDR="Tasa" '
-        'TasaOCuotaDR="0.080000" ImporteDR="1288.40" />'
+        '<pago20:TrasladoDR BaseDR="10000.00" ImpuestoDR="002" TipoFactorDR="Tasa" '
+        'TasaOCuotaDR="0.080000" ImporteDR="800.00" />'
         "</pago20:TrasladosDR></pago20:ImpuestosDR>"
         "</pago20:DoctoRelacionado>"
     )
     complemento_pagos = (
         '<pago20:Pagos xmlns:pago20="http://www.sat.gob.mx/Pagos20" Version="2.0">'
-        '<pago20:Totales TotalTrasladosBaseIVA8="16105.00" TotalTrasladosImpuestoIVA8="1288.40" '
+        '<pago20:Totales TotalTrasladosBaseIVA8="10000.00" TotalTrasladosImpuestoIVA8="800.00" '
         f'MontoTotalPagos="{monto}" />'
         f'<pago20:Pago FechaPago="{fecha_pago}" FormaDePagoP="03" MonedaP="MXN" TipoCambioP="1" '
         f'Monto="{monto}" NumOperacion="123456">{docto}{doctos_extra}</pago20:Pago>'
@@ -1936,10 +1938,10 @@ def cfdi_pago(
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4" Version="4.0" '
-        f'Serie="P" Folio="8602" Fecha="{fecha}" Moneda="XXX" SubTotal="0" Total="0" '
+        f'Serie="P" Folio="1001" Fecha="{fecha}" Moneda="XXX" SubTotal="0" Total="0" '
         'TipoDeComprobante="P" Exportacion="01" LugarExpedicion="31000" '
         'NoCertificado="00001000000504465028" Certificado="Y2VydA==" Sello="c2VsbG8=">'
-        '<cfdi:Emisor Rfc="AKB120101AAA" Nombre="AKBAL CONSULTORES" RegimenFiscal="601" />'
+        '<cfdi:Emisor Rfc="DEM120101AAA" Nombre="PROVEEDOR DEMO SA DE CV" RegimenFiscal="601" />'
         '<cfdi:Receptor Rfc="CHL960913IX9" Nombre="CENTRO HUMANO DE LIDERAZGO" '
         'DomicilioFiscalReceptor="31000" RegimenFiscalReceptor="601" UsoCFDI="CP01" />'
         "<cfdi:Conceptos>"
@@ -1981,14 +1983,14 @@ def test_normaliza_pago_con_documento_e_impuestos() -> None:
     assert pago.fecha_pago == datetime(2026, 7, 22, 12, 0, 0)
     assert pago.forma_de_pago_p == "03"
     assert pago.moneda_p == "MXN"
-    assert pago.monto == Decimal("17393.40")
+    assert pago.monto == Decimal("10800.00")
     assert pago.num_operacion == "123456"
 
     assert len(pago.doctos) == 1
     docto = pago.doctos[0]
     assert docto.id_documento == "66666666-6666-6666-6666-666666666666"
     assert docto.num_parcialidad == 1
-    assert docto.imp_pagado == Decimal("17393.40")
+    assert docto.imp_pagado == Decimal("10800.00")
     assert docto.imp_saldo_insoluto == Decimal("0.00")
     assert docto.equivalencia_dr == Decimal("1")
 
@@ -1997,8 +1999,8 @@ def test_normaliza_pago_con_documento_e_impuestos() -> None:
     assert impuesto.naturaleza == "T"
     assert impuesto.impuesto == "002"
     assert impuesto.tasa_o_cuota == Decimal("0.080000")
-    assert impuesto.base == Decimal("16105.00")
-    assert impuesto.importe == Decimal("1288.40")
+    assert impuesto.base == Decimal("10000.00")
+    assert impuesto.importe == Decimal("800.00")
 
 
 def test_normaliza_totales_del_rep() -> None:
@@ -2006,9 +2008,9 @@ def test_normaliza_totales_del_rep() -> None:
 
     assert datos.pago_totales is not None
     totales = datos.pago_totales
-    assert totales.total_traslados_base_iva8 == Decimal("16105.00")
-    assert totales.total_traslados_impuesto_iva8 == Decimal("1288.40")
-    assert totales.monto_total_pagos == Decimal("17393.40")
+    assert totales.total_traslados_base_iva8 == Decimal("10000.00")
+    assert totales.total_traslados_impuesto_iva8 == Decimal("800.00")
+    assert totales.monto_total_pagos == Decimal("10800.00")
     # No informado ≠ cero: el REP real de la empresa 11 solo trae los campos del 8 %.
     assert totales.total_traslados_base_iva16 is None
 
@@ -2179,22 +2181,47 @@ Y en `normalizar`:
 Run: `.venv/bin/pytest tests/test_normalizacion_pagos.py -q`
 Expected: PASS (3 tests)
 
-- [ ] **Step 6: Verify against the real REP**
+- [ ] **Step 6: Verify against the real REPs**
+
+No se nombra ningún archivo real (los nombres de archivo de la empresa 11 llevan el
+nombre del proveedor): se descubren por su tipo de comprobante en vez de hardcodear una
+ruta. **Ojo:** no asumas que hay un único REP en el directorio — verifícalo. La empresa
+11 tiene decenas de REPs (comprobantes con `TipoDeComprobante="P"`), no uno solo, así que
+la verificación barre todos y comprueba coherencia interna en cada uno, en vez de fijar
+cifras de un archivo específico.
 
 ```bash
 .venv/bin/python -c "
+import glob
+from decimal import Decimal
 from app.services.normalizacion import normalizar
-ruta = 'storage/11/comprobantes/AKBAL CONSULTORES_8602_V.xml'
-d = normalizar(open(ruta, 'rb').read())
-assert len(d.pagos) == 1, d.pagos
-p = d.pagos[0]
-print('monto:', p.monto, '| doctos:', len(p.doctos))
-print('impuestos del docto:', [(i.impuesto, i.tasa_o_cuota, i.importe) for i in p.doctos[0].impuestos])
-print('totales:', d.pago_totales)
+
+rutas = [r for r in glob.glob('storage/11/comprobantes/*.xml') if b'TipoDeComprobante=\"P\"' in open(r, 'rb').read()]
+assert rutas, 'no se encontró ningún REP en storage/11/comprobantes'
+
+con_pagos = 0
+con_impuestos = 0
+for ruta in rutas:
+    d = normalizar(open(ruta, 'rb').read())
+    if not d.pagos:
+        continue
+    con_pagos += 1
+    for pago in d.pagos:
+        for docto in pago.doctos:
+            for impuesto in docto.impuestos:
+                con_impuestos += 1
+                if impuesto.base is not None and impuesto.tasa_o_cuota is not None and impuesto.importe is not None:
+                    esperado = impuesto.base * impuesto.tasa_o_cuota
+                    assert abs(esperado - impuesto.importe) < Decimal('1'), (ruta, impuesto)
+
+print(f'REPs encontrados: {len(rutas)} | con al menos un pago: {con_pagos} | impuestos verificados: {con_impuestos}')
 "
 ```
 
-Expected: 1 pago, 1 documento, el traslado de IVA 8 % con base 16105.00 e importe 1288.40, y `MontoTotalPagos` 17393.40 — los mismos valores que la sonda de exploración leyó del REP real.
+Expected: al menos un REP encontrado, todos con al menos un pago, y ningún `AssertionError`
+de coherencia — cada traslado/retención cumple `base × tasa ≈ importe`. Ninguna cifra real
+queda fija en esta instrucción; lo que se fija es la propiedad aritmética que debe cumplir
+cualquier REP real, sea cual sea.
 
 - [ ] **Step 7: Type-check and commit**
 
