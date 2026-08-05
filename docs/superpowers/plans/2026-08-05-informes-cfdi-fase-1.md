@@ -1909,14 +1909,20 @@ def cfdi_pago(
     fecha: str = "2026-07-22T14:11:39",
     fecha_pago: str = "2026-07-22T12:00:00",
     monto: str = "10800.00",
-    id_documento: str = "66666666-6666-6666-6666-666666666666",
+    id_documento: str = "66666666-6666-6666-6666-6666666666ab",
     imp_pagado: str = "10800.00",
     doctos_extra: str = "",
+    retenciones_dr_xml: str = "",
+    pagos_extra: str = "",
 ) -> bytes:
     """CFDI 4.0 tipo P con complemento de Pagos 2.0: un pago que cubre un documento con
-    IVA al 8 % y el nodo `Totales`. Emisor, folio e importes son inventados y
-    aritméticamente coherentes (base 10000.00 × 8 % = 800.00; monto 10000.00 + 800.00 =
-    10800.00)."""
+    IVA al 8 % y el nodo `Totales`. Emisor, folio e importes son inventados; los
+    importes son aritméticamente coherentes (base 10000.00 × 8 % = 800.00, monto total
+    10000.00 + 800.00 = 10800.00). `id_documento` lleva letras en minúsculas a propósito
+    para que las pruebas puedan verificar la normalización a mayúsculas."""
+    retenciones_bloque = (
+        f"<pago20:RetencionesDR>{retenciones_dr_xml}</pago20:RetencionesDR>" if retenciones_dr_xml else ""
+    )
     docto = (
         f'<pago20:DoctoRelacionado IdDocumento="{id_documento}" Serie="A" Folio="1001" '
         f'MonedaDR="MXN" EquivalenciaDR="1" NumParcialidad="1" ImpSaldoAnt="{monto}" '
@@ -1924,7 +1930,7 @@ def cfdi_pago(
         "<pago20:ImpuestosDR><pago20:TrasladosDR>"
         '<pago20:TrasladoDR BaseDR="10000.00" ImpuestoDR="002" TipoFactorDR="Tasa" '
         'TasaOCuotaDR="0.080000" ImporteDR="800.00" />'
-        "</pago20:TrasladosDR></pago20:ImpuestosDR>"
+        f"</pago20:TrasladosDR>{retenciones_bloque}</pago20:ImpuestosDR>"
         "</pago20:DoctoRelacionado>"
     )
     complemento_pagos = (
@@ -1933,6 +1939,7 @@ def cfdi_pago(
         f'MontoTotalPagos="{monto}" />'
         f'<pago20:Pago FechaPago="{fecha_pago}" FormaDePagoP="03" MonedaP="MXN" TipoCambioP="1" '
         f'Monto="{monto}" NumOperacion="123456">{docto}{doctos_extra}</pago20:Pago>'
+        f"{pagos_extra}"
         "</pago20:Pagos>"
     )
     return (
@@ -1956,6 +1963,36 @@ def cfdi_pago(
         "</cfdi:Complemento>"
         "</cfdi:Comprobante>"
     ).encode()
+
+
+def pago_adicional(
+    *,
+    fecha_pago: str = "2026-07-23T09:00:00",
+    monto: str = "500.00",
+    num_operacion: str = "654321",
+) -> str:
+    """Bloque `<pago20:Pago>` mínimo, sin documento relacionado, para probar con
+    `pagos_extra` de `cfdi_pago` que `num_pago` es la posición del nodo y no un valor
+    fijo cuando el REP trae más de un pago."""
+    return (
+        f'<pago20:Pago FechaPago="{fecha_pago}" FormaDePagoP="03" MonedaP="MXN" '
+        f'TipoCambioP="1" Monto="{monto}" NumOperacion="{num_operacion}" />'
+    )
+
+
+def retencion_dr(
+    *,
+    base: str = "10000.00",
+    impuesto: str = "001",
+    tasa_o_cuota: str = "0.100000",
+    importe: str = "1000.00",
+) -> str:
+    """Bloque `<pago20:RetencionDR>` para probar, vía `retenciones_dr_xml` de
+    `cfdi_pago`, la rama de retenciones de `_impuestos_de_docto` (naturaleza `'R'`)."""
+    return (
+        f'<pago20:RetencionDR BaseDR="{base}" ImpuestoDR="{impuesto}" TipoFactorDR="Tasa" '
+        f'TasaOCuotaDR="{tasa_o_cuota}" ImporteDR="{importe}" />'
+    )
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -1988,7 +2025,9 @@ def test_normaliza_pago_con_documento_e_impuestos() -> None:
 
     assert len(pago.doctos) == 1
     docto = pago.doctos[0]
-    assert docto.id_documento == "66666666-6666-6666-6666-666666666666"
+    # El fixture usa letras en minúsculas en `id_documento`: verifica que el ETL las
+    # normaliza a mayúsculas (regla de dominio, no solo un valor que ya viniera así).
+    assert docto.id_documento == "66666666-6666-6666-6666-6666666666AB"
     assert docto.num_parcialidad == 1
     assert docto.imp_pagado == Decimal("10800.00")
     assert docto.imp_saldo_insoluto == Decimal("0.00")
@@ -2016,9 +2055,28 @@ def test_normaliza_totales_del_rep() -> None:
 
 
 def test_numera_los_pagos_en_orden() -> None:
-    """`num_pago` es derivado: la posición del nodo (§2.5 del fuente)."""
-    datos = normalizacion.normalizar(fixtures_cfdi.cfdi_pago())
-    assert [p.num_pago for p in datos.pagos] == [1]
+    """`num_pago` es derivado: la posición del nodo (§2.5 del fuente). Con un solo
+    `Pago` la prueba pasaría aunque el código hardcodeara `num_pago=1`, así que el
+    fixture trae un segundo `Pago` para forzar que la numeración sea posicional."""
+    datos = normalizacion.normalizar(fixtures_cfdi.cfdi_pago(pagos_extra=fixtures_cfdi.pago_adicional()))
+    assert [p.num_pago for p in datos.pagos] == [1, 2]
+    assert datos.pagos[1].monto == Decimal("500.00")
+    assert datos.pagos[1].num_operacion == "654321"
+
+
+def test_impuestos_de_docto_incluye_retenciones() -> None:
+    """`RetencionesDR` usa la misma forma de mapa con llave compuesta que `TrasladosDR`
+    (verificado contra un REP real); esta prueba cubre esa rama de `_impuestos_de_docto`
+    que el traslado por sí solo no ejercita."""
+    datos = normalizacion.normalizar(fixtures_cfdi.cfdi_pago(retenciones_dr_xml=fixtures_cfdi.retencion_dr()))
+
+    docto = datos.pagos[0].doctos[0]
+    assert len(docto.impuestos) == 2
+    retencion = next(i for i in docto.impuestos if i.naturaleza == "R")
+    assert retencion.impuesto == "001"
+    assert retencion.tasa_o_cuota == Decimal("0.100000")
+    assert retencion.base == Decimal("10000.00")
+    assert retencion.importe == Decimal("1000.00")
 ```
 
 - [ ] **Step 3: Run test to verify it fails**
@@ -2179,7 +2237,7 @@ Y en `normalizar`:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_normalizacion_pagos.py -q`
-Expected: PASS (3 tests)
+Expected: PASS (4 tests)
 
 - [ ] **Step 6: Verify against the real REPs**
 
