@@ -14,6 +14,15 @@ from app.models.empresa import Empresa
 from app.models.evento import Evento
 from app.models.job import Job
 from app.models.lista_69b import Lista69b
+from app.models.nomina import (
+    Nomina,
+    NominaDeduccion,
+    NominaIncapacidad,
+    NominaOtroPago,
+    NominaPercepcion,
+    NominaReceptor,
+    NominaTotales,
+)
 from app.models.notificacion_destino import NotificacionDestino
 from app.models.notificacion_log import NotificacionLog
 from app.models.pago import Pago, PagoDocto, PagoDoctoImpuesto, PagoTotales
@@ -42,4 +51,11 @@ __all__ = [
     "PagoDocto",
     "PagoDoctoImpuesto",
     "PagoTotales",
+    "Nomina",
+    "NominaReceptor",
+    "NominaPercepcion",
+    "NominaDeduccion",
+    "NominaOtroPago",
+    "NominaIncapacidad",
+    "NominaTotales",
 ]
