@@ -4443,9 +4443,17 @@ async def test_concepto_repetido_con_descripciones_distintas_se_suma(db: AsyncSe
 async def test_desempate_de_concepto_canonico_es_deterministico(db: AsyncSession) -> None:
     """B-02.R5: con dos descripciones empatadas en frecuencia para el mismo concepto, el
     desempate debe ser estable entre corridas —alfabético—, no depender del orden de filas
-    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones)."""
+    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones).
+
+    El orden de inserción es deliberado: "Sueldos" (el alfabéticamente MAYOR) se inserta
+    antes que "Sueldo" (el menor), manteniendo el empate 2-2. Así, un desempate viejo por
+    "primero visto" (`Counter.most_common(1)[0][0]`) elegiría "Sueldos", mientras que el
+    desempate correcto (alfabético) elige "Sueldo" — los dos algoritmos discrepan y la
+    prueba sí distingue entre ellos. Con "Sueldo" insertado primero (como en un intento
+    anterior de esta prueba), ambos desempates coinciden por casualidad y la prueba no
+    protege nada, aunque pase."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    for indice, concepto in enumerate(("Sueldo", "Sueldos", "Sueldo", "Sueldos")):
+    for indice, concepto in enumerate(("Sueldos", "Sueldo", "Sueldos", "Sueldo")):
         await _nomina(
             db,
             empresa_id=empresa.empresa_id,
@@ -5021,7 +5029,23 @@ sobre huecos de cobertura y tres sobre el módulo mismo.
    nunca; como el catálogo expone los parámetros al frontend, hubiera mostrado una casilla
    sin ningún efecto. Se quitó de `Parametros` y se documentó como nota de alcance en el
    docstring del módulo (el desglose por gravado/exento duplicaría el conjunto de columnas
-   dinámicas y su orden — trabajo para otra tarea).
+   dinámicas y su orden — trabajo para otra tarea). También se quitó de un mock que la
+   quedó referenciando en el bloque de la Tarea 14 (`apps/web/src/lib/api.mock.ts`,
+   catálogo simulado), antes de que esa tarea se implementara.
+
+**Ronda de corrección 2 (mutación sobre el hallazgo 2):** el re-revisor revirtió el
+desempate nuevo (`min(...)`) al viejo (`most_common(1)[0][0]`) y
+`test_desempate_de_concepto_canonico_es_deterministico` **siguió pasando**. La causa: el
+fixture insertaba "Sueldo" antes que "Sueldos", y con un dataset tan pequeño MySQL
+devuelve las filas de un `GROUP BY` en orden de inserción, así que el desempate viejo
+("primero visto") coincidía con el nuevo (alfabético) por casualidad — los dos algoritmos
+daban el mismo resultado y la prueba no distinguía entre ellos. Se invirtió el orden de
+inserción del fixture (ahora inserta "Sueldos", el alfabéticamente mayor, antes que
+"Sueldo", el menor, manteniendo el empate 2-2), de modo que el desempate viejo elegiría
+"Sueldos" y el nuevo elige "Sueldo" — los algoritmos discrepan y la prueba sí protege. Se
+verificó revirtiendo temporalmente la línea del desempate en `consultar()` a
+`frecuencias.most_common(1)[0][0]`, confirmando que la prueba **falla**
+(`'P¦001¦001¦Sueldos' != 'P¦001¦001¦Sueldo'`), y restaurando el `min(...)`.
 
 Un hallazgo *minor* de la revisión se dejó sin tocar a propósito: las columnas de totales
 fijos (`Total sueldos`, `Total gravado`, etc.) entregan `None` cuando falta `NominaTotales`,
@@ -5733,7 +5757,6 @@ el estilo de los mocks vecinos:
           fecha_hasta: { type: 'string', format: 'date' },
           tipo_nomina: { enum: ['O', 'E', 'AMBOS'], default: 'AMBOS' },
           incluir_cancelados: { type: 'boolean', default: false },
-          desglosar_gravado_exento: { type: 'boolean', default: false },
           enmascarar_datos_personales: { type: 'boolean', default: true },
         },
         required: ['fecha_desde', 'fecha_hasta'],

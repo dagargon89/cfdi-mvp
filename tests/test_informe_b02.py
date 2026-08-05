@@ -336,9 +336,17 @@ async def test_concepto_repetido_con_descripciones_distintas_se_suma(db: AsyncSe
 async def test_desempate_de_concepto_canonico_es_deterministico(db: AsyncSession) -> None:
     """B-02.R5: con dos descripciones empatadas en frecuencia para el mismo concepto, el
     desempate debe ser estable entre corridas —alfabético—, no depender del orden de filas
-    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones)."""
+    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones).
+
+    El orden de inserción es deliberado: "Sueldos" (el alfabéticamente MAYOR) se inserta
+    antes que "Sueldo" (el menor), manteniendo el empate 2-2. Así, un desempate viejo por
+    "primero visto" (`Counter.most_common(1)[0][0]`) elegiría "Sueldos", mientras que el
+    desempate correcto (alfabético) elige "Sueldo" — los dos algoritmos discrepan y la
+    prueba sí distingue entre ellos. Con "Sueldo" insertado primero (como en un intento
+    anterior de esta prueba), ambos desempates coinciden por casualidad y la prueba no
+    protege nada, aunque pase."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    for indice, concepto in enumerate(("Sueldo", "Sueldos", "Sueldo", "Sueldos")):
+    for indice, concepto in enumerate(("Sueldos", "Sueldo", "Sueldos", "Sueldo")):
         await _nomina(
             db,
             empresa_id=empresa.empresa_id,
