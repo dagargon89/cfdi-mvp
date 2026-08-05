@@ -20,3 +20,6 @@ storage/
 
 # General
 .DS_Store
+
+# Espacio de trabajo de subagent-driven-development (artefactos temporales del plan)
+.superpowers/
