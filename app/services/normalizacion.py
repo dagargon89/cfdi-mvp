@@ -12,10 +12,6 @@ Tres detalles que `satcfdi` resuelve y de los que este módulo depende:
 - Los nodos con cardinalidad variable llegan a veces como lista y a veces como mapa con
   un hijo nombrado (`Percepciones.Percepcion` es mapa+lista, `OtrosPagos` es lista
   directa). `_lista` normaliza ambas formas.
-
-`pagos` y `pago_totales` de `DatosComprobante` quedan tipados como `Any` a propósito: la
-tarea 6 agrega `DatosPago`/`DatosPagoTotales` y solo tendrá que afinar el tipo aquí, no
-el resto del árbol.
 """
 
 from __future__ import annotations
@@ -189,15 +185,59 @@ class DatosNomina:
 
 
 @dataclass(slots=True)
+class DatosPagoDocto:
+    id_documento: str
+    serie: str | None
+    folio: str | None
+    moneda_dr: str | None
+    equivalencia_dr: Decimal | None
+    num_parcialidad: int | None
+    imp_saldo_ant: Decimal | None
+    imp_pagado: Decimal | None
+    imp_saldo_insoluto: Decimal | None
+    objeto_imp_dr: str | None
+    impuestos: list[DatosImpuesto] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DatosPago:
+    num_pago: int
+    fecha_pago: datetime | None
+    forma_de_pago_p: str | None
+    moneda_p: str | None
+    tipo_cambio_p: Decimal | None
+    monto: Decimal | None
+    num_operacion: str | None
+    rfc_emisor_cta_ord: str | None
+    rfc_emisor_cta_ben: str | None
+    cta_ordenante: str | None
+    cta_beneficiario: str | None
+    doctos: list[DatosPagoDocto] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DatosPagoTotales:
+    total_traslados_base_iva16: Decimal | None
+    total_traslados_impuesto_iva16: Decimal | None
+    total_traslados_base_iva8: Decimal | None
+    total_traslados_impuesto_iva8: Decimal | None
+    total_traslados_base_iva0: Decimal | None
+    total_traslados_impuesto_iva0: Decimal | None
+    total_traslados_base_iva_exento: Decimal | None
+    total_retenciones_iva: Decimal | None
+    total_retenciones_isr: Decimal | None
+    total_retenciones_ieps: Decimal | None
+    monto_total_pagos: Decimal | None
+
+
+@dataclass(slots=True)
 class DatosComprobante:
     encabezado: DatosEncabezado
     conceptos: list[DatosConcepto] = field(default_factory=list)
     relacionados: list[DatosRelacionado] = field(default_factory=list)
     nomina: DatosNomina | None = None
-    # Tipo definitivo (`list[DatosPago]`) lo pone la tarea 6; aquí solo existe el campo.
-    pagos: list[Any] = field(default_factory=list)
-    # Tipo definitivo (`DatosPagoTotales | None`) lo pone la tarea 6; aquí solo existe el campo.
-    pago_totales: Any | None = None
+    pagos: list[DatosPago] = field(default_factory=list)
+    pago_totales: DatosPagoTotales | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +320,86 @@ def _impuestos_de_concepto(concepto: Any) -> list[DatosImpuesto]:
                 )
             )
     return resultado
+
+
+def _impuestos_de_docto(docto: Any) -> list[DatosImpuesto]:
+    """Los atributos del complemento de pagos llevan sufijo `DR`: `BaseDR`, `ImpuestoDR`,
+    `TasaOCuotaDR`, `ImporteDR` — no son los mismos nombres que a nivel concepto."""
+    impuestos_nodo = docto.get("ImpuestosDR") or {}
+    resultado: list[DatosImpuesto] = []
+    for naturaleza, llave in (("T", "TrasladosDR"), ("R", "RetencionesDR")):
+        agrupados = impuestos_nodo.get(llave) or {}
+        valores = agrupados.values() if hasattr(agrupados, "values") else agrupados
+        for nodo in valores:
+            resultado.append(
+                DatosImpuesto(
+                    naturaleza=naturaleza,
+                    impuesto=_clave(nodo.get("ImpuestoDR")) or "",
+                    tipo_factor=_clave(nodo.get("TipoFactorDR")),
+                    tasa_o_cuota=_decimal(nodo.get("TasaOCuotaDR")),
+                    base=_decimal(nodo.get("BaseDR")),
+                    importe=_decimal(nodo.get("ImporteDR")),
+                )
+            )
+    return resultado
+
+
+def _pagos(nodo: Any) -> tuple[list[DatosPago], DatosPagoTotales | None]:
+    """Parsea el complemento de Pagos 2.0. El grano del informe A-05 es una fila por
+    documento pagado en cada pago, así que se conserva la jerarquía pago → documento →
+    impuestos completa."""
+    pagos: list[DatosPago] = []
+    for indice, pago_nodo in enumerate(_lista(nodo.get("Pago"), "Pago"), start=1):
+        doctos = [
+            DatosPagoDocto(
+                id_documento=str(d.get("IdDocumento") or "").upper(),
+                serie=d.get("Serie"),
+                folio=d.get("Folio"),
+                moneda_dr=_clave(d.get("MonedaDR")),
+                equivalencia_dr=_decimal(d.get("EquivalenciaDR")),
+                num_parcialidad=int(d["NumParcialidad"]) if d.get("NumParcialidad") is not None else None,
+                imp_saldo_ant=_decimal(d.get("ImpSaldoAnt")),
+                imp_pagado=_decimal(d.get("ImpPagado")),
+                imp_saldo_insoluto=_decimal(d.get("ImpSaldoInsoluto")),
+                objeto_imp_dr=_clave(d.get("ObjetoImpDR")),
+                impuestos=_impuestos_de_docto(d),
+            )
+            for d in _lista(pago_nodo.get("DoctoRelacionado"), "DoctoRelacionado")
+        ]
+        pagos.append(
+            DatosPago(
+                num_pago=indice,
+                fecha_pago=_fecha_hora(pago_nodo.get("FechaPago")),
+                forma_de_pago_p=_clave(pago_nodo.get("FormaDePagoP")),
+                moneda_p=_clave(pago_nodo.get("MonedaP")),
+                tipo_cambio_p=_decimal(pago_nodo.get("TipoCambioP")),
+                monto=_decimal(pago_nodo.get("Monto")),
+                num_operacion=pago_nodo.get("NumOperacion"),
+                rfc_emisor_cta_ord=pago_nodo.get("RfcEmisorCtaOrd"),
+                rfc_emisor_cta_ben=pago_nodo.get("RfcEmisorCtaBen"),
+                cta_ordenante=pago_nodo.get("CtaOrdenante"),
+                cta_beneficiario=pago_nodo.get("CtaBeneficiario"),
+                doctos=doctos,
+            )
+        )
+
+    totales_nodo = nodo.get("Totales")
+    totales = None
+    if totales_nodo is not None:
+        totales = DatosPagoTotales(
+            total_traslados_base_iva16=_decimal(totales_nodo.get("TotalTrasladosBaseIVA16")),
+            total_traslados_impuesto_iva16=_decimal(totales_nodo.get("TotalTrasladosImpuestoIVA16")),
+            total_traslados_base_iva8=_decimal(totales_nodo.get("TotalTrasladosBaseIVA8")),
+            total_traslados_impuesto_iva8=_decimal(totales_nodo.get("TotalTrasladosImpuestoIVA8")),
+            total_traslados_base_iva0=_decimal(totales_nodo.get("TotalTrasladosBaseIVA0")),
+            total_traslados_impuesto_iva0=_decimal(totales_nodo.get("TotalTrasladosImpuestoIVA0")),
+            total_traslados_base_iva_exento=_decimal(totales_nodo.get("TotalTrasladosBaseIVAExento")),
+            total_retenciones_iva=_decimal(totales_nodo.get("TotalRetencionesIVA")),
+            total_retenciones_isr=_decimal(totales_nodo.get("TotalRetencionesISR")),
+            total_retenciones_ieps=_decimal(totales_nodo.get("TotalRetencionesIEPS")),
+            monto_total_pagos=_decimal(totales_nodo.get("MontoTotalPagos")),
+        )
+    return pagos, totales
 
 
 def _encabezado(c: Any) -> DatosEncabezado:
@@ -476,9 +596,13 @@ def normalizar(xml_bytes: bytes) -> DatosComprobante:
     c = CFDI.from_string(xml_bytes)
     complemento = c.get("Complemento") or {}
     nomina_nodo = complemento.get("Nomina")
+    pagos_nodo = complemento.get("Pagos")
+    pagos, pago_totales = _pagos(pagos_nodo) if pagos_nodo is not None else ([], None)
     return DatosComprobante(
         encabezado=_encabezado(c),
         conceptos=_conceptos(c),
         relacionados=_relacionados(c),
         nomina=_nomina(nomina_nodo) if nomina_nodo is not None else None,
+        pagos=pagos,
+        pago_totales=pago_totales,
     )

@@ -57,6 +57,59 @@ def cfdi_ingreso(
     ).encode()
 
 
+def cfdi_pago(
+    *,
+    uuid: str = "55555555-5555-5555-5555-555555555555",
+    fecha: str = "2026-07-22T14:11:39",
+    fecha_pago: str = "2026-07-22T12:00:00",
+    monto: str = "17393.40",
+    id_documento: str = "66666666-6666-6666-6666-666666666666",
+    imp_pagado: str = "17393.40",
+    doctos_extra: str = "",
+) -> bytes:
+    """CFDI 4.0 tipo P con complemento de Pagos 2.0: un pago que cubre un documento con
+    IVA al 8 % y el nodo `Totales`."""
+    docto = (
+        f'<pago20:DoctoRelacionado IdDocumento="{id_documento}" Serie="A" Folio="8602" '
+        f'MonedaDR="MXN" EquivalenciaDR="1" NumParcialidad="1" ImpSaldoAnt="{monto}" '
+        f'ImpPagado="{imp_pagado}" ImpSaldoInsoluto="0.00" ObjetoImpDR="02">'
+        "<pago20:ImpuestosDR><pago20:TrasladosDR>"
+        '<pago20:TrasladoDR BaseDR="16105.00" ImpuestoDR="002" TipoFactorDR="Tasa" '
+        'TasaOCuotaDR="0.080000" ImporteDR="1288.40" />'
+        "</pago20:TrasladosDR></pago20:ImpuestosDR>"
+        "</pago20:DoctoRelacionado>"
+    )
+    complemento_pagos = (
+        '<pago20:Pagos xmlns:pago20="http://www.sat.gob.mx/Pagos20" Version="2.0">'
+        '<pago20:Totales TotalTrasladosBaseIVA8="16105.00" TotalTrasladosImpuestoIVA8="1288.40" '
+        f'MontoTotalPagos="{monto}" />'
+        f'<pago20:Pago FechaPago="{fecha_pago}" FormaDePagoP="03" MonedaP="MXN" TipoCambioP="1" '
+        f'Monto="{monto}" NumOperacion="123456">{docto}{doctos_extra}</pago20:Pago>'
+        "</pago20:Pagos>"
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<cfdi:Comprobante xmlns:cfdi="http://www.sat.gob.mx/cfd/4" Version="4.0" '
+        f'Serie="P" Folio="8602" Fecha="{fecha}" Moneda="XXX" SubTotal="0" Total="0" '
+        'TipoDeComprobante="P" Exportacion="01" LugarExpedicion="31000" '
+        'NoCertificado="00001000000504465028" Certificado="Y2VydA==" Sello="c2VsbG8=">'
+        '<cfdi:Emisor Rfc="AKB120101AAA" Nombre="AKBAL CONSULTORES" RegimenFiscal="601" />'
+        '<cfdi:Receptor Rfc="CHL960913IX9" Nombre="CENTRO HUMANO DE LIDERAZGO" '
+        'DomicilioFiscalReceptor="31000" RegimenFiscalReceptor="601" UsoCFDI="CP01" />'
+        "<cfdi:Conceptos>"
+        '<cfdi:Concepto ClaveProdServ="84111506" Cantidad="1" ClaveUnidad="ACT" '
+        'Descripcion="Pago" ValorUnitario="0" Importe="0" ObjetoImp="01" />'
+        "</cfdi:Conceptos>"
+        "<cfdi:Complemento>"
+        f"{complemento_pagos}"
+        '<tfd:TimbreFiscalDigital xmlns:tfd="http://www.sat.gob.mx/TimbreFiscalDigital" '
+        f'Version="1.1" UUID="{uuid}" FechaTimbrado="{fecha}" RfcProvCertif="AAA010101AAA" '
+        'SelloCFD="c2VsbG8=" NoCertificadoSAT="00001000000504465028" SelloSAT="c2VsbG8=" />'
+        "</cfdi:Complemento>"
+        "</cfdi:Comprobante>"
+    ).encode()
+
+
 def relacionados(tipo_relacion: str, *uuids: str) -> str:
     """Bloque `CfdiRelacionados`. En 4.0 puede haber varios con distinto `TipoRelacion`."""
     hijos = "".join(f'<cfdi:CfdiRelacionado UUID="{u}" />' for u in uuids)
