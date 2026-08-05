@@ -3172,7 +3172,9 @@ git commit -m "fix(informes): aislar la normalización en un savepoint para que 
 **Files:**
 - Modify: `app/worker/tasks.py` (agregar al final)
 - Create: `app/api/v1/informes.py`
-- Modify: `app/main.py` (registrar el router)
+- Modify: `app/api/v1/router.py` (registrar el router — **no** `app/main.py`: `main.py` solo
+  incluye el agregador `app/api/v1/router.py`, que ya lleva `prefix="/v1"`; los routers
+  vecinos, `comprobantes` y `tareas`, se registran ahí, no en `main.py`)
 - Modify: `app/api/v1/schemas.py` (agregar `NormalizarIn`)
 - Test: `tests/test_normalizacion_tarea.py`
 
@@ -3455,27 +3457,37 @@ async def normalizar_endpoint(
 
 - [ ] **Step 7: Register the router**
 
-En `app/main.py`, junto a los otros `include_router` de `v1`:
+**Desviación respecto al brief original:** `app/main.py` no tiene `include_router` por
+módulo — solo incluye el agregador `app/api/v1/router.py` (que ya lleva `prefix="/v1"`).
+Los routers vecinos (`comprobantes`, `tareas`) se registran ahí, no en `main.py`. Se
+registró siguiendo ese mismo patrón, en `app/api/v1/router.py`:
 
 ```python
-from app.api.v1 import informes as informes_router
+from app.api.v1 import automatizaciones, auth_bootstrap, bitacora, comprobantes, config_smtp, descargas, efirma, empresas, eventos, informes, notificaciones, sesion, tareas, usuarios
 ...
-app.include_router(informes_router.router, prefix="/v1")
+router.include_router(comprobantes.router)
+router.include_router(informes.router)
+router.include_router(tareas.router)
 ```
 
-Verificar el prefijo exacto que usan los routers vecinos (`comprobantes`, `tareas`) y seguir el mismo patrón.
+El prefijo completo de los endpoints queda `/v1/empresas/{empresa_id}/informes/normalizar`,
+tal como esperan las pruebas.
 
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_normalizacion_tarea.py -q`
-Expected: PASS (4 tests)
+Expected: PASS (5 tests — se agregó una quinta prueba respecto al brief original:
+`test_fallo_a_mitad_de_flush_no_envenena_el_resto_del_lote`, que reproduce con un
+`DataError` real de MySQL —igual que en `tests/test_resguardo_normaliza.py` de la tarea
+8— la lección de que `rollback()` debe ir antes de `registrar_error()` para no heredar
+un estado "pending rollback".)
 
 - [ ] **Step 9: Type-check and commit**
 
 ```bash
 .venv/bin/mypy --strict app
 .venv/bin/pytest -q
-git add app/services/normalizacion_lote.py app/worker/tasks.py app/api/v1/informes.py app/api/v1/schemas.py app/main.py tests/test_normalizacion_tarea.py
+git add app/services/normalizacion_lote.py app/worker/tasks.py app/api/v1/informes.py app/api/v1/schemas.py app/api/v1/router.py tests/test_normalizacion_tarea.py
 git commit -m "feat(informes): agregar tarea y endpoint de reproceso del ETL"
 ```
 

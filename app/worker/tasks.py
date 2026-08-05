@@ -758,3 +758,32 @@ def enviar_notificacion(self, evento_id: int) -> dict[str, Any]:  # type: ignore
     if resultado["fallo_retryable"]:
         raise self.retry(countdown=60)
     return resultado
+
+
+# --------------------------------------------------------------------------- #
+# Normalización (ETL) — disparador 2 del spec §6.3: reproceso de los XML que ya
+# están en disco. Idempotente: se puede volver a lanzar cuantas veces se quiera.
+# --------------------------------------------------------------------------- #
+
+
+async def _normalizar_comprobantes_async(empresa_id: int, alcance: str, comprobante_ids: list[int] | None) -> dict[str, Any]:
+    from app.repositories import normalizacion as repo_normalizacion
+    from app.services import normalizacion_lote
+
+    async with SessionLocal() as db:
+        if comprobante_ids:
+            ids = comprobante_ids
+        elif alcance == "todos":
+            ids = await comprobantes_repo.ids_todos(db, empresa_id)
+        else:
+            ids = await repo_normalizacion.ids_pendientes(db, empresa_id)
+
+        resumen = await normalizacion_lote.normalizar_lote(db, empresa_id, ids)
+
+    logger.info("normalizar_comprobantes: empresa %s alcance %s → %s", empresa_id, alcance, resumen)
+    return {"solicitados": len(ids), **resumen}
+
+
+@celery_app.task(name="app.worker.tasks.normalizar_comprobantes")  # type: ignore[untyped-decorator]
+def normalizar_comprobantes(empresa_id: int, alcance: str = "pendientes", comprobante_ids: list[int] | None = None) -> dict[str, Any]:
+    return asyncio.run(_normalizar_comprobantes_async(empresa_id, alcance, comprobante_ids))

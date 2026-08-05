@@ -267,6 +267,13 @@ class ConfigSmtpProbarIn(ConfigSmtpIn):
     correo_destino: EmailStr
 
 
+class NormalizarIn(BaseModel):
+    """Alcance del reproceso del ETL. `pendientes` es lo normal; `todos` se usa tras subir
+    `ETL_VERSION`, cuando hay que releer el histórico completo."""
+
+    alcance: Literal["pendientes", "todos"] = "pendientes"
+
+
 class BitacoraOut(BaseModel):
     bitacora_id: int
     actor: str
