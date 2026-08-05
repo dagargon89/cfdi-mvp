@@ -2946,16 +2946,18 @@ import os
 import zipfile
 from datetime import date
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models.cfdi_detalle import ComprobanteDetalle
+from app.models.cfdi_detalle import CfdiConcepto, ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.enums import EstadoJob, OrigenJob, SolicitudTipo, TipoJob
 from app.models.job import Job
 from app.models.nomina import Nomina
 from app.services import resguardo
+from app.services.normalizacion import DatosComprobante
 from tests import factories, fixtures_cfdi
 
 
@@ -2999,7 +3001,7 @@ async def test_indexar_job_normaliza_la_nomina(db: AsyncSession) -> None:
     assert nomina.tipo_nomina == "O"
 
 
-async def test_xml_ilegible_para_el_etl_no_impide_indexar(db: AsyncSession, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+async def test_xml_ilegible_para_el_etl_no_impide_indexar(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
     """Si `normalizar` truena, el comprobante se indexa igual y el fallo queda registrado."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     job = await _job_con_paquete(db, empresa.empresa_id, {"ingreso.xml": fixtures_cfdi.cfdi_ingreso()})
@@ -3084,10 +3086,20 @@ una consulta redundante y no depende de que `(empresa_id, uuid)` siga siendo ún
     # Disparador 1 del ETL (spec §6.3): lo que entra por descarga queda normalizado en la
     # misma transacción. Un fallo aquí NO impide indexar — el índice es lo que la UI necesita;
     # la normalización es un extra que alimenta informes. Se registra el error y se sigue.
+    #
+    # `escribir` puede tronar a mitad de un `flush` (p. ej. `DataError` de MySQL porque un
+    # valor del XML no entra en una columna acotada — el XML del SAT es adversarial por
+    # definición). Sin aislamiento, eso deja la sesión en estado "pending rollback": el
+    # propio `registrar_error` de abajo heredaría ese estado envenenado y lanzaría
+    # `PendingRollbackError`, y cada XML restante del lote fallaría con el mismo lote
+    # envenenado. El SAVEPOINT de `begin_nested()` acota el daño: si algo dentro truena,
+    # solo se revierte lo que la normalización hubiera escrito a medias — el `INSERT` del
+    # `Comprobante` de arriba, hecho *antes* del savepoint, sobrevive, y la sesión queda
+    # utilizable para `registrar_error` y para el resto del lote.
     xml_hash = normalizacion.hash_xml(xml_bytes)
     try:
-        datos = normalizacion.normalizar(xml_bytes)
-        await repo_normalizacion.escribir(db, comprobante.comprobante_id, datos, xml_hash)
+        async with db.begin_nested():
+            await repo_normalizacion.escribir(db, comprobante.comprobante_id, normalizacion.normalizar(xml_bytes), xml_hash)
     except Exception as exc:  # noqa: BLE001 — se registra y se sigue, nunca se propaga
         logger.warning("indexar: no se pudo normalizar el comprobante %s: %s", comprobante.comprobante_id, exc)
         await repo_normalizacion.registrar_error(db, comprobante.comprobante_id, xml_hash, str(exc))
@@ -3107,6 +3119,50 @@ Expected: PASS. `tests/test_resguardo.py` (ya existente) debe seguir verde: el e
 .venv/bin/pytest -q
 git add app/services/resguardo.py tests/test_resguardo_normaliza.py
 git commit -m "feat(informes): normalizar los CFDI al resguardarlos en la descarga"
+```
+
+---
+
+**Ronda de corrección 1 (hueco Important, defecto del plan).** El `except Exception` de
+arriba atrapa bien el fallo de `normalizar` (puro, no toca la BD), pero no cubre el caso en
+que `escribir()` truene **a mitad de un `flush`** — p. ej. un `DataError` de MySQL porque
+un valor del XML excede una columna acotada (`String(2)`, `CHAR(3)`, `Numeric(9,6)`; el XML
+del SAT es adversarial por definición). Sin aislamiento: (1) la sesión queda en estado
+*pending rollback*; (2) `registrar_error`, sin protección, hace un `select` y lanza
+`PendingRollbackError`; (3) esa excepción nueva sale de `_indexar_xml`, y el `except` de
+`indexar_job` solo la loguea, sin `rollback()`; (4) la sesión sigue envenenada — cada XML
+restante del job falla en su primer `db.scalar`, y el `commit()` final también puede
+fallar. Resultado: un solo XML problemático tumba la indexación de **todo el lote**, justo
+lo contrario de la regla no negociable.
+
+La corrección (ya incorporada en el bloque de arriba): envolver `normalizar()` + `escribir`
+en un SAVEPOINT (`async with db.begin_nested(): ...`), **sin** incluir el `db.add(comprobante)`
+ni su `flush()` — esos deben quedar fuera del savepoint porque el índice tiene que sobrevivir
+sí o sí. Si algo dentro del `async with` truena, solo se revierte hasta el savepoint: se
+deshace lo que la normalización hubiera escrito a medias, pero el `INSERT` del `Comprobante`
+(anterior al savepoint) sobrevive y la sesión queda utilizable — `registrar_error` funciona
+sin problema, y los XML siguientes del lote también. Se verificó `AsyncSession.begin_nested()`
+en SQLAlchemy 2.0.51 (versión del proyecto): existe y se comporta como gestor de contexto
+async normal (`ROLLBACK TO SAVEPOINT` + relanza la excepción original si el bloque truena).
+
+Prueba nueva agregada a `tests/test_resguardo_normaliza.py`:
+`test_fallo_de_escribir_a_mitad_de_flush_no_envenena_el_resto_del_lote`. Un `ValueError`
+puro (como en `test_xml_ilegible_para_el_etl_no_impide_indexar`) no basta porque nunca toca
+la BD y no ejercita el envenenamiento de la sesión. Esta prueba monkeypatchea
+`repo_normalizacion.escribir` para que, en su primera llamada, dispare un `DataError` real
+de MySQL (inserta `moneda="DEMASIADO_LARGO"` contra `comprobante_detalle.moneda`, que es
+`CHAR(3)`) y en la segunda llamada delegue al `escribir` real. Con un paquete de dos XML: el
+primero dispara el fallo, el segundo debe normalizarse bien. Se verificó manualmente que
+esta prueba **falla** si se quita el `async with db.begin_nested():` (queda solo el
+`await repo_normalizacion.escribir(...)` directo) — el segundo XML nunca llega a indexarse
+porque el primer `db.scalar` de idempotencia del segundo XML ya encuentra la sesión con
+`PendingRollbackError`.
+
+```bash
+.venv/bin/pytest tests/test_resguardo_normaliza.py tests/test_resguardo.py -q
+.venv/bin/mypy --strict app
+git add app/services/resguardo.py tests/test_resguardo_normaliza.py
+git commit -m "fix(informes): aislar la normalización en un savepoint para que un XML problemático no tumbe el lote"
 ```
 
 ---

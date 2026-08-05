@@ -113,10 +113,20 @@ async def _indexar_xml(db: AsyncSession, job: Job, empresa: Empresa, xml_bytes: 
     # Disparador 1 del ETL (spec §6.3): lo que entra por descarga queda normalizado en la
     # misma transacción. Un fallo aquí NO impide indexar — el índice es lo que la UI necesita;
     # la normalización es un extra que alimenta informes. Se registra el error y se sigue.
+    #
+    # `escribir` puede tronar a mitad de un `flush` (p. ej. `DataError` de MySQL porque un
+    # valor del XML no entra en una columna acotada — el XML del SAT es adversarial por
+    # definición). Sin aislamiento, eso deja la sesión en estado "pending rollback": el
+    # propio `registrar_error` de abajo heredaría ese estado envenenado y lanzaría
+    # `PendingRollbackError`, y cada XML restante del lote fallaría con el mismo lote
+    # envenenado. El SAVEPOINT de `begin_nested()` acota el daño: si algo dentro truena,
+    # solo se revierte lo que la normalización hubiera escrito a medias — el `INSERT` del
+    # `Comprobante` de arriba, hecho *antes* del savepoint, sobrevive, y la sesión queda
+    # utilizable para `registrar_error` y para el resto del lote.
     xml_hash = normalizacion.hash_xml(xml_bytes)
     try:
-        datos = normalizacion.normalizar(xml_bytes)
-        await repo_normalizacion.escribir(db, comprobante.comprobante_id, datos, xml_hash)
+        async with db.begin_nested():
+            await repo_normalizacion.escribir(db, comprobante.comprobante_id, normalizacion.normalizar(xml_bytes), xml_hash)
     except Exception as exc:  # noqa: BLE001 — se registra y se sigue, nunca se propaga
         logger.warning("indexar: no se pudo normalizar el comprobante %s: %s", comprobante.comprobante_id, exc)
         await repo_normalizacion.registrar_error(db, comprobante.comprobante_id, xml_hash, str(exc))
