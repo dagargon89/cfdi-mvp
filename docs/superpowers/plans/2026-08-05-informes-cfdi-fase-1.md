@@ -4097,7 +4097,7 @@ git commit -m "feat(informes): centralizar el enmascaramiento de datos personale
   dato en claro.
 - Produces:
   - `CLAVE = "B-02"`, `NOMBRE`, `GRUPO = "B"`, `DESCRIPCION`
-  - `class Parametros(BaseModel)`: `fecha_desde: date`, `fecha_hasta: date`, `tipo_nomina: Literal["O", "E", "AMBOS"] = "AMBOS"`, `incluir_cancelados: bool = False`, `desglosar_gravado_exento: bool = False`, `enmascarar_datos_personales: bool = True`
+  - `class Parametros(BaseModel)`: `fecha_desde: date`, `fecha_hasta: date`, `tipo_nomina: Literal["O", "E", "AMBOS"] = "AMBOS"`, `incluir_cancelados: bool = False`, `enmascarar_datos_personales: bool = True` (`desglosar_gravado_exento` se quitó en la ronda de corrección 1: existía en `Parametros` sin que `consultar()` lo leyera nunca, y como el catálogo expone los parámetros al frontend, hubiera mostrado una casilla sin ningún efecto)
   - `async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme`
   - `def etiqueta(naturaleza: str, tipo: str, clave: str | None, concepto: str | None) -> str`
 
@@ -4408,6 +4408,109 @@ async def test_sin_comprobantes_devuelve_aviso(db: AsyncSession) -> None:
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 1, 1), fecha_hasta=date(2026, 1, 31)))
     assert resultado.filas == []
     assert resultado.aviso is not None
+
+
+async def test_concepto_repetido_con_descripciones_distintas_se_suma(db: AsyncSession) -> None:
+    """B-02.R1, la mitad de la regla que `test_concepto_repetido_se_suma` no ejercita.
+
+    Cuando los dos nodos repetidos tienen la MISMA descripción, `GROUP BY` de SQL ya los
+    agrupa en una sola fila y el `SUM` de la base de datos hace toda la suma: el `+=` de
+    Python en `_conceptos_por_comprobante` nunca se ejecuta más de una vez por fila. Aquí
+    las dos apariciones del mismo (tipo, clave) tienen descripciones DISTINTAS en el MISMO
+    comprobante, así que SQL las agrupa en dos filas separadas (agrupa también por
+    `concepto`) y es el acumulador de Python el que las suma. Si alguien cambiara
+    `importes[...] += importe` por `= importe`, esta prueba fallaría aunque las otras 10
+    sigan verdes."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        percepciones=[
+            ("019", "019", "Horas extra", "300.00", "0.00"),
+            ("019", "019", "Horas extra (ajuste)", "450.00", "0.00"),
+        ],
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    sep = b02.SEPARADOR_ETIQUETA
+    dinamicas_percepcion = [c.titulo for c in resultado.columnas if c.titulo.startswith(f"P{sep}019{sep}019")]
+    assert len(dinamicas_percepcion) == 1  # mismo (tipo, clave): una sola columna, no dos
+    indice = _columna(resultado, dinamicas_percepcion[0])
+    assert resultado.filas[0][indice] == Decimal("750.00")
+
+
+async def test_desempate_de_concepto_canonico_es_deterministico(db: AsyncSession) -> None:
+    """B-02.R5: con dos descripciones empatadas en frecuencia para el mismo concepto, el
+    desempate debe ser estable entre corridas —alfabético—, no depender del orden de filas
+    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones)."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    for indice, concepto in enumerate(("Sueldo", "Sueldos", "Sueldo", "Sueldos")):
+        await _nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=f"dddddddd-dddd-dddd-dddd-ddddddddddd{indice}",
+            rfc_receptor=f"XAXX0101010{indice:02d}",
+            percepciones=[("001", "001", concepto, "8000.00", "0.00")],
+            deducciones=[],
+        )
+
+    p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
+    primera = await b02.consultar(db, empresa.empresa_id, p)
+    segunda = await b02.consultar(db, empresa.empresa_id, p)
+
+    sep = b02.SEPARADOR_ETIQUETA
+    titulo_esperado = f"P{sep}001{sep}001{sep}Sueldo"  # empate 2-2: "Sueldo" < "Sueldos" alfabéticamente
+    assert [c.titulo for c in primera.columnas if sep in c.titulo] == [titulo_esperado]
+    assert [c.titulo for c in segunda.columnas if sep in c.titulo] == [titulo_esperado]
+
+
+async def test_bandera_clave_vacia(db: AsyncSession) -> None:
+    """Un concepto sin clave del patrón no se puede identificar de forma estable entre
+    periodos: se marca con `CLAVE_VACIA` en vez de descartarse en silencio."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        percepciones=[("999", "", "Concepto sin clave", "100.00", "0.00")],
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "CLAVE_VACIA" for b in resultado.banderas)
+
+
+async def test_bandera_deduccion_mayor_percepcion(db: AsyncSession) -> None:
+    """Las deducciones no pueden exceder lo que hay para deducir (percepciones + otros
+    pagos): si lo hacen, el neto no cuadra y algo está mal capturado."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        percepciones=[("001", "001", "Sueldo", "100.00", "0.00")],
+        deducciones=[("002", "045", "I.S.R. mes", "500.00")],
+        otros_pagos=[],
+        total_percepciones="100.00",
+        total_deducciones="500.00",
+        total_otros_pagos="0.00",
+        total="-400.00",
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "DEDUCCION_MAYOR_PERCEPCION" for b in resultado.banderas)
+
+
+async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:
+    """Dos nóminas ordinarias del mismo empleado con rangos que se intersectan: casi
+    siempre un timbrado doble."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    rfc_receptor = "XAXX010101099"
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-2222-3333-4444-555555555555", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 30))
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-7777-8888-9999-000000000000", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 20))
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "PERIODO_TRASLAPADO" for b in resultado.banderas)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -4438,6 +4541,12 @@ Las cuatro trampas que este módulo evita a propósito:
 3. **Identidad por `(tipo, clave)`, nunca por descripción** (R-T9). El `@Concepto` es texto
    libre del patrón y varía entre periodos por errores de captura.
 4. **Cero, no vacío** (R-T7).
+
+**Nota de alcance:** el desglose por gravado/exento dentro de cada percepción (columnas
+`(G)` y `(E)` separadas para el mismo concepto) está en la ficha B-02 del documento fuente,
+pero se aplaza: duplicaría el conjunto de columnas dinámicas y alteraría su orden (B-02.R5),
+y es trabajo suficiente para ameritar su propia tarea. Por ahora la celda de cada percepción
+reporta `importe_gravado + importe_exento` ya sumados (ver `_conceptos_por_comprobante`).
 """
 
 from __future__ import annotations
@@ -4487,7 +4596,6 @@ class Parametros(BaseModel):
     fecha_hasta: date = Field(description="Fin del rango, inclusivo.")
     tipo_nomina: Literal["O", "E", "AMBOS"] = Field("AMBOS", description="Ordinaria, extraordinaria o ambas.")
     incluir_cancelados: bool = Field(False, description="Por defecto solo vigentes (R-T1).")
-    desglosar_gravado_exento: bool = Field(False, description="Emite dos columnas por percepción: (G) y (E).")
     enmascarar_datos_personales: bool = Field(
         True,
         description=(
@@ -4668,6 +4776,33 @@ def _banderas_del_comprobante(
     return banderas
 
 
+def _agregados_de_una_pasada(
+    importes: dict[tuple[int, tuple[str, str, str]], Decimal],
+) -> tuple[dict[int, dict[str, Decimal]], Counter[tuple[str, str, str]], dict[tuple[str, str, str], Decimal]]:
+    """Recorre `importes` una sola vez para producir los tres agregados que antes se
+    recalculaban recorriendo `importes` completo por cada fila y por cada concepto —
+    una búsqueda cuadrática en el número de comprobantes × conceptos que en una empresa
+    de cientos de empleados con un ejercicio completo puede volver el informe impráctico
+    en Python puro. No cambia ningún resultado, solo el costo.
+
+    Devuelve:
+    - suma por comprobante y naturaleza (P/O/D), para las identidades de
+      `_banderas_del_comprobante`.
+    - conteo de comprobantes por concepto, para `EntradaDiccionario.num_comprobantes`.
+    - importe total por concepto, para `EntradaDiccionario.importe_total`.
+    """
+    suma_por_comprobante: dict[int, dict[str, Decimal]] = {}
+    conteo_por_concepto: Counter[tuple[str, str, str]] = Counter()
+    total_por_concepto: dict[tuple[str, str, str], Decimal] = defaultdict(lambda: _CERO)
+    for (comprobante_id, concepto_id), importe in importes.items():
+        naturaleza = concepto_id[0]
+        fila = suma_por_comprobante.setdefault(comprobante_id, {"P": _CERO, "O": _CERO, "D": _CERO})
+        fila[naturaleza] += importe
+        conteo_por_concepto[concepto_id] += 1
+        total_por_concepto[concepto_id] += importe
+    return suma_por_comprobante, conteo_por_concepto, total_por_concepto
+
+
 def _banderas_de_periodos_traslapados(filas_crudas: list[tuple[Comprobante, Nomina]]) -> list[Bandera]:
     """`PERIODO_TRASLAPADO`: dos nóminas ordinarias del mismo empleado con rangos que se
     intersectan. Casi siempre es un timbrado doble."""
@@ -4705,6 +4840,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     ids = [fila[0].comprobante_id for fila in filas_universo]
     importes, descripciones = await _conceptos_por_comprobante(db, ids)
+    suma_por_comprobante, conteo_por_concepto, total_por_concepto = _agregados_de_una_pasada(importes)
 
     # Fase 2 y 3: conjunto de columnas dinámicas, con orden determinista (B-02.R5).
     conceptos = sorted(
@@ -4718,7 +4854,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     for concepto in conceptos:
         naturaleza, tipo, clave = concepto
         frecuencias = descripciones.get(concepto, Counter())
-        canonico = frecuencias.most_common(1)[0][0] if frecuencias else None
+        # Desempate explícito y estable: mayor frecuencia primero, y a igualdad la
+        # descripción alfabéticamente menor. `Counter.most_common()` desempata por orden
+        # de inserción, que depende del orden de filas de un `GROUP BY` sin `ORDER BY` —
+        # no garantizado entre corridas (R5). Con dos descripciones empatadas (p. ej.
+        # "Sueldo" y "Sueldos" 50/50 en el periodo) el título podía cambiar de una
+        # ejecución a otra sin este desempate.
+        canonico = min(frecuencias.items(), key=lambda kv: (-kv[1], kv[0]))[0] if frecuencias else None
         alternas = sorted(d for d in frecuencias if d != canonico)
         etiquetas[concepto] = etiqueta(naturaleza, tipo, clave, canonico)
 
@@ -4741,7 +4883,6 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 )
             )
 
-        comprobantes_con_concepto = sum(1 for (_, c) in importes if c == concepto)
         diccionario.append(
             EntradaDiccionario(
                 etiqueta=etiquetas[concepto],
@@ -4751,8 +4892,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 clave_patron=clave or None,
                 concepto_canonico=canonico,
                 descripciones_alternas=alternas,
-                num_comprobantes=comprobantes_con_concepto,
-                importe_total=sum((v for (_, c), v in importes.items() if c == concepto), _CERO),
+                num_comprobantes=conteo_por_concepto[concepto],
+                importe_total=total_por_concepto[concepto],
             )
         )
 
@@ -4763,10 +4904,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     filas: list[list[Any]] = []
     for comprobante, nomina, receptor, totales in filas_universo:
         cid = comprobante.comprobante_id
-        suma = {
-            naturaleza: sum((v for (c_id, (nat, _, _)), v in importes.items() if c_id == cid and nat == naturaleza), _CERO)
-            for naturaleza in ("P", "O", "D")
-        }
+        suma = suma_por_comprobante.get(cid, {"P": _CERO, "O": _CERO, "D": _CERO})
         banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
 
         # CURP y NSS salen en claro: `Columna(sensible=True)` ya lo declaró arriba, y es
@@ -4834,7 +4972,7 @@ _MODULOS: tuple[Any, ...] = (b02_conceptos_patron,)
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_informe_b02.py -q`
-Expected: PASS (11 tests)
+Expected: PASS (16 pruebas: las 11 originales más las 5 de la ronda de corrección 1)
 
 Si `test_orden_de_columnas_es_determinista` falla, revisar que `_ORDEN_NATURALEZA` ponga
 `O` antes de `D` y que el `sorted` compare `tipo` y `clave` **como texto**.
@@ -4848,8 +4986,47 @@ defecto la seguía recibiendo de todos modos. Esto rompía
 columna `D¦002¦045¦I.S.R. mes` que la prueba no esperaba. Se corrigió el helper a
 `if percepciones is None: ...` / `if deducciones is None: ...` (que sí distingue "no me
 importa" de "quiero una lista vacía") y se agregó `deducciones=[]` explícito en esa prueba.
-El módulo `b02_conceptos_patron.py` no cambió: la lógica de agrupación, suma y bandera
-`CONCEPTO_INCONSISTENTE` ya era correcta; el defecto estaba solo en el fixture de prueba.
+El módulo `b02_conceptos_patron.py` no cambió en esta desviación: la lógica de agrupación,
+suma y bandera `CONCEPTO_INCONSISTENTE` ya era correcta; el defecto estaba solo en el
+fixture de prueba.
+
+**Ronda de corrección 1 (revisión post-implementación):** cinco hallazgos, dos de ellos
+sobre huecos de cobertura y tres sobre el módulo mismo.
+
+1. `test_concepto_repetido_se_suma` pasaba por el `SUM` de SQL, no por el acumulador de
+   Python (`importes[...] += importe`): al agrupar por `(comprobante_id, tipo, clave,
+   concepto)`, dos nodos con la MISMA descripción ya llegan sumados en una sola fila desde
+   la base de datos. El acumulador de Python solo entra cuando el mismo `(tipo, clave)`
+   aparece con descripciones DISTINTAS en el mismo comprobante. Se agregó
+   `test_concepto_repetido_con_descripciones_distintas_se_suma`, que sí ejercita esa ruta.
+2. `frecuencias.most_common(1)[0][0]` desempataba por orden de inserción del `Counter`,
+   que depende del orden de filas de un `GROUP BY` sin `ORDER BY` — no garantizado entre
+   corridas de MySQL. Con dos descripciones empatadas en frecuencia (p. ej. "Sueldo" y
+   "Sueldos" 50/50), el título de columna podía cambiar entre ejecuciones idénticas,
+   violando R5. Se cambió el desempate a
+   `min(frecuencias.items(), key=lambda kv: (-kv[1], kv[0]))[0]` (mayor frecuencia
+   primero, empate por orden alfabético) y se agregó
+   `test_desempate_de_concepto_canonico_es_deterministico`.
+3. `CLAVE_VACIA`, `DEDUCCION_MAYOR_PERCEPCION` y `PERIODO_TRASLAPADO` estaban
+   implementadas sin ninguna prueba que las ejerciera. Se agregó una prueba por cada una:
+   `test_bandera_clave_vacia`, `test_bandera_deduccion_mayor_percepcion`,
+   `test_bandera_periodo_traslapado`.
+4. El cierre de `consultar()` recorría `importes.items()` completo una vez por fila (para
+   `suma`) y una vez por concepto (para `num_comprobantes` e `importe_total`) — cuadrático
+   en comprobantes × conceptos, impráctico para una empresa de cientos de empleados con un
+   ejercicio completo. Se agregó `_agregados_de_una_pasada`, que recorre `importes` una
+   sola vez y construye los tres agregados juntos. No cambia ningún resultado, solo el
+   costo.
+5. `desglosar_gravado_exento` existía en `Parametros` sin que `consultar()` lo leyera
+   nunca; como el catálogo expone los parámetros al frontend, hubiera mostrado una casilla
+   sin ningún efecto. Se quitó de `Parametros` y se documentó como nota de alcance en el
+   docstring del módulo (el desglose por gravado/exento duplicaría el conjunto de columnas
+   dinámicas y su orden — trabajo para otra tarea).
+
+Un hallazgo *minor* de la revisión se dejó sin tocar a propósito: las columnas de totales
+fijos (`Total sueldos`, `Total gravado`, etc.) entregan `None` cuando falta `NominaTotales`,
+no `Decimal("0")`. Es literal del brief original y no viola R-T7, que rige las columnas
+*dinámicas* de conceptos, no los totales fijos del complemento.
 
 **Nota de alcance:** la ficha B-02 del documento fuente lista también la bandera
 `PERIODO_FALTANTE` ("hueco en la secuencia de periodos esperada según `periodicidad_pago`"),

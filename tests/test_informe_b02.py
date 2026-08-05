@@ -301,3 +301,106 @@ async def test_sin_comprobantes_devuelve_aviso(db: AsyncSession) -> None:
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 1, 1), fecha_hasta=date(2026, 1, 31)))
     assert resultado.filas == []
     assert resultado.aviso is not None
+
+
+async def test_concepto_repetido_con_descripciones_distintas_se_suma(db: AsyncSession) -> None:
+    """B-02.R1, la mitad de la regla que `test_concepto_repetido_se_suma` no ejercita.
+
+    Cuando los dos nodos repetidos tienen la MISMA descripción, `GROUP BY` de SQL ya los
+    agrupa en una sola fila y el `SUM` de la base de datos hace toda la suma: el `+=` de
+    Python en `_conceptos_por_comprobante` nunca se ejecuta más de una vez por fila. Aquí
+    las dos apariciones del mismo (tipo, clave) tienen descripciones DISTINTAS en el MISMO
+    comprobante, así que SQL las agrupa en dos filas separadas (agrupa también por
+    `concepto`) y es el acumulador de Python el que las suma. Si alguien cambiara
+    `importes[...] += importe` por `= importe`, esta prueba fallaría aunque las otras 10
+    sigan verdes."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="cccccccc-cccc-cccc-cccc-cccccccccccc",
+        percepciones=[
+            ("019", "019", "Horas extra", "300.00", "0.00"),
+            ("019", "019", "Horas extra (ajuste)", "450.00", "0.00"),
+        ],
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    sep = b02.SEPARADOR_ETIQUETA
+    dinamicas_percepcion = [c.titulo for c in resultado.columnas if c.titulo.startswith(f"P{sep}019{sep}019")]
+    assert len(dinamicas_percepcion) == 1  # mismo (tipo, clave): una sola columna, no dos
+    indice = _columna(resultado, dinamicas_percepcion[0])
+    assert resultado.filas[0][indice] == Decimal("750.00")
+
+
+async def test_desempate_de_concepto_canonico_es_deterministico(db: AsyncSession) -> None:
+    """B-02.R5: con dos descripciones empatadas en frecuencia para el mismo concepto, el
+    desempate debe ser estable entre corridas —alfabético—, no depender del orden de filas
+    de un `GROUP BY` sin `ORDER BY` (no garantizado por MySQL entre ejecuciones)."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    for indice, concepto in enumerate(("Sueldo", "Sueldos", "Sueldo", "Sueldos")):
+        await _nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=f"dddddddd-dddd-dddd-dddd-ddddddddddd{indice}",
+            rfc_receptor=f"XAXX0101010{indice:02d}",
+            percepciones=[("001", "001", concepto, "8000.00", "0.00")],
+            deducciones=[],
+        )
+
+    p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
+    primera = await b02.consultar(db, empresa.empresa_id, p)
+    segunda = await b02.consultar(db, empresa.empresa_id, p)
+
+    sep = b02.SEPARADOR_ETIQUETA
+    titulo_esperado = f"P{sep}001{sep}001{sep}Sueldo"  # empate 2-2: "Sueldo" < "Sueldos" alfabéticamente
+    assert [c.titulo for c in primera.columnas if sep in c.titulo] == [titulo_esperado]
+    assert [c.titulo for c in segunda.columnas if sep in c.titulo] == [titulo_esperado]
+
+
+async def test_bandera_clave_vacia(db: AsyncSession) -> None:
+    """Un concepto sin clave del patrón no se puede identificar de forma estable entre
+    periodos: se marca con `CLAVE_VACIA` en vez de descartarse en silencio."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        percepciones=[("999", "", "Concepto sin clave", "100.00", "0.00")],
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "CLAVE_VACIA" for b in resultado.banderas)
+
+
+async def test_bandera_deduccion_mayor_percepcion(db: AsyncSession) -> None:
+    """Las deducciones no pueden exceder lo que hay para deducir (percepciones + otros
+    pagos): si lo hacen, el neto no cuadra y algo está mal capturado."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        percepciones=[("001", "001", "Sueldo", "100.00", "0.00")],
+        deducciones=[("002", "045", "I.S.R. mes", "500.00")],
+        otros_pagos=[],
+        total_percepciones="100.00",
+        total_deducciones="500.00",
+        total_otros_pagos="0.00",
+        total="-400.00",
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "DEDUCCION_MAYOR_PERCEPCION" for b in resultado.banderas)
+
+
+async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:
+    """Dos nóminas ordinarias del mismo empleado con rangos que se intersectan: casi
+    siempre un timbrado doble."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    rfc_receptor = "XAXX010101099"
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-2222-3333-4444-555555555555", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 30))
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-7777-8888-9999-000000000000", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 20))
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert any(b.clave == "PERIODO_TRASLAPADO" for b in resultado.banderas)

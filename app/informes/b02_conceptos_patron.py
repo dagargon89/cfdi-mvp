@@ -17,6 +17,12 @@ Las cuatro trampas que este módulo evita a propósito:
 3. **Identidad por `(tipo, clave)`, nunca por descripción** (R-T9). El `@Concepto` es texto
    libre del patrón y varía entre periodos por errores de captura.
 4. **Cero, no vacío** (R-T7).
+
+**Nota de alcance:** el desglose por gravado/exento dentro de cada percepción (columnas
+`(G)` y `(E)` separadas para el mismo concepto) está en la ficha B-02 del documento fuente,
+pero se aplaza: duplicaría el conjunto de columnas dinámicas y alteraría su orden (B-02.R5),
+y es trabajo suficiente para ameritar su propia tarea. Por ahora la celda de cada percepción
+reporta `importe_gravado + importe_exento` ya sumados (ver `_conceptos_por_comprobante`).
 """
 
 from __future__ import annotations
@@ -66,7 +72,6 @@ class Parametros(BaseModel):
     fecha_hasta: date = Field(description="Fin del rango, inclusivo.")
     tipo_nomina: Literal["O", "E", "AMBOS"] = Field("AMBOS", description="Ordinaria, extraordinaria o ambas.")
     incluir_cancelados: bool = Field(False, description="Por defecto solo vigentes (R-T1).")
-    desglosar_gravado_exento: bool = Field(False, description="Emite dos columnas por percepción: (G) y (E).")
     enmascarar_datos_personales: bool = Field(
         True,
         description=(
@@ -247,6 +252,33 @@ def _banderas_del_comprobante(
     return banderas
 
 
+def _agregados_de_una_pasada(
+    importes: dict[tuple[int, tuple[str, str, str]], Decimal],
+) -> tuple[dict[int, dict[str, Decimal]], Counter[tuple[str, str, str]], dict[tuple[str, str, str], Decimal]]:
+    """Recorre `importes` una sola vez para producir los tres agregados que antes se
+    recalculaban recorriendo `importes` completo por cada fila y por cada concepto —
+    una búsqueda cuadrática en el número de comprobantes × conceptos que en una empresa
+    de cientos de empleados con un ejercicio completo puede volver el informe impráctico
+    en Python puro. No cambia ningún resultado, solo el costo.
+
+    Devuelve:
+    - suma por comprobante y naturaleza (P/O/D), para las identidades de
+      `_banderas_del_comprobante`.
+    - conteo de comprobantes por concepto, para `EntradaDiccionario.num_comprobantes`.
+    - importe total por concepto, para `EntradaDiccionario.importe_total`.
+    """
+    suma_por_comprobante: dict[int, dict[str, Decimal]] = {}
+    conteo_por_concepto: Counter[tuple[str, str, str]] = Counter()
+    total_por_concepto: dict[tuple[str, str, str], Decimal] = defaultdict(lambda: _CERO)
+    for (comprobante_id, concepto_id), importe in importes.items():
+        naturaleza = concepto_id[0]
+        fila = suma_por_comprobante.setdefault(comprobante_id, {"P": _CERO, "O": _CERO, "D": _CERO})
+        fila[naturaleza] += importe
+        conteo_por_concepto[concepto_id] += 1
+        total_por_concepto[concepto_id] += importe
+    return suma_por_comprobante, conteo_por_concepto, total_por_concepto
+
+
 def _banderas_de_periodos_traslapados(filas_crudas: list[tuple[Comprobante, Nomina]]) -> list[Bandera]:
     """`PERIODO_TRASLAPADO`: dos nóminas ordinarias del mismo empleado con rangos que se
     intersectan. Casi siempre es un timbrado doble."""
@@ -284,6 +316,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     ids = [fila[0].comprobante_id for fila in filas_universo]
     importes, descripciones = await _conceptos_por_comprobante(db, ids)
+    suma_por_comprobante, conteo_por_concepto, total_por_concepto = _agregados_de_una_pasada(importes)
 
     # Fase 2 y 3: conjunto de columnas dinámicas, con orden determinista (B-02.R5).
     conceptos = sorted(
@@ -297,7 +330,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     for concepto in conceptos:
         naturaleza, tipo, clave = concepto
         frecuencias = descripciones.get(concepto, Counter())
-        canonico = frecuencias.most_common(1)[0][0] if frecuencias else None
+        # Desempate explícito y estable: mayor frecuencia primero, y a igualdad la
+        # descripción alfabéticamente menor. `Counter.most_common()` desempata por orden
+        # de inserción, que depende del orden de filas de un `GROUP BY` sin `ORDER BY` —
+        # no garantizado entre corridas (R5). Con dos descripciones empatadas (p. ej.
+        # "Sueldo" y "Sueldos" 50/50 en el periodo) el título podía cambiar de una
+        # ejecución a otra sin este desempate.
+        canonico = min(frecuencias.items(), key=lambda kv: (-kv[1], kv[0]))[0] if frecuencias else None
         alternas = sorted(d for d in frecuencias if d != canonico)
         etiquetas[concepto] = etiqueta(naturaleza, tipo, clave, canonico)
 
@@ -320,7 +359,6 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 )
             )
 
-        comprobantes_con_concepto = sum(1 for (_, c) in importes if c == concepto)
         diccionario.append(
             EntradaDiccionario(
                 etiqueta=etiquetas[concepto],
@@ -330,8 +368,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 clave_patron=clave or None,
                 concepto_canonico=canonico,
                 descripciones_alternas=alternas,
-                num_comprobantes=comprobantes_con_concepto,
-                importe_total=sum((v for (_, c), v in importes.items() if c == concepto), _CERO),
+                num_comprobantes=conteo_por_concepto[concepto],
+                importe_total=total_por_concepto[concepto],
             )
         )
 
@@ -342,10 +380,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     filas: list[list[Any]] = []
     for comprobante, nomina, receptor, totales in filas_universo:
         cid = comprobante.comprobante_id
-        suma = {
-            naturaleza: sum((v for (c_id, (nat, _, _)), v in importes.items() if c_id == cid and nat == naturaleza), _CERO)
-            for naturaleza in ("P", "O", "D")
-        }
+        suma = suma_por_comprobante.get(cid, {"P": _CERO, "O": _CERO, "D": _CERO})
         banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
 
         # CURP y NSS salen en claro: `Columna(sensible=True)` ya lo declaró arriba, y es
