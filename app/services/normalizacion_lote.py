@@ -24,6 +24,16 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
 
     `omitidos` son los que ya estaban al día (mismo hash, misma `ETL_VERSION`). Commitea
     por comprobante: un lote largo que se interrumpa deja avanzado lo que ya procesó.
+
+    **Contrato para quien reusa `db` después de llamar esta función (pre-vuelo de la
+    tarea 13: normalizar y luego, con la misma sesión, consultar el informe):** al
+    retornar, `db` **no tiene una transacción abierta**. Si el lote entero cae en las
+    ramas de "omitido" o "id de otra empresa" (el caso normal de reprocesar una empresa
+    que ya está al día), el único `SELECT` de arriba habría dejado abierta la
+    transacción implícita de lectura sin este cierre explícito — y quien siga usando
+    `db` heredaría el snapshot de `REPEATABLE READ` de antes de normalizar, sin ver lo
+    que él mismo acaba de escribir. Por eso se cierra siempre al final, aunque no haya
+    nada pendiente que guardar (cada comprobante ya commiteó lo suyo por su cuenta).
     """
     storage_root = get_settings().storage_root
     resumen = {"normalizados": 0, "con_error": 0, "omitidos": 0}
@@ -58,4 +68,5 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
             await db.commit()
             resumen["con_error"] += 1
 
+    await db.rollback()  # cierra la transacción de lectura que deja abierta el `select` de arriba
     return resumen

@@ -3333,6 +3333,16 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
 
     `omitidos` son los que ya estaban al día (mismo hash, misma `ETL_VERSION`). Commitea
     por comprobante: un lote largo que se interrumpa deja avanzado lo que ya procesó.
+
+    **Contrato para quien reusa `db` después de llamar esta función (pre-vuelo de la
+    tarea 13: normalizar y luego, con la misma sesión, consultar el informe):** al
+    retornar, `db` **no tiene una transacción abierta**. Si el lote entero cae en las
+    ramas de "omitido" o "id de otra empresa" (el caso normal de reprocesar una empresa
+    que ya está al día), el único `SELECT` de arriba habría dejado abierta la
+    transacción implícita de lectura sin este cierre explícito — y quien siga usando
+    `db` heredaría el snapshot de `REPEATABLE READ` de antes de normalizar, sin ver lo
+    que él mismo acaba de escribir. Por eso se cierra siempre al final, aunque no haya
+    nada pendiente que guardar (cada comprobante ya commiteó lo suyo por su cuenta).
     """
     storage_root = get_settings().storage_root
     resumen = {"normalizados": 0, "con_error": 0, "omitidos": 0}
@@ -3367,8 +3377,16 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
             await db.commit()
             resumen["con_error"] += 1
 
+    await db.rollback()  # cierra la transacción de lectura que deja abierta el `select` de arriba
     return resumen
 ```
+
+**Ronda de corrección 1 (code review):** el bloque original no cerraba la transacción de
+lectura cuando *todos* los comprobantes caían en las ramas de "omitido" o "id de otra
+empresa" (sin `commit`/`rollback` propio) — el caso normal del pre-vuelo de la tarea 13,
+que reutilizará esta función y luego consultará el informe **con la misma sesión**. Se
+agregó `await db.rollback()` justo antes de `return resumen` y se documentó el contrato
+en el docstring. Ver `tests/test_normalizacion_tarea.py::test_lote_totalmente_omitido_no_deja_transaccion_abierta`.
 
 - [ ] **Step 4: Write the Celery task**
 
@@ -3476,11 +3494,13 @@ tal como esperan las pruebas.
 - [ ] **Step 8: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_normalizacion_tarea.py -q`
-Expected: PASS (5 tests — se agregó una quinta prueba respecto al brief original:
+Expected: PASS (6 tests — dos se agregaron respecto al brief original de 4:
 `test_fallo_a_mitad_de_flush_no_envenena_el_resto_del_lote`, que reproduce con un
 `DataError` real de MySQL —igual que en `tests/test_resguardo_normaliza.py` de la tarea
 8— la lección de que `rollback()` debe ir antes de `registrar_error()` para no heredar
-un estado "pending rollback".)
+un estado "pending rollback"; y `test_lote_totalmente_omitido_no_deja_transaccion_abierta`
+(ronda de corrección 1), que fija que `normalizar_lote` no deja una transacción de
+lectura abierta cuando todo el lote se omite.)
 
 - [ ] **Step 9: Type-check and commit**
 

@@ -43,6 +43,24 @@ async def test_normaliza_lote_y_es_idempotente(db: AsyncSession) -> None:
     assert await db.scalar(select(func.count()).select_from(NominaPercepcion).where(NominaPercepcion.comprobante_id == cid)) == 2
 
 
+async def test_lote_totalmente_omitido_no_deja_transaccion_abierta(db: AsyncSession) -> None:
+    """Ronda de corrección: si TODOS los comprobantes del lote caen en la rama de
+    "omitido" (el caso normal del pre-vuelo de la tarea 13, que reusará este servicio
+    justo antes de consultar el informe con la misma sesión), el único `SELECT` que abre
+    `normalizar_lote` no debe dejar una transacción de lectura abierta al retornar — si
+    la dejara, quien siga usando `db` heredaría un snapshot de `REPEATABLE READ` de antes
+    de normalizar y no vería lo que él mismo acaba de escribir."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    cid = await _comprobante_con_xml(db, empresa.empresa_id, "dddddddd-dddd-dddd-dddd-dddddddddddd", fixtures_cfdi.cfdi_ingreso(uuid="dddddddd-dddd-dddd-dddd-dddddddddddd"), "I")
+
+    # Primera corrida: normaliza. Segunda corrida: todo el lote se omite (mismo hash/ETL_VERSION).
+    await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    resumen = await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    assert resumen == {"normalizados": 0, "con_error": 0, "omitidos": 1}
+
+    assert db.in_transaction() is False
+
+
 async def test_xml_ausente_en_disco_cuenta_como_error_no_como_excepcion(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     comprobante = await factories.crear_comprobante(
