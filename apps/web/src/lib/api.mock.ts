@@ -487,13 +487,21 @@ export const apiMock: ApiClient = {
   },
 
   async generarInforme(empresaId, clave, parametros) {
-    const u = requireRol(empresaId, 'operador');
+    // Espejo de app/api/v1/informes.py:generar_endpoint — CONSULTA basta para generar en general;
+    // el 403 y la bitácora solo aparecen si se pide sin enmascarar (spec §8).
+    const u = requireRol(empresaId, 'consulta');
     const informe = CATALOGO_INFORMES.find((i) => i.clave === clave);
     if (!informe) throw new ApiError(404, 'NO_ENCONTRADO', 'El informe no existe en el catálogo.');
+    const sinEnmascarar = parametros.enmascarar_datos_personales === false;
+    if (sinEnmascarar) {
+      if (rolEn(u, empresaId) === 'consulta') {
+        throw new ApiError(403, 'ERROR', 'Generar el informe sin enmascarar datos personales requiere rol de operador o superior.');
+      }
+      logBitacora(u.correo, 'generar_informe', `empresa:${empresaId}`, { clave, enmascarar_datos_personales: false, parametros });
+    }
     const tarea_id = crypto.randomUUID();
     tareas.set(tarea_id, { estado: 'pendiente' });
     setTimeout(() => tareas.set(tarea_id, { estado: 'completada', descarga_url: `/mock-descargas/informe_${clave}_empresa${empresaId}.xlsx` }), 1400);
-    logBitacora(u.correo, 'generar_informe', `empresa:${empresaId}`, { clave, parametros });
     return { tarea_id };
   },
 
