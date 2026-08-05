@@ -2427,12 +2427,37 @@ async def test_error_previo_se_limpia_al_reprocesar_bien(db: AsyncSession) -> No
 async def test_ids_pendientes_filtra_por_tipo(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     nomina = await factories.crear_comprobante(
-        db, empresa_id=empresa.empresa_id, uuid="66666666-6666-6666-6666-666666666666", tipo_comprobante="N"
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="66666666-6666-6666-6666-666666666666",
+        tipo_comprobante="N",
+        xml_path="11/comprobantes/nomina.xml",
     )
-    await factories.crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="77777777-7777-7777-7777-777777777777", tipo_comprobante="I")
+    await factories.crear_comprobante(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="77777777-7777-7777-7777-777777777777",
+        tipo_comprobante="I",
+        xml_path="11/comprobantes/ingreso.xml",
+    )
 
     pendientes = await repo.ids_pendientes(db, empresa.empresa_id, solo_tipo="N")
     assert pendientes == [nomina.comprobante_id]
+
+
+async def test_comprobante_sin_xml_no_es_pendiente(db: AsyncSession) -> None:
+    """`ids_pendientes` promete comprobantes que se pueden normalizar. Uno sin XML en
+    disco no puede normalizarse, así que no es pendiente: es otra cosa. Sin esta prueba,
+    alguien podría quitar el filtro `xml_path.is_not(None)` en el futuro y nada lo
+    impediría — la tarea 9 le crearía una fila de error con un hash de relleno en cada
+    corrida, generando ruido permanente en `comprobante_detalle`."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    sin_xml = await factories.crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="88888888-8888-8888-8888-888888888888", tipo_comprobante="I"
+    )
+    assert sin_xml.xml_path is None
+
+    assert await repo.ids_pendientes(db, empresa.empresa_id) == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
