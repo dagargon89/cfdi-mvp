@@ -36,7 +36,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.informes import catalogos
 from app.informes.base import Bandera, Columna, EntradaDiccionario, ResultadoInforme, SEPARADOR_ETIQUETA
+from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
@@ -134,10 +136,11 @@ _COLUMNAS_TOTALES: tuple[tuple[str, str, bool], ...] = (
 def _universo(empresa_id: int, p: Parametros) -> Select[Any]:
     """Fase 1 del algoritmo: qué comprobantes entran."""
     consulta = (
-        select(Comprobante, Nomina, NominaReceptor, NominaTotales)
+        select(Comprobante, Nomina, NominaReceptor, NominaTotales, ComprobanteDetalle)
         .join(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
         .outerjoin(NominaReceptor, NominaReceptor.comprobante_id == Comprobante.comprobante_id)
         .outerjoin(NominaTotales, NominaTotales.comprobante_id == Comprobante.comprobante_id)
+        .outerjoin(ComprobanteDetalle, ComprobanteDetalle.comprobante_id == Comprobante.comprobante_id)
         .where(
             Comprobante.empresa_id == empresa_id,
             Comprobante.tipo_comprobante == "N",
@@ -364,7 +367,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 etiqueta=etiquetas[concepto],
                 naturaleza=naturaleza,
                 tipo=tipo,
-                descripcion_sat=None,  # se resuelve en la tarea 12 con el catálogo de satcfdi
+                descripcion_sat=catalogos.descripcion(naturaleza, tipo),
                 clave_patron=clave or None,
                 concepto_canonico=canonico,
                 descripciones_alternas=alternas,
@@ -378,7 +381,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     columnas += [Columna(titulo=titulo, tipo=tipo, sensible=sensible) for titulo, tipo, sensible in _COLUMNAS_TOTALES]  # type: ignore[arg-type]
 
     filas: list[list[Any]] = []
-    for comprobante, nomina, receptor, totales in filas_universo:
+    for comprobante, nomina, receptor, totales, detalle in filas_universo:
         cid = comprobante.comprobante_id
         suma = suma_por_comprobante.get(cid, {"P": _CERO, "O": _CERO, "D": _CERO})
         banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
@@ -393,7 +396,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             nomina.fecha_pago.year if nomina.fecha_pago else None,
             nomina.fecha_pago.month if nomina.fecha_pago else None,
             comprobante.uuid,
-            None,  # Serie: vive en comprobante_detalle; se llena en la tarea 12
+            detalle.serie if detalle else None,
             comprobante.folio,
             comprobante.estatus.value,
             nomina.tipo_nomina,

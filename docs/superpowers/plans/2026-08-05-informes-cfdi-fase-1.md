@@ -5154,6 +5154,21 @@ print(tipo.code, '|', tipo.description)
 
 Ese `type(...).__mro__` dice de qué clase concreta construir las descripciones.
 
+**Resultado real del descubrimiento (tarea 12, corrida contra `satcfdi>=26,<27`):**
+`dir(satcfdi.catalogs)` no expone ningún nombre con "ercepcion", "educcion" ni "troPago" —
+no hay enumeraciones `TipoPercepcion`/`TipoDeduccion`/`TipoOtroPago` consultables por clave
+como asumía este plan. Lo que expone `satcfdi.catalogs` es una función,
+`catalog_code(tabla, clave) -> Code(code, description)`, que consulta un sqlite embebido en
+el propio paquete (`satcfdi/catalogs/catalogs.db`). Es la misma función que usa el parser de
+`satcfdi` para resolver estos catálogos al leer un XML de nómina
+(`satcfdi/transform/objectify.py`, p. ej.
+`catalog_code('C75b_c_TipoPercepcion', node.attrib['TipoPercepcion'])`), de donde salieron
+los tres nombres de tabla usados abajo. Con una clave ausente del catálogo, `catalog_code`
+no lanza: devuelve `Code(clave, None)` — el requisito de "clave desconocida → `None`, no
+excepción" ya lo resuelve la propia librería, sin necesitar `try`/`except` alrededor del
+despacho por naturaleza (se dejó un `try`/`except Exception` defensivo solo por si el sqlite
+embebido fallara al leerse, no porque una clave inexistente lo dispare).
+
 - [ ] **Step 3: Write the catalog module**
 
 ```python
@@ -5164,37 +5179,45 @@ No se cargan tablas de catálogo: `satcfdi` ya las trae. Este módulo solo resue
 `tipo → descripción` y devuelve `None` cuando la clave no está en el catálogo de la versión
 instalada — el SAT agrega claves, y un catálogo desactualizado no debe abortar un informe.
 
-Ajustar los nombres dentro de `_catalogos()` a los que exponga realmente `satcfdi` (ver el
-paso 2 de esta tarea).
+`satcfdi.catalogs` no expone `TipoPercepcion`/`TipoDeduccion`/`TipoOtroPago`: expone
+`catalog_code(tabla, clave) -> Code(code, description)`, que consulta un sqlite embebido y
+devuelve `Code(clave, None)` para una clave inexistente en vez de lanzar (ver el paso 2 de
+esta tarea). Los nombres de tabla se tomaron de `satcfdi/transform/objectify.py`, que es
+quien los usa para parsear el complemento de Nómina.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable, cast
+
+# Naturaleza (P/D/O) → tabla del catálogo embebido de `satcfdi` (ver docstring del módulo).
+_TABLAS = {
+    "P": "C75b_c_TipoPercepcion",
+    "D": "C75b_c_TipoDeduccion",
+    "O": "C75b_c_TipoOtroPago",
+}
 
 
 @lru_cache(maxsize=1)
-def _catalogos() -> dict[str, Any]:
+def _catalog_code() -> Callable[[str, str], Any]:
     """Carga perezosa: importar `satcfdi.catalogs` es costoso y no todo informe lo necesita."""
-    from satcfdi import catalogs
+    from satcfdi.catalogs import catalog_code
 
-    return {
-        "P": getattr(catalogs, "TipoPercepcion", None),
-        "D": getattr(catalogs, "TipoDeduccion", None),
-        "O": getattr(catalogs, "TipoOtroPago", None),
-    }
+    return cast("Callable[[str, str], Any]", catalog_code)
 
 
 def _buscar(naturaleza: str, tipo: str) -> str | None:
-    catalogo = _catalogos().get(naturaleza)
-    if catalogo is None:
+    tabla = _TABLAS.get(naturaleza)
+    if tabla is None:
         return None
     try:
-        entrada = catalogo(tipo)
-    except (ValueError, KeyError):
+        codigo = _catalog_code()(tabla, tipo)
+    except Exception:
+        # El catálogo del SAT es un archivo externo a la librería; ante cualquier fallo de
+        # lectura, el informe no debe abortar por una clave que no se pudo resolver.
         return None
-    descripcion = getattr(entrada, "description", None)
+    descripcion = codigo.description
     return str(descripcion) if descripcion else None
 
 
@@ -5212,7 +5235,7 @@ def descripcion_otro_pago(tipo: str) -> str | None:
 
 def descripcion(naturaleza: str, tipo: str) -> str | None:
     """Despacho por naturaleza (`P`, `D`, `O`). Cualquier otra devuelve `None`."""
-    if naturaleza not in {"P", "D", "O"}:
+    if naturaleza not in _TABLAS:
         return None
     return _buscar(naturaleza, tipo)
 ```
@@ -5220,7 +5243,9 @@ def descripcion(naturaleza: str, tipo: str) -> str | None:
 - [ ] **Step 4: Run the catalog test**
 
 Run: `.venv/bin/pytest tests/test_informes_catalogos.py -q`
-Expected: PASS (3 tests). Si falla porque `satcfdi.catalogs` tiene otros nombres, corregir `_catalogos()` con lo que devolvió el paso 2 — **no** relajar las aserciones del test.
+Expected: PASS (3 tests). Confirmado: la API real (`catalog_code` sobre sqlite embebido,
+sin `TipoPercepcion`/`TipoDeduccion`/`TipoOtroPago` en `satcfdi.catalogs`) pasa las tres
+pruebas del brief sin relajar ninguna aserción.
 
 - [ ] **Step 5: Fill the two gaps in B-02**
 

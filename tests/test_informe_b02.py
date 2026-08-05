@@ -402,6 +402,27 @@ async def test_bandera_deduccion_mayor_percepcion(db: AsyncSession) -> None:
     assert any(b.clave == "DEDUCCION_MAYOR_PERCEPCION" for b in resultado.banderas)
 
 
+async def test_diccionario_trae_la_descripcion_del_catalogo_sat(db: AsyncSession) -> None:
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="cccccccc-cccc-cccc-cccc-cccccccccccc")
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    entrada = next(e for e in resultado.diccionario if e.naturaleza == "P" and e.tipo == "001")
+    assert entrada.descripcion_sat == "Sueldos, Salarios Rayas y Jornales"
+
+
+async def test_serie_sale_del_detalle_del_comprobante(db: AsyncSession) -> None:
+    from app.models.cfdi_detalle import ComprobanteDetalle
+
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    cid = await _nomina(db, empresa_id=empresa.empresa_id, uuid="dddddddd-dddd-dddd-dddd-dddddddddddd")
+    db.add(ComprobanteDetalle(comprobante_id=cid, version="4.0", serie="N", xml_hash="e" * 64, etl_version=1))
+    await db.commit()
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    assert resultado.filas[0][_columna(resultado, "Serie")] == "N"
+
+
 async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:
     """Dos nóminas ordinarias del mismo empleado con rangos que se intersectan: casi
     siempre un timbrado doble."""
