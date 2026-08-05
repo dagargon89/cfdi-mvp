@@ -20,7 +20,9 @@ from app.models.comprobante import Comprobante
 from app.models.empresa import Empresa
 from app.models.enums import EstatusCfdi
 from app.models.job import Job
+from app.repositories import normalizacion as repo_normalizacion
 from app.sat_hub.sat_facade import CamposCFDI, parse_cfdi
+from app.services import normalizacion
 
 logger = logging.getLogger("app.worker")
 
@@ -91,23 +93,34 @@ async def _indexar_xml(db: AsyncSession, job: Job, empresa: Empresa, xml_bytes: 
         f.write(xml_bytes)
     ruta_relativa = os.path.relpath(ruta_absoluta, storage_root)
 
-    db.add(
-        Comprobante(
-            empresa_id=empresa.empresa_id,
-            job_id=job.job_id,
-            uuid=campos.uuid,
-            folio=campos.folio,
-            rfc_emisor=campos.rfc_emisor,
-            rfc_receptor=campos.rfc_receptor,
-            razon_social_emisor=campos.razon_social_emisor,
-            total=campos.total,
-            fecha_emision=campos.fecha_emision,
-            tipo_comprobante=campos.tipo_comprobante,
-            estatus=EstatusCfdi.NO_VERIFICADO,  # RF-RES-03: registro estructurado siempre
-            xml_path=ruta_relativa,  # relativa a storage_root — nunca la ruta absoluta del disco
-        )
+    comprobante = Comprobante(
+        empresa_id=empresa.empresa_id,
+        job_id=job.job_id,
+        uuid=campos.uuid,
+        folio=campos.folio,
+        rfc_emisor=campos.rfc_emisor,
+        rfc_receptor=campos.rfc_receptor,
+        razon_social_emisor=campos.razon_social_emisor,
+        total=campos.total,
+        fecha_emision=campos.fecha_emision,
+        tipo_comprobante=campos.tipo_comprobante,
+        estatus=EstatusCfdi.NO_VERIFICADO,  # RF-RES-03: registro estructurado siempre
+        xml_path=ruta_relativa,  # relativa a storage_root — nunca la ruta absoluta del disco
     )
-    await db.flush()
+    db.add(comprobante)
+    await db.flush()  # asigna `comprobante.comprobante_id` (autoincrement) — se necesita abajo
+
+    # Disparador 1 del ETL (spec §6.3): lo que entra por descarga queda normalizado en la
+    # misma transacción. Un fallo aquí NO impide indexar — el índice es lo que la UI necesita;
+    # la normalización es un extra que alimenta informes. Se registra el error y se sigue.
+    xml_hash = normalizacion.hash_xml(xml_bytes)
+    try:
+        datos = normalizacion.normalizar(xml_bytes)
+        await repo_normalizacion.escribir(db, comprobante.comprobante_id, datos, xml_hash)
+    except Exception as exc:  # noqa: BLE001 — se registra y se sigue, nunca se propaga
+        logger.warning("indexar: no se pudo normalizar el comprobante %s: %s", comprobante.comprobante_id, exc)
+        await repo_normalizacion.registrar_error(db, comprobante.comprobante_id, xml_hash, str(exc))
+
     return True
 
 

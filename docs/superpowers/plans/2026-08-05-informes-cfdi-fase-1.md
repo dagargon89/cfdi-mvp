@@ -2944,6 +2944,7 @@ from __future__ import annotations
 
 import os
 import zipfile
+from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -2964,15 +2965,16 @@ async def _job_con_paquete(db: AsyncSession, empresa_id: int, xmls: dict[str, by
         tipo=TipoJob.EMITIDO,
         solicitud=SolicitudTipo.CFDI,
         origen=OrigenJob.MANUAL,
-        desde="2026-06-01",
-        hasta="2026-07-31",
+        fecha_inicial=date(2026, 6, 1),
+        fecha_final=date(2026, 7, 31),
         estado=EstadoJob.DESCARGADO,
     )
     db.add(job)
     await db.flush()
     await db.commit()
 
-    carpeta = os.path.join(get_settings().storage_root, str(empresa_id), "paquetes", str(job.job_id))
+    # Misma convención de ruta que `resguardo._ruta_paquetes`: sin subcarpeta "paquetes".
+    carpeta = os.path.join(get_settings().storage_root, str(empresa_id), str(job.job_id))
     os.makedirs(carpeta, exist_ok=True)
     with zipfile.ZipFile(os.path.join(carpeta, "paquete_01.zip"), "w") as zf:
         for nombre, contenido in xmls.items():
@@ -3035,27 +3037,60 @@ from app.services import normalizacion
 Y al final de `_indexar_xml`, reemplazar:
 
 ```python
+    db.add(
+        Comprobante(
+            empresa_id=empresa.empresa_id,
+            job_id=job.job_id,
+            uuid=campos.uuid,
+            folio=campos.folio,
+            rfc_emisor=campos.rfc_emisor,
+            rfc_receptor=campos.rfc_receptor,
+            razon_social_emisor=campos.razon_social_emisor,
+            total=campos.total,
+            fecha_emision=campos.fecha_emision,
+            tipo_comprobante=campos.tipo_comprobante,
+            estatus=EstatusCfdi.NO_VERIFICADO,  # RF-RES-03: registro estructurado siempre
+            xml_path=ruta_relativa,  # relativa a storage_root — nunca la ruta absoluta del disco
+        )
+    )
     await db.flush()
     return True
 ```
 
-por:
+por (nota: en vez del `select` propuesto originalmente para recuperar el `comprobante_id`
+recién insertado, se conserva la instancia de `Comprobante` y se lee su clave primaria
+después del `flush()` — es lo que SQLAlchemy ya deja disponible vía autoincrement; evita
+una consulta redundante y no depende de que `(empresa_id, uuid)` siga siendo único para
+"encontrar de vuelta" la fila que ya se tiene en la mano):
 
 ```python
-    await db.flush()
-
-    # Disparador 1 del ETL (spec §6.3): lo que entra por descarga queda normalizado.
-    # Un fallo aquí NO impide indexar — el índice es lo que la UI necesita.
-    nuevo = await db.scalar(
-        select(Comprobante.comprobante_id).where(Comprobante.empresa_id == empresa.empresa_id, Comprobante.uuid == campos.uuid)
+    comprobante = Comprobante(
+        empresa_id=empresa.empresa_id,
+        job_id=job.job_id,
+        uuid=campos.uuid,
+        folio=campos.folio,
+        rfc_emisor=campos.rfc_emisor,
+        rfc_receptor=campos.rfc_receptor,
+        razon_social_emisor=campos.razon_social_emisor,
+        total=campos.total,
+        fecha_emision=campos.fecha_emision,
+        tipo_comprobante=campos.tipo_comprobante,
+        estatus=EstatusCfdi.NO_VERIFICADO,  # RF-RES-03: registro estructurado siempre
+        xml_path=ruta_relativa,  # relativa a storage_root — nunca la ruta absoluta del disco
     )
-    if nuevo is not None:
-        xml_hash = normalizacion.hash_xml(xml_bytes)
-        try:
-            await repo_normalizacion.escribir(db, nuevo, normalizacion.normalizar(xml_bytes), xml_hash)
-        except Exception as exc:  # noqa: BLE001 — se registra y se sigue
-            logger.warning("indexar: no se pudo normalizar el comprobante %s: %s", nuevo, exc)
-            await repo_normalizacion.registrar_error(db, nuevo, xml_hash, str(exc))
+    db.add(comprobante)
+    await db.flush()  # asigna `comprobante.comprobante_id` (autoincrement) — se necesita abajo
+
+    # Disparador 1 del ETL (spec §6.3): lo que entra por descarga queda normalizado en la
+    # misma transacción. Un fallo aquí NO impide indexar — el índice es lo que la UI necesita;
+    # la normalización es un extra que alimenta informes. Se registra el error y se sigue.
+    xml_hash = normalizacion.hash_xml(xml_bytes)
+    try:
+        datos = normalizacion.normalizar(xml_bytes)
+        await repo_normalizacion.escribir(db, comprobante.comprobante_id, datos, xml_hash)
+    except Exception as exc:  # noqa: BLE001 — se registra y se sigue, nunca se propaga
+        logger.warning("indexar: no se pudo normalizar el comprobante %s: %s", comprobante.comprobante_id, exc)
+        await repo_normalizacion.registrar_error(db, comprobante.comprobante_id, xml_hash, str(exc))
 
     return True
 ```
