@@ -787,3 +787,58 @@ async def _normalizar_comprobantes_async(empresa_id: int, alcance: str, comproba
 @celery_app.task(name="app.worker.tasks.normalizar_comprobantes")  # type: ignore[untyped-decorator]
 def normalizar_comprobantes(empresa_id: int, alcance: str = "pendientes", comprobante_ids: list[int] | None = None) -> dict[str, Any]:
     return asyncio.run(_normalizar_comprobantes_async(empresa_id, alcance, comprobante_ids))
+
+
+# --------------------------------------------------------------------------- #
+# Generación de informes (spec §7). El pre-vuelo normaliza lo pendiente del rango
+# antes de consultar: así un informe nunca sale vacío porque el ETL no corrió
+# (disparador 3 del spec §6.3).
+# --------------------------------------------------------------------------- #
+
+
+async def _generar_informe_async(empresa_id: int, clave: str, parametros: dict[str, Any], actor: str) -> dict[str, Any]:
+    from app.informes import excel, registro
+    from app.informes.base import ContextoInforme
+    from app.repositories import normalizacion as repo_normalizacion
+    from app.services import normalizacion, normalizacion_lote
+
+    definicion = registro.obtener(clave)
+    p = definicion.Parametros(**parametros)
+
+    async with SessionLocal() as db:
+        # Pre-vuelo: normaliza lo que falte. No se acota por fecha porque los informes
+        # del grupo B filtran por `nomina.fecha_pago`, que solo se conoce DESPUÉS de
+        # normalizar; acotar por `fecha_emision` dejaría fuera nóminas legítimas.
+        pendientes = await repo_normalizacion.ids_pendientes(db, empresa_id)
+        if pendientes:
+            resumen = await normalizacion_lote.normalizar_lote(db, empresa_id, pendientes)
+            logger.info("generar_informe: pre-vuelo del ETL para empresa %s → %s", empresa_id, resumen)
+
+        resultado = await definicion.consultar(db, empresa_id, p)
+
+    ctx = ContextoInforme(
+        clave=definicion.CLAVE,
+        nombre=definicion.NOMBRE,
+        usuario=actor,
+        generado_en=datetime.now(),
+        parametros=parametros,
+        etl_version=normalizacion.ETL_VERSION,
+    )
+    contenido = excel.escribir_libro(resultado, ctx)
+
+    carpeta = os.path.join(get_settings().storage_root, str(empresa_id), "informes")
+    os.makedirs(carpeta, exist_ok=True)
+    nombre = f"{clave}_{uuid.uuid4().hex[:12]}.xlsx"
+    with open(os.path.join(carpeta, nombre), "wb") as f:
+        f.write(contenido)
+
+    return {
+        "ruta": os.path.join(str(empresa_id), "informes", nombre),
+        "filas": len(resultado.filas),
+        "banderas": len(resultado.banderas),
+    }
+
+
+@celery_app.task(name="app.worker.tasks.generar_informe")  # type: ignore[untyped-decorator]
+def generar_informe(empresa_id: int, clave: str, parametros: dict[str, Any], actor: str) -> dict[str, Any]:
+    return asyncio.run(_generar_informe_async(empresa_id, clave, parametros, actor))

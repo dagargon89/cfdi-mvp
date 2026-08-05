@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, EmailStr, Field
 
@@ -265,6 +265,17 @@ class ConfigSmtpIn(BaseModel):
 
 class ConfigSmtpProbarIn(ConfigSmtpIn):
     correo_destino: EmailStr
+
+
+class InformeCatalogoOut(BaseModel):
+    """Entrada del catálogo de informes. `parametros` es el JSON Schema de la clase
+    `Parametros` del informe: el frontend genera su formulario desde ahí (spec §7.2)."""
+
+    clave: str
+    nombre: str
+    grupo: str
+    descripcion: str
+    parametros: dict[str, Any]
 
 
 class NormalizarIn(BaseModel):

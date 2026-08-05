@@ -5334,6 +5334,10 @@ git commit -m "feat(informes): resolver descripciones del catalogo SAT y serie e
 - Modify: `app/api/v1/informes.py`
 - Modify: `app/worker/tasks.py`
 - Modify: `app/api/v1/schemas.py`
+- Modify: `app/api/v1/router.py` (registrar `router_catalogo` — **no** `app/main.py`: `main.py`
+  solo incluye el agregador `app/api/v1/router.py`, que ya lleva `prefix="/v1"`; los routers
+  vecinos, `comprobantes` y `tareas`, se registran ahí, no en `main.py` — mismo defecto ya
+  corregido en la tarea 9)
 - Test: `tests/test_informes_api.py`
 
 **Interfaces:**
@@ -5355,15 +5359,28 @@ from __future__ import annotations
 import io
 import os
 
+import pytest
 from openpyxl import load_workbook
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.models.enums import RolEmpresa, RolGlobal
+from app.worker import tasks as worker_tasks
 from tests import factories, fixtures_cfdi
 
 
-async def test_catalogo_expone_b02_con_su_json_schema(client) -> None:  # type: ignore[no-untyped-def]
+@pytest.fixture(autouse=True)
+def _sesion_de_prueba_en_worker(engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`worker_tasks.SessionLocal` apunta a `DATABASE_URL` (placeholder en pruebas): la
+    tarea de generación de informes se ejerce aquí llamando su lógica async directo (sin
+    `asyncio.run`/Celery), así que basta apuntarlo al mismo engine que usa el fixture `db`
+    (testcontainer real) — mismo patrón que `test_worker_comprobantes.py`."""
+    monkeypatch.setattr(worker_tasks, "SessionLocal", async_sessionmaker(engine, expire_on_commit=False))
+
+
+async def test_catalogo_expone_b02_con_su_json_schema(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    await factories.crear_usuario(db, uid="op", correo="op@test.mx", rol_global=RolGlobal.OPERADOR)
+
     r = await client.get("/v1/informes", headers={"Authorization": "Bearer op"})
     assert r.status_code == 200, r.text
     claves = {i["clave"]: i for i in r.json()}
@@ -5690,12 +5707,21 @@ async def generar_endpoint(
 
 - [ ] **Step 6: Register both routers**
 
-En `app/main.py`, junto al router de informes de la tarea 9:
+**Desviación respecto al brief original:** `app/main.py` no tiene `include_router` por
+módulo — solo incluye el agregador `app/api/v1/router.py` (que ya lleva `prefix="/v1"`).
+Los routers vecinos (`comprobantes`, `tareas`, y el propio `informes.router` de la tarea 9)
+se registran ahí, no en `main.py`. Se registra siguiendo ese mismo patrón, en
+`app/api/v1/router.py`:
 
 ```python
-app.include_router(informes_router.router_catalogo, prefix="/v1")
-app.include_router(informes_router.router, prefix="/v1")
+router.include_router(comprobantes.router)
+router.include_router(informes.router_catalogo)
+router.include_router(informes.router)
+router.include_router(tareas.router)
 ```
+
+`router_catalogo` no lleva prefijo propio (`APIRouter(tags=["informes"])`), así que hereda
+el `prefix="/v1"` del agregador y expone `GET /v1/informes` directo.
 
 - [ ] **Step 7: Run tests to verify they pass**
 
@@ -5706,10 +5732,29 @@ Expected: PASS (6 tests)
 
 ```bash
 .venv/bin/mypy --strict app
-.venv/bin/pytest -q
-git add app/api/v1/informes.py app/api/v1/schemas.py app/worker/tasks.py app/main.py tests/test_informes_api.py
+.venv/bin/pytest tests/test_informes_api.py -q  # la suite completa la corre el controlador
+git add app/api/v1/informes.py app/api/v1/schemas.py app/worker/tasks.py app/api/v1/router.py tests/test_informes_api.py
 git commit -m "feat(informes): agregar endpoints de catalogo y generacion con pre-vuelo del ETL"
 ```
+
+**Nota sobre la comprobación de rol (ya correcta en este bloque, verificada de nuevo contra
+`app/api/deps.py:40` al implementar):** el paso 5 usa `ctx.rol == RolEmpresa.CONSULTA` y
+**nunca** `ctx.rol != RolEmpresa.OPERADOR`. `ContextoEmpresa.rol` es `RolEmpresa | RolGlobal`;
+a un administrador global se le asigna `RolGlobal.ADMIN`, no un `RolEmpresa.OPERADOR`, así que
+la segunda forma bloquearía a un administrador de una acción que sí le corresponde.
+
+**Dos defectos del plan corregidos al implementar (además del de `main.py` de arriba):**
+1. `test_catalogo_expone_b02_con_su_json_schema` mandaba `Authorization: Bearer op` sin crear
+   nunca ese usuario en la BD. `GET /v1/informes` cuelga de `usuario_actual`, que exige un
+   `Usuario` local registrado (no basta un uid arbitrario) — la prueba daba 403
+   (`NO_REGISTRADO`), no 200. Se agregó `factories.crear_usuario(db, uid="op", ...)` al inicio
+   de la prueba (con el fixture `db` como parámetro, que faltaba).
+2. `test_tarea_genera_libro_y_normaliza_lo_pendiente` llama `_generar_informe_async`, que abre
+   su propia sesión vía `worker_tasks.SessionLocal` — apuntada por defecto a `DATABASE_URL`
+   (el placeholder de pruebas), no al MySQL efímero del testcontainer. Sin apuntarla al mismo
+   `engine` que usa el fixture `db`, la prueba intenta conectarse a `localhost:3306` y falla con
+   `OperationalError`. Se agregó el fixture `autouse` `_sesion_de_prueba_en_worker`, mismo
+   patrón que `tests/test_worker_comprobantes.py`.
 
 ---
 
