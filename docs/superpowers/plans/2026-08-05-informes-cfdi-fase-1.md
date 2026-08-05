@@ -3546,6 +3546,7 @@ Las aserciones se hacen sobre valores de celda, nunca sobre bytes del archivo (s
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -3655,6 +3656,38 @@ def test_enmascarar_conserva_los_ultimos_cuatro() -> None:
     assert excel.enmascarar("12345678901") == "****8901"
     assert excel.enmascarar(None) is None
     assert excel.enmascarar("123") == "****"  # demasiado corto para conservar 4
+
+
+def test_columna_sensible_se_enmascara_solo_si_el_parametro_esta_activo() -> None:
+    """El motor, no el informe, decide si enmascara (ronda de corrección 1): un informe solo
+    marca `sensible=True` y entrega el dato en claro."""
+    resultado = ResultadoInforme(
+        columnas=[
+            Columna(titulo="CURP", tipo="texto", sensible=True),
+            Columna(titulo="Nombre", tipo="texto"),
+        ],
+        filas=[["XXXX800101HCHXXX01", "Juan Pérez"]],
+    )
+    ctx_enmascarado = replace(_contexto(), parametros={"enmascarar_datos_personales": True})
+    ctx_en_claro = replace(_contexto(), parametros={"enmascarar_datos_personales": False})
+
+    wb_enmascarado = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx_enmascarado)))
+    fila = [c.value for c in wb_enmascarado["Datos"][2]]
+    assert fila[0] == "****XX01"
+    assert fila[1] == "Juan Pérez"  # la columna no sensible nunca se toca
+
+    wb_en_claro = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx_en_claro)))
+    fila = [c.value for c in wb_en_claro["Datos"][2]]
+    assert fila[0] == "XXXX800101HCHXXX01"
+    assert fila[1] == "Juan Pérez"
+
+
+def test_columna_decimal_no_se_redondea_a_dos_decimales() -> None:
+    """Solo `monto` se redondea a 2 decimales (R-T4); `decimal` conserva su precisión."""
+    resultado = ResultadoInforme(columnas=[Columna(titulo="Tasa", tipo="decimal")], filas=[[Decimal("12.345678")]])
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
+    valor = wb["Datos"][2][0].value
+    assert round(float(valor), 6) == 12.345678
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3699,8 +3732,14 @@ Severidad = Literal["alta", "media", "baja"]
 
 @dataclass(slots=True)
 class Columna:
+    """`sensible=True` marca una columna con datos personales (CURP, NSS, cuenta bancaria,
+    etc.). Un informe solo declara la marca; el motor (`app.informes.excel`) es quien decide
+    si la enmascara, según `ContextoInforme.parametros["enmascarar_datos_personales"]` —
+    así ningún informe puede "olvidar" enmascarar una columna sensible."""
+
     titulo: str
     tipo: TipoColumna = "texto"
+    sensible: bool = False
 
 
 @dataclass(slots=True)
@@ -3776,12 +3815,18 @@ Cuatro hojas siempre: `Datos`, `Parámetros`, `Banderas`, `Diccionario`. `openpy
 
 `ROUND_HALF_UP` explícito: el redondeo por defecto de Python es `ROUND_HALF_EVEN`, que
 para importes fiscales es incorrecto (⌊x⌉₂ del documento fuente es medio arriba).
+
+**El enmascaramiento de datos personales es responsabilidad de este módulo, no de cada
+informe.** Un informe solo marca `Columna(..., sensible=True)` y entrega el valor en claro;
+`escribir_libro` aplica `enmascarar()` a esas columnas cuando
+`ContextoInforme.parametros["enmascarar_datos_personales"]` es verdadero. Centralizarlo aquí
+evita que, con nueve informes por venir, un olvido en uno solo deje un CURP o un NSS
+completo en un Excel que por diseño circula por correo.
 """
 
 from __future__ import annotations
 
 import io
-from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -3812,16 +3857,14 @@ def enmascarar(valor: str | None) -> str | None:
     return "****" if len(texto) <= 4 else f"****{texto[-4:]}"
 
 
-def _celda(valor: Any, tipo: str) -> Any:
-    """Único punto donde se redondea (R-T4)."""
+def _celda(valor: Any, tipo: str, *, sensible: bool = False) -> Any:
+    """Único punto donde se redondea (R-T4) y donde se enmascara un valor sensible."""
     if valor is None:
         return None
+    if sensible:
+        return enmascarar(str(valor))
     if tipo == "monto" and isinstance(valor, Decimal):
         return valor.quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
-    if isinstance(valor, Decimal):
-        return valor
-    if isinstance(valor, (datetime, date)):
-        return valor
     return valor
 
 
@@ -3836,16 +3879,21 @@ def _con_estilo(ws: Any, valor: Any, *, formato: str | None = None, negrita: boo
     return celda
 
 
-def _escribir_datos(wb: Workbook, resultado: ResultadoInforme) -> None:
+def _escribir_datos(wb: Workbook, resultado: ResultadoInforme, ctx: ContextoInforme) -> None:
     ws = wb.create_sheet("Datos")
     ws.freeze_panes = "A2"
+    enmascarar_activo = bool(ctx.parametros.get("enmascarar_datos_personales"))
 
     ws.append([_con_estilo(ws, columna.titulo, negrita=True) for columna in resultado.columnas])
 
     for fila in resultado.filas:
         ws.append(
             [
-                _con_estilo(ws, _celda(valor, columna.tipo), formato=_FORMATO.get(columna.tipo))
+                _con_estilo(
+                    ws,
+                    _celda(valor, columna.tipo, sensible=columna.sensible and enmascarar_activo),
+                    formato=_FORMATO.get(columna.tipo),
+                )
                 for valor, columna in zip(fila, resultado.columnas)
             ]
         )
@@ -3908,7 +3956,7 @@ def escribir_libro(resultado: ResultadoInforme, ctx: ContextoInforme) -> bytes:
     """Devuelve los bytes del `.xlsx`. Las cuatro hojas existen siempre, aunque estén
     vacías: un consumidor automático no debería tener que comprobar si la hoja está."""
     wb = Workbook(write_only=True)
-    _escribir_datos(wb, resultado)
+    _escribir_datos(wb, resultado, ctx)
     _escribir_parametros(wb, resultado, ctx)
     _escribir_banderas(wb, resultado.banderas)
     _escribir_diccionario(wb, resultado.diccionario)
@@ -3975,18 +4023,61 @@ def catalogo() -> list[dict[str, Any]]:
 `registro.py` en esta tarea con `_MODULOS: tuple[Any, ...] = ()` y añadir el import en la
 tarea 11; así esta tarea queda verde por sí sola.
 
+**Prueba de `registro.py` (ronda de corrección 1):** era la única pieza de esta tarea sin
+pruebas propias, y de ella depende el endpoint de la tarea 13 para devolver un `404` limpio
+cuando la clave no existe. Se aísla `REGISTRO` con `monkeypatch` en vez de depender de que
+esté vacío o lleno, para que la prueba siga siendo válida cuando la tarea 11 agregue B-02.
+
+```python
+# tests/test_informes_registro.py
+"""Registro de informes (spec §7.1).
+
+De aquí depende el endpoint de la tarea 13 para devolver un 404 limpio cuando la clave no
+existe. Se aísla `REGISTRO` con `monkeypatch` en vez de depender de que esté vacío o lleno:
+así las pruebas siguen siendo válidas cuando la tarea 11 agregue B-02.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from app.informes import registro
+
+
+def test_catalogo_con_registro_vacio_devuelve_lista_vacia(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registro, "REGISTRO", {})
+    assert registro.catalogo() == []
+
+
+def test_obtener_con_clave_desconocida_lanza_informe_desconocido(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registro, "REGISTRO", {})
+    with pytest.raises(registro.InformeDesconocidoError):
+        registro.obtener("NO-EXISTE")
+
+
+def test_informe_desconocido_error_es_capturable_como_key_error() -> None:
+    """El endpoint traduce esta excepción a un 404; debe poder capturarla también como el
+    `KeyError` que es, sin conocer el tipo específico."""
+    assert issubclass(registro.InformeDesconocidoError, KeyError)
+    with pytest.raises(KeyError):
+        registro.obtener("NO-EXISTE")
+```
+
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `.venv/bin/pytest tests/test_informes_excel.py -q`
-Expected: PASS (6 tests)
+Run: `.venv/bin/pytest tests/test_informes_excel.py tests/test_informes_registro.py -q`
+Expected: PASS (11 tests: 8 en `test_informes_excel.py` — las 6 originales más
+`test_columna_sensible_se_enmascara_solo_si_el_parametro_esta_activo` y
+`test_columna_decimal_no_se_redondea_a_dos_decimales` de la ronda de corrección 1 — y 3 en
+`test_informes_registro.py`)
 
 - [ ] **Step 7: Type-check and commit**
 
 ```bash
 .venv/bin/mypy --strict app
 .venv/bin/pytest -q
-git add app/informes/ tests/test_informes_excel.py
-git commit -m "feat(informes): agregar motor de informes y libro de Excel de cuatro hojas"
+git add app/informes/ tests/test_informes_excel.py tests/test_informes_registro.py
+git commit -m "feat(informes): centralizar el enmascaramiento de datos personales en el motor de informes"
 ```
 
 ---
@@ -3999,7 +4090,11 @@ git commit -m "feat(informes): agregar motor de informes y libro de Excel de cua
 - Test: `tests/test_informe_b02.py`
 
 **Interfaces:**
-- Consumes: los tipos de `app/informes/base.py`, los modelos de nómina, `app/informes/excel.enmascarar`.
+- Consumes: los tipos de `app/informes/base.py`, los modelos de nómina. No consume
+  `app/informes/excel.enmascarar` directamente: desde la ronda de corrección 1 de la tarea 10,
+  el enmascaramiento es responsabilidad del motor (`app.informes.excel.escribir_libro`), no de
+  la consulta. B-02 solo marca `Columna(..., sensible=True)` en `CURP` y `NSS` y entrega el
+  dato en claro.
 - Produces:
   - `CLAVE = "B-02"`, `NOMBRE`, `GRUPO = "B"`, `DESCRIPCION`
   - `class Parametros(BaseModel)`: `fecha_desde: date`, `fecha_hasta: date`, `tipo_nomina: Literal["O", "E", "AMBOS"] = "AMBOS"`, `incluir_cancelados: bool = False`, `desglosar_gravado_exento: bool = False`, `enmascarar_datos_personales: bool = True`
@@ -4257,20 +4352,24 @@ async def test_cancelados_se_excluyen_por_defecto(db: AsyncSession) -> None:
     assert len((await b02.consultar(db, empresa.empresa_id, p_con)).filas) == 1
 
 
-async def test_enmascara_datos_personales_por_defecto(db: AsyncSession) -> None:
-    """spec §8: el default protege CURP y NSS incluso en los informes que el documento
-    fuente no marca como sensibles."""
+async def test_columnas_personales_declaran_sensible_y_entregan_el_dato_en_claro(db: AsyncSession) -> None:
+    """spec §8, con el contrato de la ronda de corrección 1 de la tarea 10: el enmascaramiento
+    es responsabilidad del motor (`app.informes.excel`), no de esta consulta. B-02 solo marca
+    `CURP` y `NSS` como `sensible=True` y entrega el dato en claro; `enmascarar_datos_personales`
+    sigue viajando en `Parametros` porque de ahí lo toma `ContextoInforme.parametros` cuando el
+    endpoint arma el contexto para `escribir_libro`."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _nomina(db, empresa_id=empresa.empresa_id, uuid="99999999-9999-9999-9999-999999999999")
 
     p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
     resultado = await b02.consultar(db, empresa.empresa_id, p)
-    assert resultado.filas[0][_columna(resultado, "CURP")] == "****XX01"
-    assert resultado.filas[0][_columna(resultado, "NSS")] == "****8901"
 
-    p_claro = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31), enmascarar_datos_personales=False)
-    resultado = await b02.consultar(db, empresa.empresa_id, p_claro)
-    assert resultado.filas[0][_columna(resultado, "CURP")] == "XXXX800101HCHXXX01"
+    indice_curp = _columna(resultado, "CURP")
+    indice_nss = _columna(resultado, "NSS")
+    assert resultado.columnas[indice_curp].sensible is True
+    assert resultado.columnas[indice_nss].sensible is True
+    assert resultado.filas[0][indice_curp] == "XXXX800101HCHXXX01"
+    assert resultado.filas[0][indice_nss] == "12345678901"
 
 
 async def test_banderas_de_descuadre_y_neto(db: AsyncSession) -> None:
@@ -4348,7 +4447,6 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes.base import Bandera, Columna, EntradaDiccionario, ResultadoInforme, SEPARADOR_ETIQUETA
-from app.informes.excel import enmascarar
 from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
@@ -4385,7 +4483,14 @@ class Parametros(BaseModel):
     tipo_nomina: Literal["O", "E", "AMBOS"] = Field("AMBOS", description="Ordinaria, extraordinaria o ambas.")
     incluir_cancelados: bool = Field(False, description="Por defecto solo vigentes (R-T1).")
     desglosar_gravado_exento: bool = Field(False, description="Emite dos columnas por percepción: (G) y (E).")
-    enmascarar_datos_personales: bool = Field(True, description="Enmascara CURP, NSS y cuenta bancaria (spec §8).")
+    enmascarar_datos_personales: bool = Field(
+        True,
+        description=(
+            "Enmascara CURP, NSS y cuenta bancaria (spec §8). Lo aplica el motor de informes "
+            "(`app.informes.excel.escribir_libro`) sobre las columnas que esta consulta marca "
+            "como `sensible=True`, no esta consulta directamente."
+        ),
+    )
 
 
 def etiqueta(naturaleza: str, tipo: str, clave: str | None, concepto: str | None) -> str:
@@ -4394,44 +4499,46 @@ def etiqueta(naturaleza: str, tipo: str, clave: str | None, concepto: str | None
     return SEPARADOR_ETIQUETA.join(partes)
 
 
-# Columnas fijas: identificación, nómina, patrón y empleado (bloques de B-01).
-_COLUMNAS_FIJAS: tuple[tuple[str, str], ...] = (
-    ("Ejercicio", "entero"),
-    ("Periodo", "entero"),
-    ("UUID", "texto"),
-    ("Serie", "texto"),
-    ("Folio", "texto"),
-    ("Estado SAT", "texto"),
-    ("Tipo nómina", "texto"),
-    ("Fecha pago", "fecha"),
-    ("Fecha inicial", "fecha"),
-    ("Fecha final", "fecha"),
-    ("Días pagados", "decimal"),
-    ("Periodicidad", "texto"),
-    ("RFC patrón", "texto"),
-    ("Registro patronal", "texto"),
-    ("RFC empleado", "texto"),
-    ("Nombre empleado", "texto"),
-    ("CURP", "texto"),
-    ("NSS", "texto"),
-    ("Núm. empleado", "texto"),
-    ("Departamento", "texto"),
-    ("Puesto", "texto"),
-    ("Tipo régimen", "texto"),
-    ("SBC", "monto"),
-    ("SDI", "monto"),
+# Columnas fijas: identificación, nómina, patrón y empleado (bloques de B-01). El tercer
+# elemento es `sensible` (spec §8): CURP y NSS son las únicas columnas fijas con datos
+# personales; el motor las enmascara si `enmascarar_datos_personales` está activo.
+_COLUMNAS_FIJAS: tuple[tuple[str, str, bool], ...] = (
+    ("Ejercicio", "entero", False),
+    ("Periodo", "entero", False),
+    ("UUID", "texto", False),
+    ("Serie", "texto", False),
+    ("Folio", "texto", False),
+    ("Estado SAT", "texto", False),
+    ("Tipo nómina", "texto", False),
+    ("Fecha pago", "fecha", False),
+    ("Fecha inicial", "fecha", False),
+    ("Fecha final", "fecha", False),
+    ("Días pagados", "decimal", False),
+    ("Periodicidad", "texto", False),
+    ("RFC patrón", "texto", False),
+    ("Registro patronal", "texto", False),
+    ("RFC empleado", "texto", False),
+    ("Nombre empleado", "texto", False),
+    ("CURP", "texto", True),
+    ("NSS", "texto", True),
+    ("Núm. empleado", "texto", False),
+    ("Departamento", "texto", False),
+    ("Puesto", "texto", False),
+    ("Tipo régimen", "texto", False),
+    ("SBC", "monto", False),
+    ("SDI", "monto", False),
 )
 
-_COLUMNAS_TOTALES: tuple[tuple[str, str], ...] = (
-    ("Total sueldos", "monto"),
-    ("Total separación indemnización", "monto"),
-    ("Total jubilación pensión retiro", "monto"),
-    ("Total percepciones", "monto"),
-    ("Total gravado", "monto"),
-    ("Total exento", "monto"),
-    ("Total otros pagos", "monto"),
-    ("Total deducciones", "monto"),
-    ("Total (neto)", "monto"),
+_COLUMNAS_TOTALES: tuple[tuple[str, str, bool], ...] = (
+    ("Total sueldos", "monto", False),
+    ("Total separación indemnización", "monto", False),
+    ("Total jubilación pensión retiro", "monto", False),
+    ("Total percepciones", "monto", False),
+    ("Total gravado", "monto", False),
+    ("Total exento", "monto", False),
+    ("Total otros pagos", "monto", False),
+    ("Total deducciones", "monto", False),
+    ("Total (neto)", "monto", False),
 )
 
 
@@ -4585,7 +4692,10 @@ def _banderas_de_periodos_traslapados(filas_crudas: list[tuple[Comprobante, Nomi
 async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme:
     filas_universo = list((await db.execute(_universo(empresa_id, p))).all())
     if not filas_universo:
-        columnas = [Columna(titulo=titulo, tipo=tipo) for titulo, tipo in _COLUMNAS_FIJAS + _COLUMNAS_TOTALES]  # type: ignore[arg-type]
+        columnas = [
+            Columna(titulo=titulo, tipo=tipo, sensible=sensible)  # type: ignore[arg-type]
+            for titulo, tipo, sensible in _COLUMNAS_FIJAS + _COLUMNAS_TOTALES
+        ]
         return ResultadoInforme(columnas=columnas, aviso="Sin CFDI de nómina en el rango solicitado.")
 
     ids = [fila[0].comprobante_id for fila in filas_universo]
@@ -4641,9 +4751,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             )
         )
 
-    columnas = [Columna(titulo=titulo, tipo=tipo) for titulo, tipo in _COLUMNAS_FIJAS]  # type: ignore[arg-type]
+    columnas = [Columna(titulo=titulo, tipo=tipo, sensible=sensible) for titulo, tipo, sensible in _COLUMNAS_FIJAS]  # type: ignore[arg-type]
     columnas += [Columna(titulo=etiquetas[c], tipo="monto") for c in conceptos]
-    columnas += [Columna(titulo=titulo, tipo=tipo) for titulo, tipo in _COLUMNAS_TOTALES]  # type: ignore[arg-type]
+    columnas += [Columna(titulo=titulo, tipo=tipo, sensible=sensible) for titulo, tipo, sensible in _COLUMNAS_TOTALES]  # type: ignore[arg-type]
 
     filas: list[list[Any]] = []
     for comprobante, nomina, receptor, totales in filas_universo:
@@ -4654,10 +4764,11 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         }
         banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
 
+        # CURP y NSS salen en claro: `Columna(sensible=True)` ya lo declaró arriba, y es
+        # el motor (`app.informes.excel.escribir_libro`) quien enmascara, no esta consulta
+        # (ronda de corrección 1 de la tarea 10).
         curp = receptor.curp if receptor else None
         nss = receptor.nss if receptor else None
-        if p.enmascarar_datos_personales:
-            curp, nss = enmascarar(curp), enmascarar(nss)
 
         fija: list[Any] = [
             nomina.fecha_pago.year if nomina.fecha_pago else None,

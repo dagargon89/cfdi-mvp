@@ -6,12 +6,18 @@ Cuatro hojas siempre: `Datos`, `Parámetros`, `Banderas`, `Diccionario`. `openpy
 
 `ROUND_HALF_UP` explícito: el redondeo por defecto de Python es `ROUND_HALF_EVEN`, que
 para importes fiscales es incorrecto (⌊x⌉₂ del documento fuente es medio arriba).
+
+**El enmascaramiento de datos personales es responsabilidad de este módulo, no de cada
+informe.** Un informe solo marca `Columna(..., sensible=True)` y entrega el valor en claro;
+`escribir_libro` aplica `enmascarar()` a esas columnas cuando
+`ContextoInforme.parametros["enmascarar_datos_personales"]` es verdadero. Centralizarlo aquí
+evita que, con nueve informes por venir, un olvido en uno solo deje un CURP o un NSS
+completo en un Excel que por diseño circula por correo.
 """
 
 from __future__ import annotations
 
 import io
-from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -42,16 +48,14 @@ def enmascarar(valor: str | None) -> str | None:
     return "****" if len(texto) <= 4 else f"****{texto[-4:]}"
 
 
-def _celda(valor: Any, tipo: str) -> Any:
-    """Único punto donde se redondea (R-T4)."""
+def _celda(valor: Any, tipo: str, *, sensible: bool = False) -> Any:
+    """Único punto donde se redondea (R-T4) y donde se enmascara un valor sensible."""
     if valor is None:
         return None
+    if sensible:
+        return enmascarar(str(valor))
     if tipo == "monto" and isinstance(valor, Decimal):
         return valor.quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
-    if isinstance(valor, Decimal):
-        return valor
-    if isinstance(valor, (datetime, date)):
-        return valor
     return valor
 
 
@@ -66,16 +70,21 @@ def _con_estilo(ws: Any, valor: Any, *, formato: str | None = None, negrita: boo
     return celda
 
 
-def _escribir_datos(wb: Workbook, resultado: ResultadoInforme) -> None:
+def _escribir_datos(wb: Workbook, resultado: ResultadoInforme, ctx: ContextoInforme) -> None:
     ws = wb.create_sheet("Datos")
     ws.freeze_panes = "A2"
+    enmascarar_activo = bool(ctx.parametros.get("enmascarar_datos_personales"))
 
     ws.append([_con_estilo(ws, columna.titulo, negrita=True) for columna in resultado.columnas])
 
     for fila in resultado.filas:
         ws.append(
             [
-                _con_estilo(ws, _celda(valor, columna.tipo), formato=_FORMATO.get(columna.tipo))
+                _con_estilo(
+                    ws,
+                    _celda(valor, columna.tipo, sensible=columna.sensible and enmascarar_activo),
+                    formato=_FORMATO.get(columna.tipo),
+                )
                 for valor, columna in zip(fila, resultado.columnas)
             ]
         )
@@ -138,7 +147,7 @@ def escribir_libro(resultado: ResultadoInforme, ctx: ContextoInforme) -> bytes:
     """Devuelve los bytes del `.xlsx`. Las cuatro hojas existen siempre, aunque estén
     vacías: un consumidor automático no debería tener que comprobar si la hoja está."""
     wb = Workbook(write_only=True)
-    _escribir_datos(wb, resultado)
+    _escribir_datos(wb, resultado, ctx)
     _escribir_parametros(wb, resultado, ctx)
     _escribir_banderas(wb, resultado.banderas)
     _escribir_diccionario(wb, resultado.diccionario)

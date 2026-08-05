@@ -20,8 +20,14 @@ Severidad = Literal["alta", "media", "baja"]
 
 @dataclass(slots=True)
 class Columna:
+    """`sensible=True` marca una columna con datos personales (CURP, NSS, cuenta bancaria,
+    etc.). Un informe solo declara la marca; el motor (`app.informes.excel`) es quien decide
+    si la enmascara, según `ContextoInforme.parametros["enmascarar_datos_personales"]` —
+    así ningún informe puede "olvidar" enmascarar una columna sensible."""
+
     titulo: str
     tipo: TipoColumna = "texto"
+    sensible: bool = False
 
 
 @dataclass(slots=True)

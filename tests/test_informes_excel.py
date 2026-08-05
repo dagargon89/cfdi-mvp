@@ -6,6 +6,7 @@ Las aserciones se hacen sobre valores de celda, nunca sobre bytes del archivo (s
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -115,3 +116,35 @@ def test_enmascarar_conserva_los_ultimos_cuatro() -> None:
     assert excel.enmascarar("12345678901") == "****8901"
     assert excel.enmascarar(None) is None
     assert excel.enmascarar("123") == "****"  # demasiado corto para conservar 4
+
+
+def test_columna_sensible_se_enmascara_solo_si_el_parametro_esta_activo() -> None:
+    """El motor, no el informe, decide si enmascara (ronda de corrección 1): un informe solo
+    marca `sensible=True` y entrega el dato en claro."""
+    resultado = ResultadoInforme(
+        columnas=[
+            Columna(titulo="CURP", tipo="texto", sensible=True),
+            Columna(titulo="Nombre", tipo="texto"),
+        ],
+        filas=[["XXXX800101HCHXXX01", "Juan Pérez"]],
+    )
+    ctx_enmascarado = replace(_contexto(), parametros={"enmascarar_datos_personales": True})
+    ctx_en_claro = replace(_contexto(), parametros={"enmascarar_datos_personales": False})
+
+    wb_enmascarado = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx_enmascarado)))
+    fila = [c.value for c in wb_enmascarado["Datos"][2]]
+    assert fila[0] == "****XX01"
+    assert fila[1] == "Juan Pérez"  # la columna no sensible nunca se toca
+
+    wb_en_claro = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx_en_claro)))
+    fila = [c.value for c in wb_en_claro["Datos"][2]]
+    assert fila[0] == "XXXX800101HCHXXX01"
+    assert fila[1] == "Juan Pérez"
+
+
+def test_columna_decimal_no_se_redondea_a_dos_decimales() -> None:
+    """Solo `monto` se redondea a 2 decimales (R-T4); `decimal` conserva su precisión."""
+    resultado = ResultadoInforme(columnas=[Columna(titulo="Tasa", tipo="decimal")], filas=[[Decimal("12.345678")]])
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
+    valor = wb["Datos"][2][0].value
+    assert round(float(valor), 6) == 12.345678
