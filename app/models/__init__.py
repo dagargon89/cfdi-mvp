@@ -16,6 +16,7 @@ from app.models.job import Job
 from app.models.lista_69b import Lista69b
 from app.models.notificacion_destino import NotificacionDestino
 from app.models.notificacion_log import NotificacionLog
+from app.models.pago import Pago, PagoDocto, PagoDoctoImpuesto, PagoTotales
 from app.models.usuario import Usuario
 from app.models.usuario_empresa import UsuarioEmpresa
 
@@ -37,4 +38,8 @@ __all__ = [
     "CfdiConcepto",
     "CfdiConceptoImpuesto",
     "CfdiRelacionado",
+    "Pago",
+    "PagoDocto",
+    "PagoDoctoImpuesto",
+    "PagoTotales",
 ]
