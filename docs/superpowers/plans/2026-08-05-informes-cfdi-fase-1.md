@@ -2458,6 +2458,58 @@ async def test_comprobante_sin_xml_no_es_pendiente(db: AsyncSession) -> None:
     assert sin_xml.xml_path is None
 
     assert await repo.ids_pendientes(db, empresa.empresa_id) == []
+
+
+async def test_registrar_error_conserva_hijos_de_una_corrida_buena_anterior(db: AsyncSession) -> None:
+    """Éxito → fallo: si un comprobante ya normalizado con éxito se reprocesa (cambió el
+    XML en disco, o subió `ETL_VERSION`) y el segundo parseo falla, sus hijos de la
+    corrida buena anterior deben sobrevivir. `registrar_error` no debe llamar a
+    `_limpiar_hijos` — perder el detalle por un fallo transitorio es peor que conservar
+    datos de una corrida anterior marcados como sospechosos vía `error_normalizacion`."""
+    cid = await _comprobante(db, "99999999-9999-9999-9999-999999999999", tipo="N")
+    xml = fixtures_cfdi.cfdi_nomina()
+    h = normalizacion.hash_xml(xml)
+
+    await repo.escribir(db, cid, normalizacion.normalizar(xml), h)
+    await db.commit()
+    assert await db.scalar(select(func.count()).select_from(NominaPercepcion).where(NominaPercepcion.comprobante_id == cid)) == 2
+
+    await repo.registrar_error(db, cid, "b" * 64, "el XML reprocesado no parseó")
+    await db.commit()
+
+    # Las percepciones de la corrida buena anterior siguen ahí.
+    assert await db.scalar(select(func.count()).select_from(NominaPercepcion).where(NominaPercepcion.comprobante_id == cid)) == 2
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is not None
+    assert detalle.error_normalizacion == "el XML reprocesado no parseó"
+
+
+async def test_escribir_no_toca_hijos_de_otro_comprobante(db: AsyncSession) -> None:
+    """Los 14 `delete()` de `_limpiar_hijos` van acotados por `comprobante_id`: reprocesar
+    A nunca debe tocar los hijos de B. Sin esta prueba, un refactor que rompa uno de esos
+    `where` no lo detectaría ningún test."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    comp_a = await factories.crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    comp_b = await factories.crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    cid_a, cid_b = comp_a.comprobante_id, comp_b.comprobante_id
+    xml = fixtures_cfdi.cfdi_ingreso()
+
+    await repo.escribir(db, cid_a, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await repo.escribir(db, cid_b, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await db.commit()
+
+    # Reprocesar solo A.
+    await repo.escribir(db, cid_a, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await db.commit()
+
+    assert await db.scalar(select(func.count()).select_from(CfdiConcepto).where(CfdiConcepto.comprobante_id == cid_a)) == 1
+    assert await db.scalar(select(func.count()).select_from(CfdiConceptoImpuesto).where(CfdiConceptoImpuesto.comprobante_id == cid_a)) == 1
+    # B nunca se tocó: sus hijos siguen intactos.
+    assert await db.scalar(select(func.count()).select_from(CfdiConcepto).where(CfdiConcepto.comprobante_id == cid_b)) == 1
+    assert await db.scalar(select(func.count()).select_from(CfdiConceptoImpuesto).where(CfdiConceptoImpuesto.comprobante_id == cid_b)) == 1
+    detalle_b = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid_b))
+    assert detalle_b is not None
+    assert detalle_b.error_normalizacion is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2478,7 +2530,7 @@ del caller — este módulo no hace `commit`.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -2576,7 +2628,7 @@ async def escribir(db: AsyncSession, comprobante_id: int, datos: DatosComprobant
             "no_certificado_sat": enc.no_certificado_sat,
             "xml_hash": xml_hash,
             "etl_version": ETL_VERSION,
-            "normalizado_at": datetime.now(),
+            "normalizado_at": datetime.now(timezone.utc).replace(tzinfo=None),
             "error_normalizacion": None,
         },
     )
@@ -2796,15 +2848,25 @@ async def escribir(db: AsyncSession, comprobante_id: int, datos: DatosComprobant
 
 async def registrar_error(db: AsyncSession, comprobante_id: int, xml_hash: str, mensaje: str) -> None:
     """Deja constancia del fallo con el hash del XML que lo produjo, para que el
-    pre-vuelo no lo reintente en cada corrida (spec §6.2)."""
-    await _limpiar_hijos(db, comprobante_id)
+    pre-vuelo no lo reintente en cada corrida (spec §6.2).
+
+    A propósito **no** llama a `_limpiar_hijos`: si este comprobante ya se había
+    normalizado con éxito antes (y ahora, por ejemplo, cambió el XML en disco o subió
+    `ETL_VERSION`, se reintentó y el parseo falló), sus hijos de la corrida anterior
+    — conceptos, nómina, pagos — siguen siendo el último estado bueno conocido y no
+    hay ninguna razón para destruirlos. Ante un fallo se conserva ese estado y se marca
+    el error; perder el detalle de un comprobante por un fallo transitorio es peor que
+    conservar datos de una corrida anterior explícitamente marcados como sospechosos.
+    Cualquier consumidor debe comprobar `error_normalizacion IS NULL` antes de confiar
+    en la fila — eso ya era cierto para los campos de encabezado, que tampoco se
+    limpiaban aquí."""
     await _upsert_detalle(
         db,
         comprobante_id,
         {
             "xml_hash": xml_hash,
             "etl_version": ETL_VERSION,
-            "normalizado_at": datetime.now(),
+            "normalizado_at": datetime.now(timezone.utc).replace(tzinfo=None),
             "error_normalizacion": mensaje[:500],
         },
     )
@@ -2843,7 +2905,9 @@ async def ids_pendientes(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_normalizacion_escritor.py -q`
-Expected: PASS (6 tests)
+Expected: PASS (9 tests — las 6 originales más `test_comprobante_sin_xml_no_es_pendiente`,
+`test_registrar_error_conserva_hijos_de_una_corrida_buena_anterior` y
+`test_escribir_no_toca_hijos_de_otro_comprobante`, agregadas en rondas de revisión posteriores)
 
 - [ ] **Step 5: Type-check and commit**
 

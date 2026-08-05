@@ -7,7 +7,7 @@ del caller — este módulo no hace `commit`.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -105,7 +105,7 @@ async def escribir(db: AsyncSession, comprobante_id: int, datos: DatosComprobant
             "no_certificado_sat": enc.no_certificado_sat,
             "xml_hash": xml_hash,
             "etl_version": ETL_VERSION,
-            "normalizado_at": datetime.now(),
+            "normalizado_at": datetime.now(timezone.utc).replace(tzinfo=None),
             "error_normalizacion": None,
         },
     )
@@ -325,15 +325,25 @@ async def escribir(db: AsyncSession, comprobante_id: int, datos: DatosComprobant
 
 async def registrar_error(db: AsyncSession, comprobante_id: int, xml_hash: str, mensaje: str) -> None:
     """Deja constancia del fallo con el hash del XML que lo produjo, para que el
-    pre-vuelo no lo reintente en cada corrida (spec §6.2)."""
-    await _limpiar_hijos(db, comprobante_id)
+    pre-vuelo no lo reintente en cada corrida (spec §6.2).
+
+    A propósito **no** llama a `_limpiar_hijos`: si este comprobante ya se había
+    normalizado con éxito antes (y ahora, por ejemplo, cambió el XML en disco o subió
+    `ETL_VERSION`, se reintentó y el parseo falló), sus hijos de la corrida anterior
+    — conceptos, nómina, pagos — siguen siendo el último estado bueno conocido y no
+    hay ninguna razón para destruirlos. Ante un fallo se conserva ese estado y se marca
+    el error; perder el detalle de un comprobante por un fallo transitorio es peor que
+    conservar datos de una corrida anterior explícitamente marcados como sospechosos.
+    Cualquier consumidor debe comprobar `error_normalizacion IS NULL` antes de confiar
+    en la fila — eso ya era cierto para los campos de encabezado, que tampoco se
+    limpiaban aquí."""
     await _upsert_detalle(
         db,
         comprobante_id,
         {
             "xml_hash": xml_hash,
             "etl_version": ETL_VERSION,
-            "normalizado_at": datetime.now(),
+            "normalizado_at": datetime.now(timezone.utc).replace(tzinfo=None),
             "error_normalizacion": mensaje[:500],
         },
     )

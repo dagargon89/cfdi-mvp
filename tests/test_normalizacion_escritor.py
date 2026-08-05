@@ -143,3 +143,55 @@ async def test_comprobante_sin_xml_no_es_pendiente(db: AsyncSession) -> None:
     assert sin_xml.xml_path is None
 
     assert await repo.ids_pendientes(db, empresa.empresa_id) == []
+
+
+async def test_registrar_error_conserva_hijos_de_una_corrida_buena_anterior(db: AsyncSession) -> None:
+    """Éxito → fallo: si un comprobante ya normalizado con éxito se reprocesa (cambió el
+    XML en disco, o subió `ETL_VERSION`) y el segundo parseo falla, sus hijos de la
+    corrida buena anterior deben sobrevivir. `registrar_error` no debe llamar a
+    `_limpiar_hijos` — perder el detalle por un fallo transitorio es peor que conservar
+    datos de una corrida anterior marcados como sospechosos vía `error_normalizacion`."""
+    cid = await _comprobante(db, "99999999-9999-9999-9999-999999999999", tipo="N")
+    xml = fixtures_cfdi.cfdi_nomina()
+    h = normalizacion.hash_xml(xml)
+
+    await repo.escribir(db, cid, normalizacion.normalizar(xml), h)
+    await db.commit()
+    assert await db.scalar(select(func.count()).select_from(NominaPercepcion).where(NominaPercepcion.comprobante_id == cid)) == 2
+
+    await repo.registrar_error(db, cid, "b" * 64, "el XML reprocesado no parseó")
+    await db.commit()
+
+    # Las percepciones de la corrida buena anterior siguen ahí.
+    assert await db.scalar(select(func.count()).select_from(NominaPercepcion).where(NominaPercepcion.comprobante_id == cid)) == 2
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is not None
+    assert detalle.error_normalizacion == "el XML reprocesado no parseó"
+
+
+async def test_escribir_no_toca_hijos_de_otro_comprobante(db: AsyncSession) -> None:
+    """Los 14 `delete()` de `_limpiar_hijos` van acotados por `comprobante_id`: reprocesar
+    A nunca debe tocar los hijos de B. Sin esta prueba, un refactor que rompa uno de esos
+    `where` no lo detectaría ningún test."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    comp_a = await factories.crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    comp_b = await factories.crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+    cid_a, cid_b = comp_a.comprobante_id, comp_b.comprobante_id
+    xml = fixtures_cfdi.cfdi_ingreso()
+
+    await repo.escribir(db, cid_a, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await repo.escribir(db, cid_b, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await db.commit()
+
+    # Reprocesar solo A.
+    await repo.escribir(db, cid_a, normalizacion.normalizar(xml), normalizacion.hash_xml(xml))
+    await db.commit()
+
+    assert await db.scalar(select(func.count()).select_from(CfdiConcepto).where(CfdiConcepto.comprobante_id == cid_a)) == 1
+    assert await db.scalar(select(func.count()).select_from(CfdiConceptoImpuesto).where(CfdiConceptoImpuesto.comprobante_id == cid_a)) == 1
+    # B nunca se tocó: sus hijos siguen intactos.
+    assert await db.scalar(select(func.count()).select_from(CfdiConcepto).where(CfdiConcepto.comprobante_id == cid_b)) == 1
+    assert await db.scalar(select(func.count()).select_from(CfdiConceptoImpuesto).where(CfdiConceptoImpuesto.comprobante_id == cid_b)) == 1
+    detalle_b = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid_b))
+    assert detalle_b is not None
+    assert detalle_b.error_normalizacion is None
