@@ -5,6 +5,7 @@ que Alembic autogenere/compare correctamente).
 """
 
 from app.models.bitacora import Bitacora
+from app.models.cfdi_detalle import CfdiConcepto, CfdiConceptoImpuesto, CfdiRelacionado, ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.configuracion import Configuracion
 from app.models.configuracion_smtp import ConfiguracionSmtp
@@ -32,4 +33,8 @@ __all__ = [
     "Bitacora",
     "Configuracion",
     "ConfiguracionSmtp",
+    "ComprobanteDetalle",
+    "CfdiConcepto",
+    "CfdiConceptoImpuesto",
+    "CfdiRelacionado",
 ]
