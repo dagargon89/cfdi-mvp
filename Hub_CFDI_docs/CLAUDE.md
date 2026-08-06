@@ -48,7 +48,7 @@ Pipeline: **e.firma en bóveda → descarga masiva (WS SOAP, asíncrona) → val
 9. **Reglas del SAT como configuración versionada** (12 meses, ~5 años, 200k/1M, polling). *Por qué:* cambian por ejercicio fiscal; sin deploy.
 10. **Contrato de API congelado = fuente única.** Tras el freeze (fin de Fase 1), la interfaz `ApiClient` del doc 05 es literal; cualquier cambio la actualiza en la misma sesión. *Por qué:* Gobernanza v3 mejora 4.
 11. **Cero N+1.** Listados de comprobantes/jobs usan joins/eager loading explícitos; auditado con echo de queries. *Por qué:* el índice apunta a cientos de miles de filas por empresa.
-12. **Nada sensible real en docs ni fixtures.** RFC de prueba del SAT (`EKU9003173C9`, `XAXX010101000`), UUID ficticios, dominios `@demo.test`.
+12. **Datos propios sí, de terceros no, personales nunca.** El RFC y la razón social de la propia empresa sí pueden aparecer en fixtures y documentación: son suyos, y el RFC de una persona moral es información pública. Los datos de terceros (nombres de clientes o proveedores, sus folios, sus importes) no entran a ningún archivo versionado, aunque aparezcan en los CFDI reales que el sistema procesa. Los datos personales (CURP, NSS, cuenta bancaria) son siempre inventados, sin excepción. Los UUID siguen siendo ficticios y los dominios de correo `@demo.test`. *Por qué:* la empresa es dueña de sus propios identificadores fiscales, pero no de los de sus contrapartes; y los datos personales de los empleados están protegidos por la LFPDPPP independientemente de quién sea el patrón.
 
 ## Arquitectura en capas
 
