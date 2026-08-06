@@ -59,7 +59,7 @@ Los fixtures de la fase 1 usan el RFC y la razón social **reales de la propia e
 
 Lo que **sí** se mantiene prohibido, y hay que decirlo con precisión porque es la parte que importa:
 
-- **Datos de terceros.** En la fase 1 apareció el nombre real de un proveedor (`AKBAL CONSULTORES`) con su folio e importes exactos en un fixture y en el documento del plan. Eso **no** es del dueño del repo autorizarlo, y ya se corrigió. No vuelve.
+- **Datos de terceros.** En la fase 1 apareció el nombre real de un proveedor con su folio e importes exactos en un fixture y en el documento del plan. Eso **no** es del dueño del repo autorizarlo, y ya se corrigió. No vuelve.
 - **Datos personales, siempre.** CURP, NSS y cuentas bancarias de empleados reales son inventados sin excepción, en fixtures y en cualquier documento. Esto no admite matices: son datos personales de terceros bajo la LFPDPPP, no información de la empresa.
 - **Salida de los informes.** El enmascaramiento por defecto no cambia; la regla 12 no lo gobierna, lo gobierna el §8 del diseño.
 
@@ -77,7 +77,10 @@ Y el *"Por qué"*: la empresa es dueña de sus propios identificadores fiscales,
 - [ ] **Step 2: Verificar que la práctica actual cumple la regla nueva**
 
 ```bash
-git grep -n "AKBAL\|17393\|16105\|1288\.40" -- tests/ app/ apps/ docs/ scripts/
+# El patrón real (nombre del proveedor, folio e importes del incidente de la fase 1)
+# no se reproduce aquí: es justo el dato que la regla 12 prohíbe. Ver task-1-report.md
+# de esta fase para la corrida real y su resultado.
+git grep -n "<nombre-del-proveedor>\|<folio>\|<importes>" -- tests/ app/ apps/ docs/ scripts/
 ```
 Expected: sin resultados (más allá de hashes de Alembic que contengan esas cifras como subcadena; compruébalo caso por caso si aparece alguno).
 
