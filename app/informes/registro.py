@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.informes import b01_catalogo_sat, b02_conceptos_patron
+from app.informes import b01_catalogo_sat, b02_conceptos_patron, b04_matriz_empleado_periodo
 from app.informes.base import DefinicionInforme
 
-_MODULOS: tuple[Any, ...] = (b01_catalogo_sat, b02_conceptos_patron)
+_MODULOS: tuple[Any, ...] = (b01_catalogo_sat, b02_conceptos_patron, b04_matriz_empleado_periodo)
 
 REGISTRO: dict[str, DefinicionInforme] = {modulo.CLAVE: modulo for modulo in _MODULOS}
 
