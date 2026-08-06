@@ -1,0 +1,29 @@
+# Marcas por tipo de percepción de nómina (§3.1 del documento fuente): lo que el catálogo
+# `c_TipoPercepcion` del SAT no trae y los informes B-03/B-05/B-06 necesitan.
+#
+# ESTRUCTURA — todavía sin renglones: los siembra la tarea 3, con la cita del artículo de
+# la LISR/LSS de cada marca en un comentario y un `# REVISAR: <tipo>` donde haya duda.
+#
+#   catalogo_percepcion_marca:
+#     - tipo_percepcion: '002'     # ENTRECOMILLADO SIEMPRE: es clave de catálogo del SAT,
+#                                  # '002' no es 2. El cargador rechaza el entero.
+#       es_ingreso_ordinario: true
+#       base_exencion: UMA_DIAS    # UMA_DIAS | SM_DIAS | PORCENTAJE | NINGUNA
+#       factor_exencion: '30'      # entrecomillado; obligatorio salvo con NINGUNA, donde
+#                                  # debe ir ausente o null
+#       integra_sbc: true
+#       es_provisionable: true
+#
+# Qué significa cada marca:
+#
+#   es_ingreso_ordinario  Falso para lo que tiene régimen fiscal propio y no se acumula al
+#                         ingreso ordinario (separación e indemnización; jubilaciones,
+#                         pensiones y haberes de retiro). Verdadero para el resto.
+#   base_exencion         Sobre qué se calcula el tramo exento del art. 93 LISR: días de
+#                         UMA, días de salario mínimo, un porcentaje, o ninguna exención.
+#   factor_exencion       Cuántos días o qué porcentaje, según la base.
+#   integra_sbc           Si integra al salario base de cotización (art. 27 LSS).
+#   es_provisionable      Si entra al pasivo laboral (aguinaldo, vacaciones, prima
+#                         vacacional) que calcula B-06.
+
+catalogo_percepcion_marca: []

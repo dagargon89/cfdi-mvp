@@ -1,0 +1,18 @@
+# Días de vacaciones por año de antigüedad — artículo 76 de la Ley Federal del Trabajo
+# (reforma publicada en el DOF el 27-12-2022, en vigor desde el 1 de enero de 2023).
+#
+# Es ley federal, no política de cada patrón: por eso la tabla es global, sin `empresa_id`,
+# y por eso el servicio la aplica sin exigir confirmación humana (a diferencia de los
+# importes de `param_fiscal`, que sí la exigen).
+#
+# ESTRUCTURA — todavía sin renglones: los siembra la tarea 3.
+#
+#   tabla_vacaciones:
+#     - anios_antiguedad: 1
+#       dias: 12
+#
+# El resolutor toma el renglón con el mayor `anios_antiguedad` que no exceda la antigüedad
+# consultada, no el renglón exacto: después del quinto año el art. 76 crece cada cinco
+# años, así que con 7 años de antigüedad aplica el renglón de 5.
+
+tabla_vacaciones: []

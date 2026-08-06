@@ -1,0 +1,38 @@
+# UMA, salario mínimo y tipo de cambio, con vigencia y procedencia (§2.12 del documento
+# fuente: ningún importe fiscal se codifica en el programa; todo vive aquí y en la tabla
+# `param_fiscal`, y se resuelve por fecha).
+#
+# ESTRUCTURA — todavía sin valores: los siembra la tarea 3.
+#
+#   param_fiscal:
+#     - ejercicio: 2026            # opcional; por omisión, el año de `vigencia_desde`
+#       clave: UMA_DIARIA
+#       valor: '117.31'            # ENTRECOMILLADO SIEMPRE: sin comillas el YAML lo lee
+#                                  # como float y pierde precisión. El cargador lo rechaza.
+#       vigencia_desde: 2026-02-01
+#       vigencia_hasta: null       # null = vigente hasta nuevo aviso
+#       fuente: 'INEGI, boletín UMA 2026 — https://...'
+#
+# Claves esperadas y de dónde sale cada una:
+#
+#   UMA_DIARIA              INEGI, boletín anual de la UMA. Cambia el 1 de febrero.
+#   UMA_MENSUAL             idem (UMA diaria x 30.4).
+#   UMA_ANUAL               idem (UMA mensual x 12).
+#   SALARIO_MINIMO_GENERAL  DOF, resolución del CONASAMI. Cambia el 1 de enero.
+#   SALARIO_MINIMO_ZLFN     idem, Zona Libre de la Frontera Norte (aplica a Ciudad Juárez).
+#   TIPO_CAMBIO_USD         DOF, tipo de cambio para solventar obligaciones en moneda
+#                           extranjera. Cambia todos los días hábiles.
+#
+# Dos reglas que el cargador hace cumplir y conviene tener presentes al editar este archivo:
+#
+#   1. `fuente` es obligatoria. Sin ella nadie puede revisar el valor antes de confirmarlo.
+#   2. Dos tramos de la misma clave no se pueden solapar, y a lo sumo uno puede quedar con
+#      `vigencia_hasta: null`. Al capturar el valor del año siguiente hay que CERRAR el
+#      tramo anterior en este mismo archivo (ponerle `vigencia_hasta` el día previo). No se
+#      cierra solo a propósito: si se cerrara solo, teclear mal el año en `vigencia_desde`
+#      pasaría inadvertido y el valor equivocado se aplicaría en silencio.
+#
+# Todo lo que se cargue queda PENDIENTE DE CONFIRMACIÓN: un valor sin confirmar no calcula.
+# La confirmación se hace desde la pantalla de configuración, con nombre y fecha.
+
+param_fiscal: []

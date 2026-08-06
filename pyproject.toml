@@ -19,6 +19,10 @@ dependencies = [
     "python-multipart>=0.0.12,<1",
     "satcfdi>=26,<27",
     "openpyxl>=3.1,<4",
+    # `app/services/configuracion_fiscal.py` importa `yaml` directamente. Ya venía
+    # instalado como dependencia transitiva, pero una transitiva desaparece sin aviso
+    # cuando cambia el paquete que la arrastraba, y el cargador de semillas se rompería.
+    "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +35,7 @@ dev = [
     "testcontainers[mysql]>=4.8,<5",
     "pip-audit>=2.7,<3",
     "aiosqlite>=0.20,<1",
+    "types-PyYAML>=6,<7",  # PyYAML no trae anotaciones: sin los stubs, `mypy --strict` falla.
 ]
 
 [tool.mypy]
