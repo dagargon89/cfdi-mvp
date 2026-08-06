@@ -335,12 +335,10 @@ async def test_diccionario_trae_la_descripcion_del_catalogo_sat(db: AsyncSession
 
 
 async def test_serie_sale_del_detalle_del_comprobante(db: AsyncSession) -> None:
-    from app.models.cfdi_detalle import ComprobanteDetalle
-
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    cid = await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="dddddddd-dddd-dddd-dddd-dddddddddddd")
-    db.add(ComprobanteDetalle(comprobante_id=cid, version="4.0", serie="N", xml_hash="e" * 64, etl_version=1))
-    await db.commit()
+    # `insertar_nomina` ya crea la fila 1:1 de `comprobante_detalle` (revisión final de la fase 2),
+    # así que la serie se fija por parámetro; añadir otra fila aquí violaría la llave primaria.
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="dddddddd-dddd-dddd-dddd-dddddddddddd", serie="N")
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     assert resultado.filas[0][_columna(resultado, "Serie")] == "N"
@@ -458,18 +456,13 @@ async def test_bandera_de_datos_de_corrida_anterior_cuando_el_reproceso_fallo(db
     falló. La fila entra con los importes viejos —perderla sería peor— y la bandera avisa de que
     no son los del XML que hay hoy en disco."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    cid = await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-0000-0000-0000-666666666666")
-    db.add(
-        ComprobanteDetalle(
-            comprobante_id=cid,
-            version="4.0",
-            serie="N",
-            xml_hash="a" * 64,
-            etl_version=2,
-            error_normalizacion="DataError: valor demasiado largo para comprobante_detalle.moneda",
-        )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="66666666-0000-0000-0000-666666666666",
+        serie="N",
+        error_normalizacion="DataError: valor demasiado largo para comprobante_detalle.moneda",
     )
-    await db.commit()
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
 
