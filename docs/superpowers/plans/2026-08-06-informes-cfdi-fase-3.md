@@ -1028,6 +1028,14 @@ git add app/ tests/ && git commit -m "feat(config): alarma de vigencia fiscal y 
 
 **Las tres reglas de la ficha:**
 - **B-03.R1 — el tope se resuelve por tipo de percepción** según `base_exencion` y `factor_exencion`, con la UMA vigente a la fecha de pago: `UMA_DIAS` → `factor × UMA_DIARIA`; `SM_DIAS` → `factor × salario mínimo de la empresa`; `PORCENTAJE` → `factor × importe_total`; `NINGUNA` → tope cero.
+
+  **`factor_exencion` con `PORCENTAJE` está en escala 0–100, no como fracción.** Lo definió la tarea 3 porque nada en el proyecto lo fijaba; está documentado en el YAML y en `config/fiscal/README.md`. Usar la fracción daría exenciones cien veces menores.
+
+**Tres límites del modelo de configuración que B-03 tiene que respetar, y que el esquema no puede expresar por sí solo.** Salieron de la tarea 3, al derivar las marcas contra el texto oficial de la LISR. Ignorarlos hace que el informe **exente de más**, que es el error más caro que puede cometer:
+
+1. **El tope conjunto de previsión social.** El penúltimo párrafo del art. 93 limita la **suma** de las exenciones de previsión social a 1 UMA anual por trabajador y por año — no es un factor por tipo. Los seis tipos afectados llevan `PORCENTAJE 100` (la exención en bruto), así que **B-03 debe aplicar el tope conjunto aparte**, sobre el acumulado anual del trabajador, o exentará de más. Los seis vienen marcados en el YAML; léelos de la configuración, no los codifiques.
+2. **Factores cuyo multiplicador no viene en el CFDI:** "90 UMA por año de servicio" (separación), "15 UMA diarias", "1 UMA por domingo". El CFDI no trae los años de servicio ni el número de domingos. Cuando el multiplicador no sea derivable, **la columna del tope sale vacía con su bandera**, igual que cuando falta la UMA — nunca un tope calculado con un multiplicador supuesto.
+3. **Las vacaciones no tienen tipo de percepción propio** en `c_TipoPercepcion`: se pagan dentro del `001`. Así que ninguna marca de este catálogo las identifica, y todo lo que dependa de distinguirlas tiene que salir de `map_concepto_provision`, por organización.
 - **B-03.R2 — acumulación anual de topes.** Varias exenciones son **anuales, no por periodo** (el aguinaldo es el caso típico). El tope se evalúa contra el **acumulado del ejercicio** del mismo empleado y tipo, no contra el importe del periodo aislado. Bandera `EXENCION_EXCEDIDA` cuando el exento acumulado supera el tope anual. **Esta regla es la que hace el informe útil:** periodo por periodo casi nunca se excede, así que evaluarlo aislado no detectaría nada.
 - **B-03.R3 — exención indebida.** Un tipo con `base_exencion = NINGUNA` e `importe_exento > 0` genera `EXENCION_INDEBIDA`. Hallazgo de auditoría directo.
 
