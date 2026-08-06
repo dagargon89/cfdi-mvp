@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b04_matriz_empleado_periodo as b04
+from app.models.enums import EstatusCfdi
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
 
@@ -178,3 +179,42 @@ async def test_curp_sensible_y_sin_comprobantes(db: AsyncSession) -> None:
     resultado = await b04.consultar(db, eid, _p())
     por_titulo = {c.titulo: c for c in resultado.columnas}
     assert por_titulo["CURP"].sensible is True
+
+
+async def test_celda_llena_por_un_cancelado_lleva_bandera(db: AsyncSession) -> None:
+    """**Hallazgo Important de la revisión final.** El §11 del diseño acepta la divergencia de R-T1
+    con una condición explícita: "todo comprobante incluido que no sea vigente lleva bandera". Este
+    informe no llamaba a `universo_nomina.banderas_de_estatus` y no tiene columna de estatus en
+    `Datos` (a diferencia de B-01/B-02, que traen "Estado SAT"), así que una celda de la matriz
+    llena por un CFDI cancelado ante el SAT decía "esa quincena está cubierta" sin ninguna marca:
+    no había forma de saberlo."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="cccccccc-cccc-cccc-cccc-ccccccccccc1",
+                          fecha_pago=date(2026, 6, 30), fecha_inicial_pago=date(2026, 6, 16),
+                          fecha_final_pago=date(2026, 6, 30), estatus=EstatusCfdi.CANCELADO, total="8000.00")
+
+    resultado = await b04.consultar(db, eid, _p(incluir_cancelados=True))
+    titulos = [c.titulo for c in resultado.columnas]
+    # La celda SÍ se llena (el parámetro lo pidió); lo que faltaba era el aviso.
+    assert resultado.filas[0][titulos.index("2026-06 Q2")] == Decimal("8000.00")
+    bandera = next(b for b in resultado.banderas if b.clave == "COMPROBANTE_CANCELADO")
+    assert bandera.ambito == "uuid:cccccccc-cccc-cccc-cccc-ccccccccccc1"
+    assert bandera.severidad == "alta"
+
+
+async def test_no_verificado_lleva_bandera_y_el_vigente_no(db: AsyncSession) -> None:
+    """La verificación contra el SAT es asíncrona por diseño, así que `no_verificado` es el estado
+    **normal** de un rango recién descargado: sin bandera, la matriz no distingue una quincena
+    confirmada de una que el SAT todavía no ha respondido."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="cccccccc-cccc-cccc-cccc-ccccccccccc2",
+                          fecha_pago=date(2026, 6, 30), fecha_inicial_pago=date(2026, 6, 16),
+                          fecha_final_pago=date(2026, 6, 30), estatus=EstatusCfdi.NO_VERIFICADO)
+    await insertar_nomina(db, empresa_id=eid, uuid="cccccccc-cccc-cccc-cccc-ccccccccccc3",
+                          rfc_receptor="XEXX010101000",
+                          fecha_pago=date(2026, 6, 30), fecha_inicial_pago=date(2026, 6, 16),
+                          fecha_final_pago=date(2026, 6, 30), estatus=EstatusCfdi.VIGENTE)
+
+    resultado = await b04.consultar(db, eid, _p())
+    ambitos = {b.ambito for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO"}
+    assert ambitos == {"uuid:cccccccc-cccc-cccc-cccc-ccccccccccc2"}

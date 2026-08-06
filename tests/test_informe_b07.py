@@ -7,12 +7,16 @@ detuvo sin liquidarse.
 
 from __future__ import annotations
 
-from datetime import date
+import io
+from datetime import date, datetime
 from decimal import Decimal
 
+import openpyxl
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.informes import b07_prestamos as b07
+from app.informes import b07_prestamos as b07, excel
+from app.informes.base import ContextoInforme
+from app.models.enums import EstatusCfdi
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
 
@@ -143,3 +147,96 @@ async def test_sin_descuentos_devuelve_aviso(db: AsyncSession) -> None:
     eid = await _empresa(db)
     resultado = await b07.consultar(db, eid, _p())
     assert resultado.filas == [] and resultado.aviso is not None
+
+
+async def test_no_declara_el_parametro_de_enmascaramiento(db: AsyncSession) -> None:
+    """**Hallazgo Important de la revisión final.** B-07 declaraba `enmascarar_datos_personales`
+    con la descripción "Sin efecto en este informe" y no tiene ninguna columna sensible. No era
+    cosmético: `app.api.v1.informes.generar_endpoint` gatea por el **parámetro**, no por si hay algo
+    que enmascarar, así que desmarcar esa casilla devolvía `403` a un usuario `CONSULTA` y, a un
+    `OPERADOR`, escribía en bitácora un registro de divulgación de datos personales que nunca
+    ocurrió. Un asiento de auditoría falso es peor que una casilla inútil.
+
+    Se comprueba también que ninguna columna sea sensible: es la premisa de la que depende que
+    quitar el parámetro sea seguro."""
+    assert "enmascarar_datos_personales" not in b07.Parametros.model_fields
+    assert "enmascarar_datos_personales" not in b07.Parametros.model_json_schema()["properties"]
+
+    eid = await _empresa(db)
+    await _quincenas(db, eid, ["500.00"])
+    resultado = await b07.consultar(db, eid, _p())
+    assert [c.titulo for c in resultado.columnas if c.sensible] == []
+
+
+async def test_el_motor_escribe_el_libro_sin_el_parametro(db: AsyncSession) -> None:
+    """El motor lee `ctx.parametros.get("enmascarar_datos_personales", True)` —falla cerrado—, así
+    que su ausencia no puede romper la escritura del libro ni cambiar nada: no hay columna sensible
+    que enmascarar. Comprobado, no supuesto."""
+    eid = await _empresa(db)
+    await _quincenas(db, eid, ["500.00", "500.00"])
+    p = _p(tipos_deduccion=["009"])
+    resultado = await b07.consultar(db, eid, p)
+    assert resultado.filas
+
+    ctx = ContextoInforme(
+        clave=b07.CLAVE,
+        nombre=b07.NOMBRE,
+        usuario="consulta@test.mx",
+        generado_en=datetime(2026, 8, 6, 12, 0),
+        parametros=p.model_dump(mode="json"),
+        etl_version=1,
+    )
+    assert "enmascarar_datos_personales" not in ctx.parametros
+    libro = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))
+    assert set(libro.sheetnames) == {"Datos", "Parámetros", "Banderas", "Diccionario"}
+    # El RFC del empleado sale completo, como debe: no es una columna sensible en este informe.
+    assert libro["Datos"].cell(row=2, column=1).value == "XAXX010101000"
+
+
+async def test_un_cfdi_cancelado_no_tapa_un_hueco_sin_avisar(db: AsyncSession) -> None:
+    """**Hallazgo Important de la revisión final.** Este informe no llamaba a
+    `universo_nomina.banderas_de_estatus` y no tiene columna de estatus, así que un CFDI que el SAT
+    ya no reconoce podía **tapar** un hueco de la serie: la continuidad salía `CONTINUO`,
+    `DESCUENTO_INTERRUMPIDO` no se disparaba y el préstamo se veía al día. El §11 del diseño exige
+    que todo comprobante incluido que no sea vigente lleve bandera."""
+    eid = await _empresa(db)
+    cortes = [date(2026, 1, 15), date(2026, 1, 31), date(2026, 2, 15)]
+    for indice, (corte, estatus) in enumerate(zip(cortes, (EstatusCfdi.VIGENTE, EstatusCfdi.CANCELADO, EstatusCfdi.VIGENTE))):
+        await insertar_nomina(db, empresa_id=eid, uuid=f"dddddddd-dddd-dddd-dddd-dddddddddd0{indice}",
+                              fecha_pago=corte, fecha_final_pago=corte, periodicidad="04",
+                              estatus=estatus,
+                              deducciones=[("009", "016", "Prestamo infonavit", "500.00")])
+
+    resultado = await b07.consultar(db, eid, _p(tipos_deduccion=["009"], incluir_cancelados=True))
+    assert _fila(resultado, "Núm. de descuentos") == 3  # el cancelado tapa el hueco
+    bandera = next(b for b in resultado.banderas if b.clave == "COMPROBANTE_CANCELADO")
+    assert bandera.ambito == "uuid:dddddddd-dddd-dddd-dddd-dddddddddd01"
+    assert bandera.severidad == "alta"
+
+
+async def test_no_verificado_lleva_bandera_media(db: AsyncSession) -> None:
+    """`no_verificado` es el estado normal de un rango recién descargado (la verificación contra el
+    SAT es asíncrona por diseño), así que es la rama que de verdad se ve en producción."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="dddddddd-dddd-dddd-dddd-ddddddddddd9",
+                          fecha_pago=date(2026, 1, 15), fecha_final_pago=date(2026, 1, 15),
+                          periodicidad="04", estatus=EstatusCfdi.NO_VERIFICADO,
+                          deducciones=[("009", "016", "Prestamo infonavit", "500.00")])
+
+    resultado = await b07.consultar(db, eid, _p(tipos_deduccion=["009"]))
+    bandera = next(b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO")
+    assert bandera.severidad == "media"
+
+
+async def test_nombre_empleado_es_del_trabajador(db: AsyncSession) -> None:
+    """La columna sale de `comprobante_detalle.nombre_receptor`. Hasta la revisión final el helper
+    de pruebas nunca insertaba esa fila, así que `detalle` era `None` y la columna siempre salía
+    vacía: nada distinguía el campo correcto del equivocado (ver B-01/B-02)."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="dddddddd-dddd-dddd-dddd-dddddddddda1",
+                          fecha_pago=date(2026, 1, 15), fecha_final_pago=date(2026, 1, 15),
+                          periodicidad="04", nombre_receptor="JUANA INVENTADA DE PRUEBA",
+                          deducciones=[("009", "016", "Prestamo infonavit", "500.00")])
+
+    resultado = await b07.consultar(db, eid, _p(tipos_deduccion=["009"]))
+    assert _fila(resultado, "Nombre empleado") == "JUANA INVENTADA DE PRUEBA"

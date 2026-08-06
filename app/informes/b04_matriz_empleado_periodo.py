@@ -66,6 +66,17 @@ lados: solo se marca un índice vacío que quede **entre** el primer y el últim
 dato del empleado (`range(min(indices_con_dato) + 1, max(indices_con_dato))`), nunca antes
 del primero ni después del último.
 
+**Las etiquetas de periodo de este informe NO son las de B-07, y no deben cruzarse.** B-04
+asigna cada CFDI a su celda por `fecha_final_pago` (B-04.R1: el fin del periodo devengado es lo
+que define "esa quincena tuvo nómina"); B-07 asigna por `fecha_pago`, porque para la continuidad
+de un préstamo lo que importa es en qué periodo **apareció** el descuento. Cada elección es la
+correcta para su propósito y ninguna se cambia, pero con el patrón real de esta empresa —timbrado
+y pago desfasados: la nómina del 30 de junio se paga/timbra a inicios de julio— **las etiquetas no
+coinciden**: un `PERIODO_FALTANTE` que aquí sale en `2026-06 Q2` se lee como hueco de
+`2026-07 Q1` en B-07 (y el docstring de B-07 habla de comparar contra "la secuencia teórica de
+B-04"). Al cruzar los dos informes hay que traducir la etiqueta, no suponer que hablan de la misma
+quincena.
+
 **Sin `round()` ni `quantize()`** (el redondeo lo hace `app.informes.excel` al escribir la
 celda, R-T4). `Decimal` de punta a punta; para la desviación estándar, `Decimal.sqrt()`.
 """
@@ -145,10 +156,12 @@ class _ParametrosUniverso:
     tipo_nomina: Literal["O", "E", "AMBOS"] = "AMBOS"
 
 
-# Columnas de identidad del empleado. Sin "Nombre empleado": a diferencia de B-01/B-02, que
-# lo toman (de forma discutible) de `comprobante.razon_social_emisor` por no haber un campo
-# real de razón social del receptor en el modelo, aquí se prefiere no repetir ese mismo dato
-# equivocado con una etiqueta que promete ser el nombre del empleado y no lo es.
+# Columnas de identidad del empleado. Sin "Nombre empleado": la ficha de B-04 no la pide y la
+# matriz se identifica por RFC. Cuando este módulo se escribió, B-01/B-02 llenaban esa columna con
+# `comprobante.razon_social_emisor` (el nombre del PATRÓN) y omitirla era además la forma de no
+# repetir un dato equivocado; la revisión final de la fase 2 corrigió esos dos informes para que
+# usen `comprobante_detalle.nombre_receptor`, así que hoy la omisión aquí es solo de alcance: si
+# alguna vez se agrega, el campo correcto ya existe y es el que usan los otros cinco informes.
 _COLUMNAS_IDENTIDAD: tuple[tuple[str, str, bool], ...] = (
     ("RFC empleado", "texto", False),
     ("Núm. empleado", "texto", False),
@@ -276,8 +289,16 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # sobrescribir en el orden de iteración deja la más reciente).
     identidad: dict[str, tuple[str | None, str | None, str | None, str | None, str | None]] = {}
 
-    for comprobante, nomina, receptor, totales, _detalle in filas_universo:
+    for comprobante, nomina, receptor, totales, detalle in filas_universo:
         rfc = comprobante.rfc_receptor
+        # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR`: la
+        # condición con la que el §11 del diseño acepta la divergencia de R-T1 ("todo comprobante
+        # incluido que no sea vigente lleva bandera"). Este informe no la cumplía y no tiene
+        # columna de estatus en `Datos` (a diferencia de B-01/B-02, que sí traen "Estado SAT"), así
+        # que una celda de la matriz llena por un CFDI cancelado ante el SAT decía "esa quincena
+        # está cubierta" sin ninguna marca — y como la verificación contra el SAT es asíncrona por
+        # diseño, `no_verificado` es el estado normal de un rango recién descargado.
+        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
         identidad[rfc] = (
             receptor.num_empleado if receptor else None,
             receptor.curp if receptor else None,

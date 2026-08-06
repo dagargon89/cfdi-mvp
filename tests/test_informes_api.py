@@ -129,6 +129,46 @@ async def test_sin_enmascarar_exige_operador_y_deja_bitacora(client, db: AsyncSe
     assert registros[-1].detalle["enmascarar_datos_personales"] is False
 
 
+async def test_b07_no_gatea_ni_deja_bitacora_falsa(client, db: AsyncSession, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """**Hallazgo Important de la revisión final.** El endpoint gatea por el **parámetro**, no por
+    si el informe tiene algo que enmascarar. B-07 declaraba `enmascarar_datos_personales` con la
+    nota "Sin efecto en este informe" y ninguna columna sensible, así que desmarcar esa casilla
+    devolvía `403` a un usuario `CONSULTA` y, a un `OPERADOR`, escribía en bitácora un registro de
+    divulgación de datos personales **que nunca ocurrió**. Un asiento de auditoría falso es peor que
+    una casilla inútil, así que el parámetro se quitó de B-07.
+
+    Se comprueba lo que importa de punta a punta: (1) el catálogo ya no lo publica, así que el
+    frontend no puede pintar la casilla; (2) un `CONSULTA` genera el informe con `202`; (3) no queda
+    ningún registro de divulgación en bitácora."""
+    from sqlalchemy import select
+
+    from app.models.bitacora import Bitacora
+    from app.worker import tasks
+
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    consulta = await factories.crear_usuario(db, uid="con", correo="con@test.mx", rol_global=RolGlobal.CONSULTA)
+    await factories.asignar_permiso(db, consulta, empresa, RolEmpresa.CONSULTA)
+
+    class _Tarea:
+        id = "t"
+
+    monkeypatch.setattr(tasks.generar_informe, "delay", lambda *a, **k: _Tarea())
+
+    r = await client.get("/v1/informes", headers={"Authorization": "Bearer con"})
+    b07 = {i["clave"]: i for i in r.json()}["B-07"]
+    assert "enmascarar_datos_personales" not in b07["parametros"]["properties"]
+
+    r = await client.post(
+        f"/v1/empresas/{empresa.empresa_id}/informes/B-07",
+        json={"fecha_desde": "2026-06-01", "fecha_hasta": "2026-07-31"},
+        headers={"Authorization": "Bearer con"},
+    )
+    assert r.status_code == 202, r.text
+
+    registros = list((await db.execute(select(Bitacora).where(Bitacora.accion == "generar_informe"))).scalars().all())
+    assert registros == [], "B-07 no divulga datos personales: no puede dejar un asiento que diga que sí"
+
+
 async def test_tarea_genera_libro_y_normaliza_lo_pendiente(db: AsyncSession) -> None:
     """Pre-vuelo: el comprobante existe en `comprobantes` pero nunca se normalizó. La
     tarea lo normaliza antes de consultar, así que el informe NO sale vacío."""

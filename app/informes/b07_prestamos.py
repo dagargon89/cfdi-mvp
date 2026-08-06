@@ -32,6 +32,15 @@ lo que importa para la continuidad es si el descuento **apareció** en ese perio
 timbrado cayó justo el día de corte. Por eso este módulo no reimplementa nada de
 `periodos.py`, solo lo consume.
 
+**Consecuencia que hay que tener presente al cruzar este informe con B-04: las etiquetas de
+periodo NO coinciden.** Este informe habla de "la secuencia teórica de B-04" y usa el mismo
+módulo `periodos` con la misma periodicidad dominante, pero **ubica el mismo CFDI en otro
+periodo**, porque B-04 asigna por `fecha_final_pago` y este por `fecha_pago`. Con el patrón real
+de esta empresa (pago y timbrado desfasados del cierre del periodo devengado), un hueco que B-04
+reporta como `PERIODO_FALTANTE` en `2026-06 Q2` aparece aquí como hueco de `2026-07 Q1`. Las dos
+elecciones son correctas para su propósito y ninguna se cambia; lo que no se puede hacer es leer
+las dos etiquetas como si fueran la misma quincena.
+
 **Si no se puede construir el eje** (ninguna `periodicidad_pago` reconocida en el universo),
 la columna `Continuidad` queda en `None` para todas las filas y se emite una sola bandera de
 informe, `CONTINUIDAD_INDETERMINADA` — no se inventa una clasificación sin base teórica. El
@@ -59,11 +68,22 @@ irregulares (por incapacidades, ajustes) haría cualquier estimación así una f
 apariencia de dato duro. Por eso tampoco se declara un parámetro para capturar el monto
 original: sería un control sin efecto, ya que ningún cálculo de este módulo lo usaría.
 
-**Sin columna sensible, verificado.** La ficha de este informe solo pide RFC, nombre y
-número de empleado — a diferencia de B-01/B-02/B-04/B-05, que sí reportan CURP y/o NSS. Este
-módulo no las trae ni las declara, así que ninguna `Columna` de `_COLUMNAS` lleva
+**Sin columna sensible, y sin parámetro de enmascaramiento.** La ficha de este informe solo pide
+RFC, nombre y número de empleado — a diferencia de B-01/B-02/B-04/B-05, que sí reportan CURP y/o
+NSS. Este módulo no las trae ni las declara, así que ninguna `Columna` de `_COLUMNAS` lleva
 `sensible=True`. No es un descuido: es la ausencia de datos personales que la propia ficha
-dicta para este informe.
+dicta para este informe. **Alcance declarado: B-07 no reporta datos personales enmascarables.**
+
+Por eso `enmascarar_datos_personales` **no** se declara en `Parametros` (corrección de la revisión
+final; antes se declaraba con la descripción "Sin efecto en este informe"). No era cosmético: el
+endpoint (`app.api.v1.informes.generar_endpoint`) gatea por el **parámetro**, no por si hay algo
+que enmascarar, así que desmarcar esa casilla en B-07 devolvía `403` a un usuario `CONSULTA` y, a
+un `OPERADOR`, **escribía en bitácora un registro de divulgación de datos personales que nunca
+ocurrió**. Un asiento de auditoría falso es peor que una casilla inútil. Sin el parámetro, el
+endpoint lee el default con `getattr(..., True)` y no gatea nada, y el motor usa
+`ctx.parametros.get("enmascarar_datos_personales", True)` —falla cerrado— sin que su ausencia
+cambie nada, porque no hay columna sensible que enmascarar. Mismo criterio con el que el plan no
+declaró el parámetro `formato` en B-10: un control que no puede tener efecto no se declara.
 
 **Cero N+1 (regla 11).** El universo se obtiene de `app.informes.universo_nomina.universo()`
 (una sola consulta) y las deducciones del rango con una segunda consulta agregada
@@ -123,14 +143,9 @@ class Parametros(BaseModel):
         None, description="Claves de `c_TipoDeduccion` a incluir (p. ej. `009` Infonavit); `None` incluye todas."
     )
     incluir_cancelados: bool = Field(False, description="Por defecto solo vigentes (R-T1).")
-    enmascarar_datos_personales: bool = Field(
-        True,
-        description=(
-            "Sin efecto en este informe: la ficha de B-07 no pide CURP ni NSS, así que no hay "
-            "ninguna columna que este informe marque `sensible=True` (ver docstring del módulo). "
-            "Se conserva el parámetro por consistencia con el resto del grupo B."
-        ),
-    )
+    # `enmascarar_datos_personales` NO se declara aquí: ver "Sin columna sensible, y sin parámetro
+    # de enmascaramiento" en el docstring del módulo. Mismo criterio con el que el plan omitió el
+    # parámetro `formato` en B-10: un control que no puede tener efecto no se declara.
 
 
 @dataclass(slots=True)
@@ -265,6 +280,16 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     importes_por_concepto = await _deducciones_por_comprobante(db, ids, p.tipos_deduccion)
 
     banderas: list[Bandera] = list(banderas_fuera)
+
+    # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR`: la condición
+    # con la que el §11 del diseño acepta la divergencia de R-T1 ("todo comprobante incluido que no
+    # sea vigente lleva bandera"). Este informe no la cumplía y no tiene columna de estatus, así que
+    # un hueco de continuidad podía quedar **tapado** por un CFDI que el SAT ya no reconoce:
+    # `DESCUENTO_INTERRUMPIDO` no se disparaba y el préstamo se veía al día. Va en su propio recorrido
+    # y antes del retorno por "sin descuentos": el estatus del comprobante no depende de que haya
+    # deducciones que reportar.
+    for comprobante, _nomina, _receptor, _totales, detalle in filas_universo:
+        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
 
     if not importes_por_concepto:
         return ResultadoInforme(
