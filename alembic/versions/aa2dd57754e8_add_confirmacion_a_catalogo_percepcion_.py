@@ -2,7 +2,7 @@
 
 Extiende el invariante "un valor sin confirmar no calcula" a las marcas del §3.1:
 `factor_exencion` alimenta el cálculo de exenciones igual que la UMA, los factores del
-art. 93 de la LISR también cambian por reforma, y son ~46 derivaciones hechas a mano —el
+art. 93 de la LISR también cambian por reforma, y son 44 derivaciones hechas a mano —el
 dato más propenso a error de la fase—, así que no pueden aplicarse solas mientras la UMA,
 verificable contra un único boletín, sí exige un clic. Las columnas nacen nulas: las
 marcas ya cargadas quedan como propuestas y hay que confirmarlas, que es el estado

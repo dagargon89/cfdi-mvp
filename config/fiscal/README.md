@@ -14,7 +14,7 @@ por valor, si la semilla dice la verdad. Lo que sigue está ordenado para esa se
 
 | Archivo | ¿Se aplica al cargarlo? |
 |---|---|
-| `tabla_vacaciones.yaml` | **Sí, en cuanto se carga.** Es la transcripción de un artículo con dos columnas de enteros; su error de captura lo atrapa la prueba de monotonía, no una revisión renglón por renglón. |
+| `tabla_vacaciones.yaml` | **Sí, en cuanto se carga.** Es la transcripción de un artículo con dos columnas de enteros; su error de captura lo atrapa `test_la_tabla_de_vacaciones_reproduce_la_progresion_del_articulo_76`, que reconstruye la progresión desde el texto del artículo. **Esa red cubre el archivo del repo, no la fila de la base:** no protege contra editar el YAML en el servidor ni contra un `UPDATE` a mano. |
 | `param_fiscal.yaml` | **No.** Cada valor queda pendiente de confirmación. `valor_vigente()` devuelve `None` hasta que alguien lo confirme. |
 | `catalogo_percepcion.yaml` | **No.** Igual que arriba, y por una razón más fuerte: son 44 derivaciones a mano del art. 93 de la LISR. `marcas_de_percepcion()` solo devuelve las confirmadas. |
 | `empresa*.yaml` (de la plantilla) | **Sí, en cuanto se carga.** Es configuración operativa de cada organización, no una cifra de la ley. |
@@ -79,15 +79,24 @@ Cada cifra se revisa abriendo la liga y comparándola. Nada más.
 | Clave | Valor | Vigencia desde | Fuente |
 |---|---|---|---|
 | `UMA_DIARIA` | 117.31 | 2026-02-01 | INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf |
-| `UMA_MENSUAL` | 3 566.22 | 2026-02-01 | idem (= 117.31 × 30.4) |
+| `UMA_MENSUAL` | 3 566.22 | 2026-02-01 | idem (117.31 × 30.4, redondeado a centavos) |
 | `UMA_ANUAL` | 42 794.64 | 2026-02-01 | idem (= 3 566.22 × 12) |
 | `SALARIO_MINIMO_GENERAL` | 315.04 | 2026-01-01 | DOF 09-12-2025, resolución del CONASAMI — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025 |
 | `SALARIO_MINIMO_ZLFN` | 440.87 | 2026-01-01 | idem |
 
-**Dos comprobaciones que se pueden hacer sin abrir nada:** las tres UMA cumplen la relación
-oficial (diaria × 30.4 = mensual; mensual × 12 = anual), así que un dedazo en una de las tres
-se detecta multiplicando. Y las fechas de vigencia **no coinciden a propósito**: la UMA cambia
-el 1 de febrero y el salario mínimo el 1 de enero.
+**Dos comprobaciones que se pueden hacer sin abrir nada.** La primera es la relación entre las
+tres UMA, **con su redondeo**, que es donde está el detalle:
+
+- `117.31 × 30.4 = 3 566.224`, que **redondeado a centavos** da la UMA mensual, `3 566.22`;
+- `3 566.22 × 12 = 42 794.64`, y esto sí es exacto.
+
+No se cumple encadenando sin redondear: `117.31 × 30.4 × 12 = 42 794.688`, que no es el valor
+anual. El redondeo ocurre en el paso mensual, y así lo publica el INEGI. Con eso presente, un
+dedazo en cualquiera de las tres cifras se detecta multiplicando.
+
+La segunda: las fechas de vigencia **no coinciden a propósito**. La UMA cambia el 1 de
+febrero y el salario mínimo el 1 de enero; ver dos fechas distintas en esta tabla es lo
+correcto, no un error de captura.
 
 **Por qué se siembran las dos zonas salariales.** Cuál aplica es política de cada organización
 (`configuracion_empresa.zona_salarial`) y el servicio se niega a adivinarla. Ciudad Juárez
@@ -162,20 +171,32 @@ De 44 tipos, **39 llevan una duda declarada** y solo 5 no (`001`, `002`, `003`, 
 Es un número alto a propósito: el modelo de marcas es un booleano y un factor por tipo, y
 buena parte del art. 93 no cabe ahí. **Es mejor una duda declarada que un factor inventado.**
 
-#### A. Decisiones de régimen — empezar por aquí (4 tipos)
+#### A. Decisiones de régimen — empezar por aquí (1 tipo)
 
 Cambian si el ingreso entra o no a la base ordinaria del ISR, que es el efecto más grande de
-todo el archivo. **En los cuatro sembré la opción conservadora (ingreso ordinario, gravado) y
-en los cuatro creo que la respuesta correcta es la contraria**; no la cambié por mi cuenta
-porque la lista verificada del plan son exactamente cinco tipos y ninguno de estos está en
-ella. Ampliarla es una decisión fiscal.
+todo el archivo. Queda **uno solo**, y es el único donde hay ambigüedad real:
 
-| Tipo | Nombre | Duda | Mi recomendación |
+| Tipo | Nombre | Duda | Cómo está sembrado |
 |---|---|---|---|
-| `024` | Seguro de retiro | El art. 95 agrupa "primas de antigüedad, **retiro** e indemnizaciones"; el art. 93-XIII exenta lo obtenido con cargo a la subcuenta del seguro de retiro | `es_ingreso_ordinario: false` + `UMA_DIAS 90`, como el 022/023/025 |
-| `051` | Gratificaciones y otros a extrabajadores por jubilación en parcialidades | Por el nombre es un pago derivado de jubilación en parcialidades | seguir al `044`: `false` + `UMA_DIAS 15` |
-| `052` | Jubilación en parcialidades por resolución judicial o laudo | idem | seguir al `044` |
-| `053` | Jubilación en una sola exhibición por resolución judicial o laudo | idem, pero en una sola exhibición | seguir al `039`: `false` + `UMA_DIAS 90` |
+| `024` | Seguro de retiro | El art. 95 agrupa "primas de antigüedad, **retiro** e indemnizaciones" y el art. 93-XIII exenta lo obtenido **con cargo a la subcuenta** del seguro de retiro — pero este tipo suele registrar la *aportación patronal*, que es otra cosa, y el CFDI no las separa | ingreso ordinario, sin exención. Si en la organización se usa para pagos de retiro por separación, va `es_ingreso_ordinario: false` + `UMA_DIAS 90` |
+
+> **Corregido en la ronda 1: `051`, `052` y `053`.** La primera versión de esta semilla los
+> dejó como ingreso ordinario gravado "por prudencia", razonando que la lista verificada del
+> plan eran cinco tipos y estos no estaban en ella. Eso confundía una lista de **verificación**
+> (se comprobó que esos cinco están bien) con una lista **exhaustiva**. El catálogo del SAT no
+> es ambiguo con estos tres: dice literalmente "derivados de jubilación en parcialidades",
+> "obtengan una jubilación en parcialidades" y "una jubilación en una sola exhibición". Son
+> pagos de jubilación, les alcanza el mismo régimen que al `044` y al `039`, y dejarlos
+> gravados no era conservador: era la marca equivocada. Ahora están así:
+>
+> | Tipo | Régimen | Base |
+> |---|---|---|
+> | `051` | no ordinario, `UMA_DIAS 15` | art. 93-IV (parcialidades), como el `044` |
+> | `052` | no ordinario, `UMA_DIAS 15` | art. 93-IV (parcialidades), como el `044` |
+> | `053` | no ordinario, `UMA_DIAS 90` | art. 93-XIII vía art. 96-Bis (una sola exhibición), como el `039` |
+>
+> Siguen marcados `REVISAR`, pero ahora por la duda del **grupo C** (el factor es por año o
+> por día, no del periodo), no por su régimen.
 
 #### B. Sin base sólida en el art. 93 → sembrados GRAVADOS (8 tipos)
 
@@ -194,7 +215,7 @@ conjunto del grupo D.
 | `045` | Ingresos en acciones o títulos valor | `NINGUNA` es correcto (no hay exención), pero el art. 94-VII le da a las opciones sobre acciones una base y un momento de acumulación propios que este modelo no expresa |
 | `048` | Habitación | Podría estar **exento** por el art. 93-X ("casas habitación proporcionadas a los trabajadores… cuando se reúnan los requisitos de deducibilidad"); no pude verificar los requisitos |
 
-#### C. Factores que la ley NO expresa por periodo de pago (6 tipos)
+#### C. Factores que la ley NO expresa por periodo de pago (9 tipos)
 
 El número capturado es el de la ley, pero el multiplicador no viene en el CFDI de nómina.
 **Quien calcule la exención tiene que conseguirlo aparte, o el resultado será varias veces
@@ -208,6 +229,8 @@ menor que el legal.**
 | `025` Indemnizaciones | `UMA_DIAS 90` | idem |
 | `039` Jubilación en una sola exhibición | `UMA_DIAS 90` | 90 UMA **por año de contribución** (art. 93-XIII, al que remite el art. 96-Bis-IV) |
 | `044` Jubilación en parcialidades | `UMA_DIAS 15` | tope **diario** de 15 UMA (art. 93-IV). En una nómina quincenal el tope real son 15 UMA × 15 días. Además el art. 93-V obliga a considerar *todas* las pensiones del trabajador, las pague quien las pague — dato que el Hub no tiene |
+| `051` y `052` Jubilación en parcialidades a extrabajadores | `UMA_DIAS 15` | idem `044` |
+| `053` Jubilación en una sola exhibición a extrabajadores | `UMA_DIAS 90` | idem `039` |
 
 #### D. Exención sujeta al TOPE CONJUNTO de previsión social (6 tipos)
 
@@ -220,10 +243,22 @@ aparte**, o se exentará de más.
 `015` Becas · `029` Vales de despensa · `030` Vales de restaurante · `034` Ayuda para
 artículos escolares · `035` Ayuda para anteojos · `037` Ayuda para gastos de funeral
 
+**Estos seis, y solo estos, llevan `sujeto_a_tope_conjunto: true` en el YAML y una columna
+del mismo nombre en la base.** Es la ronda 1 de arreglos: antes la distinción vivía solo en
+los comentarios del YAML, y los comentarios no se cargan — un informe no tenía forma de
+distinguir estos seis de los otros diez tipos con base `PORCENTAJE`, y la única salida habría
+sido llevar la lista escrita en el código, que es una lista fiscal codificada en el programa
+(lo que prohíbe el §2.12). **Al revisar, revisa el campo, no solo esta lista.**
+
 > El mismo párrafo **exceptúa** del tope a: jubilaciones, pensiones y haberes de retiro,
 > indemnizaciones por riesgos de trabajo o enfermedades, reembolsos de gastos médicos y de
-> funeral, seguros de gastos médicos, seguros de vida y fondos de ahorro. Por eso `004`,
-> `005`, `006`, `011`, `012` y `026` **no** están en esta lista aunque sean previsión social.
+> funeral, seguros de gastos médicos, seguros de vida y **fondos de ahorro**. Por eso `004`,
+> `005`, `011`, `012` y `026` **no** están en esta lista aunque sean previsión social.
+>
+> **`006` Caja de ahorro es un caso aparte y merece su renglón de duda.** Se sembró como
+> exceptuado, igual que el `005`, porque es lo habitual — pero el texto dice "fondos de
+> ahorro" y **no menciona las cajas de ahorro**. Si la revisión decide atenerse a la letra,
+> hay que agregarle `sujeto_a_tope_conjunto: true`. Está anotado en su comentario del YAML.
 
 De estos, el que menos seguro me tiene es **`030` Vales de restaurante**: la fracción VIII no
 los nombra y su analogía con la despensa es discutible — la despensa sí tiene exclusión propia
@@ -237,8 +272,8 @@ Se sembró suponiendo que la condición se cumple, porque es el caso normal.
 |---|---|
 | `004` Reembolso de gastos médicos | "que se concedan de manera general" (art. 93-VI) |
 | `005` Fondo de ahorro | requisitos de deducibilidad del art. 27-XI LISR (generalidad, aportación pareja, tope del 13 %) |
-| `006` Caja de ahorro | idem; y si la caja es de los trabajadores, el reintegro del ahorro propio no es ingreso y no debería ir como percepción |
-| `011` Prima de seguro de vida | el art. 93 exenta lo que **la aseguradora paga**; que la **prima** pagada por el patrón no sea ingreso es criterio de previsión social |
+| `006` Caja de ahorro | idem; si la caja es de los trabajadores, el reintegro del ahorro propio no es ingreso y no debería ir como percepción; y el texto que exceptúa del tope conjunto dice "fondos de ahorro", no "cajas" (ver el recuadro del grupo D) |
+| `011` Prima de seguro de vida | dos dudas: (a) el art. 93 exenta lo que **la aseguradora paga**, y que la **prima** pagada por el patrón no sea ingreso es criterio de previsión social; (b) el `integra_sbc: false` **no tiene la cita que decía tener** — el art. 27-VIII LSS define "fines sociales" de forma cerrada ("fondos de algún plan de pensiones") y una prima de seguro de vida no lo es, así que la regla general del art. 27 apuntaría a `true` |
 | `012` Seguro de gastos médicos mayores | idem, más la condición de generalidad |
 | `014` Subsidios por incapacidad | si es por **riesgo de trabajo** está exceptuado del tope (art. 93-III); si es por enfermedad general es previsión social con tope (art. 93-VIII). El nodo de percepciones no lo dice |
 | `026` Reembolso por funeral | "de manera general, de acuerdo con las leyes o contratos de trabajo" (art. 93-VI) |
@@ -308,7 +343,7 @@ visible es mejor que un default plausible.
 | **Los valores 2025 de `param_fiscal`** | La UMA cambia el 1 de febrero: del **1 al 31 de enero de 2026** aplica todavía la UMA 2025. Hoy `valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None` y el informe reporta el hueco. Al capturarlos hay que **cerrar** el tramo 2025 con `vigencia_hasta: 2026-01-31`, o el cargador rechazará el solapamiento | dueño del repo, con el boletín INEGI 2025 y el DOF del salario mínimo 2025 |
 | **`TIPO_CAMBIO_USD`** | Cambia todos los días hábiles: no es una semilla. Lo llena la sincronización con el DOF. **No se sembró un valor "de ejemplo" a propósito**: un tipo de cambio viejo y confirmado es peor que la ausencia del dato | la sincronización automática |
 | **Confirmar los 5 valores de `param_fiscal`** | Sin confirmar no calculan | dueño del repo, desde la pantalla de configuración |
-| **Revisar y confirmar las 44 marcas**, empezando por los 4 del grupo A | Sin confirmar, B-05 reporta `FALTA_CATALOGO_DE_MARCAS` en vez de calcular | dueño del repo |
+| **Revisar y confirmar las 44 marcas**, empezando por el grupo A (`024`) y el grupo D (el tope conjunto) | Sin confirmar, B-05 reporta `FALTA_CATALOGO_DE_MARCAS` en vez de calcular | dueño del repo |
 | **Un `empresa-*.yaml` por organización** | Sin `zona_salarial` no hay validación de salario mínimo; sin `map_concepto_provision` no hay provisión de vacaciones en B-06 | quien administra cada organización |
 
 ---
@@ -327,3 +362,63 @@ exactamente lo que hace la persona que lee este documento—. Valida coherencia 
 - las tres semillas se cargan y **ninguna queda confirmada**.
 
 Un factor de exención mal capturado no lo atrapa ninguna prueba. Por eso existe este README.
+
+---
+
+## Apéndice · Las 44 marcas de un vistazo
+
+Generado desde `catalogo_percepcion.yaml`, para poder verificar un tipo sin abrir el YAML.
+Los nombres son los del catálogo `c_TipoPercepcion`. El detalle de **por qué** cada marca es
+lo que es, y la duda de cada tipo, están en el comentario del renglón correspondiente del
+YAML; aquí solo está el resultado.
+
+Lectura de las columnas: **Ord.** = `es_ingreso_ordinario` · **Factor** = `factor_exencion`
+(días con `UMA_DIAS`, porcentaje 0–100 con `PORCENTAJE`) · **Tope** =
+`sujeto_a_tope_conjunto` · **SBC** = `integra_sbc` · **Prov.** = `es_provisionable`.
+
+| Tipo | Nombre | Ord. | Base exención | Factor | Tope | SBC | Prov. | `REVISAR` |
+|---|---|---|---|---|---|---|---|---|
+| `001` | Sueldos, Salarios Rayas y Jornales | sí | NINGUNA | — | — | sí | — | — |
+| `002` | Gratificación Anual (Aguinaldo) | sí | UMA_DIAS | 30 | — | sí | sí | — |
+| `003` | Participación de los Trabajadores en las Ut… | sí | UMA_DIAS | 15 | — | — | — | — |
+| `004` | Reembolso de Gastos Médicos Dentales y Hosp… | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `005` | Fondo de Ahorro | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `006` | Caja de ahorro | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `009` | Contribuciones a Cargo del Trabajador Pagad… | sí | NINGUNA | — | — | sí | — | **sí** |
+| `010` | Premios por puntualidad | sí | NINGUNA | — | — | sí | — | **sí** |
+| `011` | Prima de Seguro de vida | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `012` | Seguro de Gastos Médicos Mayores | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `013` | Cuotas Sindicales Pagadas por el Patrón | sí | NINGUNA | — | — | — | — | **sí** |
+| `014` | Subsidios por incapacidad | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `015` | Becas para trabajadores y/o hijos | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `019` | Horas extra | sí | PORCENTAJE | 50 | — | — | — | **sí** |
+| `020` | Prima dominical | sí | UMA_DIAS | 1 | — | sí | — | **sí** |
+| `021` | Prima vacacional | sí | UMA_DIAS | 15 | — | sí | sí | — |
+| `022` | Prima por antigüedad | — | UMA_DIAS | 90 | — | — | — | **sí** |
+| `023` | Pagos por separación | — | UMA_DIAS | 90 | — | — | — | **sí** |
+| `024` | Seguro de retiro | sí | NINGUNA | — | — | — | — | **sí** |
+| `025` | Indemnizaciones | — | UMA_DIAS | 90 | — | — | — | **sí** |
+| `026` | Reembolso por funeral | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `027` | Cuotas de seguridad social pagadas por el p… | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `028` | Comisiones | sí | NINGUNA | — | — | sí | — | — |
+| `029` | Vales de despensa | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `030` | Vales de restaurante | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `031` | Vales de gasolina | sí | NINGUNA | — | — | sí | — | **sí** |
+| `032` | Vales de ropa | sí | NINGUNA | — | — | sí | — | **sí** |
+| `033` | Ayuda para renta | sí | NINGUNA | — | — | sí | — | **sí** |
+| `034` | Ayuda para artículos escolares | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `035` | Ayuda para anteojos | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `036` | Ayuda para transporte | sí | NINGUNA | — | — | sí | — | **sí** |
+| `037` | Ayuda para gastos de funeral | sí | PORCENTAJE | 100 | sí | — | — | **sí** |
+| `038` | Otros ingresos por salarios | sí | NINGUNA | — | — | sí | — | **sí** |
+| `039` | Jubilaciones, pensiones o haberes de retiro | — | UMA_DIAS | 90 | — | — | — | **sí** |
+| `044` | Jubilaciones, pensiones o haberes de retiro… | — | UMA_DIAS | 15 | — | — | — | **sí** |
+| `045` | Ingresos en acciones o títulos valor que re… | sí | NINGUNA | — | — | sí | — | **sí** |
+| `046` | Ingresos asimilados a salarios | sí | NINGUNA | — | — | — | — | **sí** |
+| `047` | Alimentación | sí | NINGUNA | — | — | sí | — | **sí** |
+| `048` | Habitación | sí | NINGUNA | — | — | sí | — | **sí** |
+| `049` | Premios por asistencia | sí | NINGUNA | — | — | sí | — | **sí** |
+| `050` | Viáticos | sí | PORCENTAJE | 100 | — | — | — | **sí** |
+| `051` | Pagos por gratificaciones, primas, compensa… | — | UMA_DIAS | 15 | — | — | — | **sí** |
+| `052` | Pagos que se realicen a extrabajadores que … | — | UMA_DIAS | 15 | — | — | — | **sí** |
+| `053` | Pagos que se realicen a extrabajadores que … | — | UMA_DIAS | 90 | — | — | — | **sí** |

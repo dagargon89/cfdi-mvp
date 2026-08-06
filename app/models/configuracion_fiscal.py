@@ -49,7 +49,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -97,9 +97,10 @@ class CatalogoPercepcionMarca(Base):
     Lleva confirmación como `param_fiscal`, y por la misma razón, solo que aquí pesa más:
     `factor_exencion` alimenta el cálculo de exenciones igual que la UMA, los factores del
     art. 93 de la LISR también cambian por reforma, y —a diferencia de la UMA, que se
-    verifica contra un único boletín oficial— son ~46 derivaciones hechas a mano, el dato
-    más propenso a error de toda la fase. Sin esta puerta, la UMA exigiría un clic y los 46
-    factores se aplicarían solos en cuanto alguien los cargara.
+    verifica contra un único boletín oficial— son 44 derivaciones hechas a mano (una por
+    cada tipo del catálogo `c_TipoPercepcion`), el dato más propenso a error de toda la
+    fase. Sin esta puerta, la UMA exigiría un clic y los 44 factores se aplicarían solos en
+    cuanto alguien los cargara.
     """
 
     __tablename__ = "catalogo_percepcion_marca"
@@ -110,9 +111,37 @@ class CatalogoPercepcionMarca(Base):
     es_ingreso_ordinario: Mapped[bool] = mapped_column(Boolean, nullable=False)
     base_exencion: Mapped[BaseExencion] = mapped_column(enum_column(BaseExencion), nullable=False)
     # NULL cuando `base_exencion` es NINGUNA: no hay tramo exento que calcular.
+    #
+    # UNIDAD DE `factor_exencion`, según `base_exencion` — leer antes de multiplicar:
+    #   UMA_DIAS / SM_DIAS  número de días (30 = treinta días de UMA).
+    #   PORCENTAJE          **porcentaje en escala 0-100**, NO una fracción: 100 significa
+    #                       exento total y 50 la mitad. `importe * factor / 100`.
+    # La distinción no es cosmética: tratar el 100 como fracción exenta cien veces de menos
+    # en los 16 tipos con base PORCENTAJE, y el error no rompe nada, solo produce un número
+    # incorrecto. La convención la fija la semilla (`config/fiscal/catalogo_percepcion.yaml`)
+    # y está explicada en `config/fiscal/README.md`.
     factor_exencion: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
     integra_sbc: Mapped[bool] = mapped_column(Boolean, nullable=False)
     es_provisionable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Si la exención de este tipo está sujeta al TOPE CONJUNTO de previsión social del
+    # penúltimo párrafo del art. 93 de la LISR: la suma de las exenciones de previsión
+    # social se limita a 1 UMA anual cuando el sueldo más la exención pasan de 7 UMA
+    # anuales. Es un tope por trabajador y por año sobre la SUMA de varios tipos, no un
+    # factor por tipo, así que `factor_exencion` no puede expresarlo y quien calcule tiene
+    # que aplicarlo aparte.
+    #
+    # Existe como columna, y no como una lista en el código de B-03, porque cuáles tipos
+    # caen bajo el tope es materia fiscal que cambia por reforma (§2.12: los valores
+    # fiscales viven en tablas y YAML, nunca en código). Sin esta columna los seis tipos
+    # sujetos al tope son indistinguibles de los otros diez con base PORCENTAJE en todo lo
+    # que llega a la base de datos.
+    #
+    # `default=False`: es el caso de la enorme mayoría de los tipos, y así el renglón del
+    # YAML solo lo declara donde aplica. Una marca sin exención (`NINGUNA`) no puede
+    # llevarlo — no hay exención que topar; el cargador lo rechaza.
+    sujeto_a_tope_conjunto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     # Mismo invariante que `param_fiscal`: sembrar propone, solo una persona activa.
     confirmado_por: Mapped[str | None] = mapped_column(String(128), nullable=True)
     confirmado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -152,13 +181,19 @@ class TablaVacaciones(Base):
 
     **No lleva confirmación**, a diferencia de `param_fiscal` y `catalogo_percepcion_marca`
     — decisión explícita, no olvido. Los otros dos exigen confirmación porque son valores
-    que cambian por decreto (la UMA, cada febrero) o derivaciones con criterio (los ~46
+    que cambian por decreto (la UMA, cada febrero) o derivaciones con criterio (los 44
     factores del art. 93). Esta tabla es la transcripción literal de un solo artículo, con
     dos columnas de enteros, estable desde la reforma de 2023 y verificable de un vistazo
-    contra la ley; un error de captura aquí lo atrapa la prueba de monotonía de la semilla,
-    no una revisión humana renglón por renglón. Poner una puerta de confirmación donde el
-    dato no puede sorprender solo enseña a la gente a confirmar sin mirar, y eso desgasta
-    la puerta donde sí importa.
+    contra la ley; un error de captura aquí lo atrapa
+    `test_la_tabla_de_vacaciones_reproduce_la_progresion_del_articulo_76`, que reconstruye
+    la progresión completa desde el texto del artículo, no una revisión humana renglón por
+    renglón. Poner una puerta de confirmación donde el dato no puede sorprender solo enseña
+    a la gente a confirmar sin mirar, y eso desgasta la puerta donde sí importa.
+
+    **El alcance de esa red es el archivo del repositorio, no la fila de la base.** La
+    prueba lee `config/fiscal/tabla_vacaciones.yaml`; no protege contra una edición del YAML
+    hecha directamente en el servidor ni contra un `UPDATE` a mano sobre esta tabla. Para
+    esos dos casos no hay red, y es el precio consciente de no poner puerta de confirmación.
     """
 
     __tablename__ = "tabla_vacaciones"

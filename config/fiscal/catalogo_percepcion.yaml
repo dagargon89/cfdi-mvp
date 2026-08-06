@@ -37,6 +37,15 @@
 #                         ('100' = exento total, '50' = la mitad). No es una fracción.
 #                         Esta convención la fija esta semilla; quien consuma
 #                         `factor_exencion` debe respetarla.
+#   sujeto_a_tope_conjunto
+#                     Si la exención de este tipo cae bajo el tope conjunto de previsión
+#                     social del penúltimo párrafo del art. 93 LISR (ver el punto 1 de la
+#                     sección siguiente). OPCIONAL, por omisión `false`: solo se declara en
+#                     los renglones donde aplica. No puede ir en `true` con
+#                     `base_exencion: NINGUNA` — no hay exención que topar y el cargador lo
+#                     rechaza. Es una COLUMNA, no una lista en el código de los informes,
+#                     porque cuáles tipos caen bajo el tope es materia fiscal que cambia por
+#                     reforma (§2.12).
 #   integra_sbc       Si integra al salario base de cotización (art. 27 LSS). Ojo: el art.
 #                     27 dice que TODO integra salvo nueve exclusiones tasadas, y varias de
 #                     esas exclusiones son PARCIALES (hasta un tope; el excedente sí
@@ -51,11 +60,14 @@
 #    las exenciones de previsión social se limita a 1 UMA anual cuando el sueldo más la
 #    exención pasan de 7 UMA anuales. Es un tope por trabajador y por año sobre la SUMA de
 #    varios tipos, no un factor por tipo. Los tipos afectados llevan `PORCENTAJE: '100'`
-#    (la exención "en bruto") y su nota de revisión lo dice. Quien calcule la exención tiene
-#    que aplicar ese tope aparte; si no, sobreestimará el monto exento.
+#    (la exención "en bruto") **y `sujeto_a_tope_conjunto: true`**, que es el campo con el
+#    que un informe los identifica; los comentarios de este archivo no se cargan a la base,
+#    así que la marca tiene que estar en un campo o no existe para quien calcula. Quien
+#    calcule la exención tiene que aplicar ese tope aparte; si no, sobreestimará el monto.
 #    El mismo párrafo EXCEPTÚA del tope a: jubilaciones, pensiones y haberes de retiro,
 #    indemnizaciones por riesgos de trabajo o enfermedades, reembolsos de gastos médicos y
-#    de funeral, seguros de gastos médicos, seguros de vida y fondos de ahorro.
+#    de funeral, seguros de gastos médicos, seguros de vida y **fondos** de ahorro (dice
+#    "fondos de ahorro"; NO dice "cajas de ahorro" — ver la duda del tipo 006).
 # 2. Los FACTORES QUE NO SON DEL PERIODO: 90 UMA "por cada año de servicio" (093-XIII),
 #    15 UMA "diarias" (093-IV), 1 UMA "por cada domingo laborado" (093-XIV). El factor está
 #    capturado con el número de la ley, pero el multiplicador (años, días, domingos) NO
@@ -155,9 +167,15 @@ catalogo_percepcion_marca:
 
   # 006 Caja de ahorro.
   # Misma base que el fondo de ahorro: art. 93, fracción XI LISR y art. 27, fracción II LSS.
-  # REVISAR (006): mismas condiciones que el 005, y una más: la caja de ahorro suele ser un
-  #   mecanismo de los trabajadores (no una aportación patronal), en cuyo caso el reintegro
-  #   del ahorro propio no es ingreso y ni siquiera debería estar en la nómina como percepción.
+  # REVISAR (006): mismas condiciones que el 005, y dos más propias de este tipo.
+  #   (a) La caja de ahorro suele ser un mecanismo de los trabajadores (no una aportación
+  #   patronal), en cuyo caso el reintegro del ahorro propio no es ingreso y ni siquiera
+  #   debería estar en la nómina como percepción.
+  #   (b) El último párrafo del art. 93, que exceptúa del tope conjunto de previsión social,
+  #   dice literalmente "fondos de ahorro" y NO menciona las cajas de ahorro. Este renglón se
+  #   sembró SIN `sujeto_a_tope_conjunto`, es decir, tratándolo como exceptuado igual que el
+  #   005 — que es lo habitual, pero no es lo que dice el texto. Si la revisión decide
+  #   atenerse a la letra, hay que agregarle `sujeto_a_tope_conjunto: true`.
   - tipo_percepcion: '006'
     es_ingreso_ordinario: true
     base_exencion: PORCENTAJE
@@ -197,10 +215,17 @@ catalogo_percepcion_marca:
   # empleador, y el último párrafo del art. 93 exceptúa a los seguros de vida del tope
   # conjunto de previsión social, siempre que se cumplan los requisitos de las fracciones XI
   # y XXI del art. 27 LISR.
-  # SBC: art. 27, fracción VIII LSS (cantidades aportadas para fines sociales).
-  # REVISAR (011): el art. 93 exenta lo que la ASEGURADORA paga al beneficiario; que la PRIMA
+  # SBC: se sembró `false` por criterio de previsión social.
+  # REVISAR (011): las dos marcas están flojas, cada una por su lado.
+  #   (a) Exención: el art. 93 exenta lo que la ASEGURADORA paga al beneficiario; que la PRIMA
   #   pagada por el patrón no sea ingreso gravable del trabajador es criterio de previsión
   #   social, no un texto que yo pueda citar. `PORCENTAJE 100` puede ser demasiado generoso.
+  #   (b) SBC: la cita del art. 27, fracción VIII LSS que traía este renglón NO aplica. Esa
+  #   fracción define "cantidades aportadas para fines sociales" de forma cerrada — "las
+  #   entregadas para constituir fondos de algún plan de pensiones establecido por el patrón o
+  #   derivado de contratación colectiva" — y una prima de seguro de vida no es un plan de
+  #   pensiones. Sin esa fracción, la regla general del art. 27 (todo integra salvo las nueve
+  #   exclusiones) apuntaría a `integra_sbc: true`.
   - tipo_percepcion: '011'
     es_ingreso_ordinario: true
     base_exencion: PORCENTAJE
@@ -263,6 +288,7 @@ catalogo_percepcion_marca:
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # ------------------------------------------------------------------------------------
   # Tiempo extra y primas
@@ -437,20 +463,24 @@ catalogo_percepcion_marca:
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # 030 Vales de restaurante.
+  # Exención: por analogía con el 029, como previsión social del art. 93, fracción VIII LISR,
+  # y por tanto SUJETA AL TOPE CONJUNTO (no está entre los exceptuados del último párrafo).
   # REVISAR (030): NO ENCONTRÉ BASE EXPRESA. La fracción VIII del art. 93 no los nombra y su
   #   analogía con "despensa" es discutible: la despensa sí tiene su propia exclusión de SBC
   #   (art. 27, fracción VI LSS), los vales de restaurante no. Se sembró exento al 100% por
   #   analogía con el 029, que es la práctica común, PERO es la marca de la que menos seguro
-  #   estoy de todo el bloque de vales. Si se decide que no es previsión social, va `NINGUNA`
-  #   e `integra_sbc: true`.
+  #   estoy de todo el bloque de vales. Si se decide que no es previsión social, va `NINGUNA`,
+  #   `integra_sbc: true` y hay que quitarle `sujeto_a_tope_conjunto`.
   - tipo_percepcion: '030'
     es_ingreso_ordinario: true
     base_exencion: PORCENTAJE
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # 031 Vales de gasolina.
   # REVISAR (031): NO ENCONTRÉ BASE EN EL ART. 93 y no me parece previsión social de
@@ -498,6 +528,7 @@ catalogo_percepcion_marca:
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # 035 Ayuda para anteojos.
   # Exención: art. 93, fracción VI LISR (gasto médico) o fracción VIII (previsión social
@@ -510,6 +541,7 @@ catalogo_percepcion_marca:
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # 036 Ayuda para transporte.
   # REVISAR (036): NO ENCONTRÉ BASE EXPRESA en el art. 93; el criterio está dividido entre
@@ -532,6 +564,7 @@ catalogo_percepcion_marca:
     factor_exencion: '100'
     integra_sbc: false
     es_provisionable: false
+    sujeto_a_tope_conjunto: true
 
   # 038 Otros ingresos por salarios.
   # REVISAR (038): es un cajón de sastre — el tratamiento depende de qué se pagó realmente y
@@ -670,36 +703,46 @@ catalogo_percepcion_marca:
 
   # 051 Pagos por gratificaciones, primas, compensaciones, recompensas u otros a
   #     extrabajadores derivados de jubilación en parcialidades.
-  # REVISAR (051): CREO QUE ESTA MARCA ESTÁ MAL Y NO LA CAMBIÉ POR MI CUENTA. Por el nombre,
-  #   esto es un pago derivado de una jubilación en parcialidades y debería compartir régimen
-  #   con el 044 (`es_ingreso_ordinario: false`, art. 93 fracción IV, 15 UMA diarias). Se
-  #   sembró como ingreso ordinario y gravado porque la lista verificada del plan son cinco
-  #   tipos (022, 023, 025, 039, 044) y este no está; ampliarla es una decisión fiscal que le
-  #   toca al dueño del repo. MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 044.
+  # El propio nombre del catálogo dice "derivados de jubilación en parcialidades": es un pago
+  # de jubilación, así que sigue al 044 — art. 93, fracción IV LISR, tope diario de 15 UMA, y
+  # fuera del ingreso ordinario. (La primera versión de esta semilla lo dejó como ingreso
+  # ordinario gravado alegando que la lista verificada del plan eran cinco tipos; eso confundía
+  # una lista de VERIFICACIÓN con una lista EXHAUSTIVA, y dejar sin exención un pago de
+  # jubilación no es la opción conservadora sino la marca equivocada.)
+  # REVISAR (051): queda la misma duda del 044, que es de modelo y no de régimen: el factor
+  #   '15' es un tope DIARIO, no del periodo de pago, y el art. 93, fracción V obliga a
+  #   considerar todas las pensiones del trabajador las pague quien las pague.
   - tipo_percepcion: '051'
-    es_ingreso_ordinario: true
-    base_exencion: NINGUNA
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '15'
     integra_sbc: false
     es_provisionable: false
 
   # 052 Pagos que se realicen a extrabajadores que obtengan una jubilación en parcialidades
   #     derivados de la ejecución de resoluciones judicial o de un laudo.
-  # REVISAR (052): misma situación que el 051 — por el nombre debería seguir al 044
-  #   (`false`, art. 93 fracción IV, 15 UMA diarias). Sembrado ordinario y gravado por la
-  #   misma razón. MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 044.
+  # Igual que el 051: el nombre dice "obtengan una jubilación en parcialidades", así que sigue
+  # al 044 — art. 93, fracción IV LISR, tope diario de 15 UMA, fuera del ingreso ordinario.
+  # Que el pago derive de una resolución judicial o de un laudo cambia quién lo ordena, no la
+  # naturaleza del ingreso.
+  # REVISAR (052): misma duda de modelo que el 051 y el 044 — el '15' es un tope diario.
   - tipo_percepcion: '052'
-    es_ingreso_ordinario: true
-    base_exencion: NINGUNA
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '15'
     integra_sbc: false
     es_provisionable: false
 
   # 053 Pagos que se realicen a extrabajadores que obtengan una jubilación en una sola
   #     exhibición derivados de la ejecución de resoluciones judicial o de un laudo.
-  # REVISAR (053): misma situación que el 051 y el 052, pero apuntando al 039 en vez de al
-  #   044 porque es en una sola exhibición (art. 93 fracción XIII y art. 96-Bis, 90 UMA por
-  #   año). MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 039.
+  # Como el 051 y el 052, pero el nombre dice "en una sola exhibición", así que sigue al 039
+  # y no al 044: art. 93, fracción XIII LISR, a la que remite el art. 96-Bis, fracción IV para
+  # los pagos de retiro en una sola exhibición — 90 UMA por año de contribución.
+  # REVISAR (053): misma duda de modelo que el 039 — el factor '90' es POR AÑO de servicio o
+  #   de contribución, no un tope absoluto, y los años no vienen en el CFDI.
   - tipo_percepcion: '053'
-    es_ingreso_ordinario: true
-    base_exencion: NINGUNA
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false

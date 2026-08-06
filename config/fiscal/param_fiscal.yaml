@@ -48,9 +48,12 @@ param_fiscal:
   # Base legal: art. 26, apartado B, párrafo sexto de la Constitución, y art. 5 de la Ley
   # para Determinar el Valor de la UMA (el INEGI publica los tres valores cada enero y
   # entran en vigor el 1 de febrero).
-  # Relación interna: mensual = diaria x 30.4 ; anual = mensual x 12. Las tres cifras de
-  # abajo cumplen esa relación exactamente, así que un dedazo en una de ellas se nota al
-  # comprobar la multiplicación.
+  # Relación interna, con su redondeo — el detalle importa para poder comprobarla:
+  #   mensual = redondeo a centavos de (diaria x 30.4)  ->  117.31 x 30.4 = 3566.224 ~ 3566.22
+  #   anual   = mensual x 12, esto sí exacto            ->  3566.22 x 12  = 42794.64
+  # NO se cumple encadenando sin redondear: 117.31 x 30.4 x 12 = 42794.688, que no es el
+  # valor anual. El redondeo ocurre en el paso mensual, y así lo publica el INEGI. Con eso
+  # presente, un dedazo en cualquiera de las tres cifras se detecta multiplicando.
   # ---------------------------------------------------------------------------------------
   - ejercicio: 2026
     clave: UMA_DIARIA

@@ -205,9 +205,12 @@ async def marcas_de_percepcion(db: AsyncSession) -> dict[str, CatalogoPercepcion
 
     Mismo invariante que `valor_vigente`, y por una razón más fuerte: `factor_exencion`
     alimenta el cálculo de exenciones igual que la UMA, pero mientras la UMA se verifica
-    contra un boletín oficial, estos factores son ~46 derivaciones del art. 93 de la LISR
+    contra un boletín oficial, estos factores son 44 derivaciones del art. 93 de la LISR
     hechas a mano. Un tipo que falte aquí porque nadie lo confirmó sale como bandera
     (`FALTA_CATALOGO_DE_MARCAS`), no como un cero que parecería "no tuvo ingreso ordinario".
+
+    Al leer `factor_exencion`, ojo con la unidad: con `PORCENTAJE` va en escala 0-100, no
+    como fracción. Está documentado junto a la columna en `app/models/configuracion_fiscal.py`.
     """
     filas = (await db.scalars(select(CatalogoPercepcionMarca).where(CatalogoPercepcionMarca.confirmado_en.is_not(None)))).all()
     return {fila.tipo_percepcion: fila for fila in filas}
@@ -362,7 +365,13 @@ async def guardar_param_fiscal(
     # espera en el gap lock del rango de la clave y relee la última versión confirmada.
     # El orden de adquisición es una clave por llamada, y el cargador escribe sus claves
     # ordenadas alfabéticamente (ver `cargar_desde_yaml`): dos cargas concurrentes toman los
-    # candados en el mismo orden, así que no hay ciclo de espera posible.
+    # candados de `param_fiscal` en el mismo orden, así que entre ellos no hay ciclo de
+    # espera posible. **La garantía se limita a esta tabla:** los bucles de
+    # `catalogo_percepcion_marca` y `tabla_vacaciones` recorren los renglones en el orden del
+    # archivo, no ordenados, así que dos cargas simultáneas de archivos con los mismos tipos
+    # en distinto orden sí podrían interbloquearse. El riesgo práctico es bajo (cargar
+    # semillas es una operación manual y poco frecuente) y por eso no se ordena también ahí,
+    # pero la afirmación no debe leerse como global.
     tramos = list(
         (await db.scalars(select(ParamFiscal).where(ParamFiscal.clave == clave).with_for_update())).all()
     )
@@ -445,6 +454,7 @@ class _FilaMarca:
     factor_exencion: Decimal | None
     integra_sbc: bool
     es_provisionable: bool
+    sujeto_a_tope_conjunto: bool
 
 
 @dataclass(frozen=True)
@@ -705,6 +715,16 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
         raise ErrorDeConfiguracion(f"{ctx}: `base_exencion: {base.value}` exige un `factor_exencion`.")
     if factor is not None and factor <= 0:
         raise ErrorDeConfiguracion(f"{ctx}: `factor_exencion` debe ser positivo (llegó {factor}).")
+    # Opcional y por omisión falso: aplica a una minoría de los tipos, así que el renglón
+    # solo lo declara donde el art. 93 lo impone. Ver la columna en el modelo.
+    tope_bruto = fila.get("sujeto_a_tope_conjunto")
+    tope = False if tope_bruto is None else _booleano(tope_bruto, "sujeto_a_tope_conjunto", ctx)
+    if tope and base is BaseExencion.NINGUNA:
+        raise ErrorDeConfiguracion(
+            f"{ctx}: `sujeto_a_tope_conjunto: true` no tiene sentido con `base_exencion: NINGUNA` — "
+            "el tope conjunto del art. 93 de la LISR limita una exención, y aquí no hay ninguna que "
+            "limitar. O el tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
+        )
     return _FilaMarca(
         tipo_percepcion=_texto(_requerido(fila, "tipo_percepcion", ctx), "tipo_percepcion", ctx, largo=3),
         es_ingreso_ordinario=_booleano(_requerido(fila, "es_ingreso_ordinario", ctx), "es_ingreso_ordinario", ctx),
@@ -712,6 +732,7 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
         factor_exencion=factor,
         integra_sbc=_booleano(_requerido(fila, "integra_sbc", ctx), "integra_sbc", ctx),
         es_provisionable=_booleano(_requerido(fila, "es_provisionable", ctx), "es_provisionable", ctx),
+        sujeto_a_tope_conjunto=tope,
     )
 
 
@@ -844,6 +865,7 @@ async def cargar_desde_yaml_detallado(
                             factor_exencion=marca.factor_exencion,
                             integra_sbc=marca.integra_sbc,
                             es_provisionable=marca.es_provisionable,
+                            sujeto_a_tope_conjunto=marca.sujeto_a_tope_conjunto,
                         )
                     )
                 else:
@@ -856,6 +878,7 @@ async def cargar_desde_yaml_detallado(
                         or destino.factor_exencion != marca.factor_exencion
                         or destino.integra_sbc != marca.integra_sbc
                         or destino.es_provisionable != marca.es_provisionable
+                        or destino.sujeto_a_tope_conjunto != marca.sujeto_a_tope_conjunto
                     ):
                         destino.confirmado_por = None
                         destino.confirmado_en = None
@@ -864,6 +887,7 @@ async def cargar_desde_yaml_detallado(
                     destino.factor_exencion = marca.factor_exencion
                     destino.integra_sbc = marca.integra_sbc
                     destino.es_provisionable = marca.es_provisionable
+                    destino.sujeto_a_tope_conjunto = marca.sujeto_a_tope_conjunto
                 resumen["catalogo_percepcion_marca"] += 1
 
         if plan.vacaciones:
