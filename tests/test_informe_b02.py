@@ -12,7 +12,7 @@ fallan (según el §B-02 del documento fuente):
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -638,38 +638,91 @@ async def test_universo_solo_los_emitidos_por_la_empresa(db: AsyncSession) -> No
     assert resultado.banderas == []
 
 
-async def test_las_banderas_se_acotan_al_rango_de_emision(db: AsyncSession) -> None:
-    """Los comprobantes sin fila en `nomina` no tienen `fecha_pago` con la que acotarlos, así
-    que se usa `fecha_emision`. Un `N` sin normalizar de otro ejercicio no debe aparecer en un
-    informe de junio: el rango pedido acota también las banderas."""
+async def test_bandera_aunque_el_timbrado_caiga_despues_del_rango_de_pago(db: AsyncSession) -> None:
+    """**El caso real que la primera versión de esta corrección perdía.** En la BD de la
+    empresa 11 los 8 CFDI de nómina están timbrados **al día siguiente** del pago, y la RMF
+    (2.7.5.3) permite hasta 11 días hábiles de desfase.
+
+    Escenario exacto: informe de junio, nómina pagada el 30 de junio, **timbrada el 1 de
+    julio**, con el ETL fallido. Con la ventana de banderas pegada a `[desde, hasta+1día)`, el
+    informe salía con 0 filas, 0 banderas y el aviso "Sin CFDI de nómina en el rango
+    solicitado" — el fallo que esta consulta existe para evitar, reproducido contra datos
+    reales por la re-revisión."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="cafe0001-0000-0000-0000-000000000001", fecha_pago=date(2026, 6, 30))
     await _n_sin_nomina(
         db,
         empresa_id=empresa.empresa_id,
-        uuid="aaaaaaaa-1111-0000-0000-aaaaaaaaaaaa",
-        con_detalle=False,
-        fecha_emision=datetime(2025, 3, 15, 10, 0),
+        uuid="cafe0002-0000-0000-0000-000000000002",
+        error_normalizacion="XMLSyntaxError: Premature end of data in tag Comprobante",
+        fecha_emision=datetime(2026, 7, 1, 9, 30),  # timbrado al día siguiente del pago
     )
-    # Límite superior: el último instante del día `fecha_hasta` sí entra…
-    await _n_sin_nomina(
-        db,
-        empresa_id=empresa.empresa_id,
-        uuid="aaaaaaaa-2222-0000-0000-aaaaaaaaaaaa",
-        con_detalle=False,
-        fecha_emision=datetime(2026, 7, 31, 23, 59, 59),
-    )
-    # …y el primer instante del día siguiente, no.
-    await _n_sin_nomina(
-        db,
-        empresa_id=empresa.empresa_id,
-        uuid="aaaaaaaa-3333-0000-0000-aaaaaaaaaaaa",
-        con_detalle=False,
-        fecha_emision=datetime(2026, 8, 1, 0, 0, 0),
-    )
+
+    # Rango de PAGO que termina el 30 de junio: el timbrado del 1 de julio queda fuera de él.
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 6, 30)))
+
+    assert len(resultado.filas) == 1
+    faltantes = [b for b in resultado.banderas if b.clave == "SIN_NORMALIZAR"]
+    assert len(faltantes) == 1, f"la nómina timbrada al día siguiente del pago no puede desaparecer; banderas: {resultado.banderas}"
+    assert faltantes[0].ambito == "uuid:cafe0002-0000-0000-0000-000000000002"
+
+
+async def test_las_banderas_se_acotan_al_rango_de_emision_con_margen_de_timbrado(db: AsyncSession) -> None:
+    """La ventana de banderas lleva `_MARGEN_TIMBRADO_DIAS` de holgura a los dos lados, porque
+    el timbrado puede ir después del pago (RMF 2.7.5.3) o anticiparse. Pero sigue siendo una
+    ventana: un `N` roto de un ejercicio ajeno no debe aparecer en el informe de este mes, o la
+    hoja `Banderas` se llena de entradas irrelevantes y deja de leerse — que es otra manera de
+    perder el aviso."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    margen = b02._MARGEN_TIMBRADO_DIAS
+    casos = {
+        # (uuid, fecha_emision) → ¿debe salir bandera?
+        "aaaaaaaa-1111-0000-0000-aaaaaaaaaaaa": (datetime(2025, 3, 15, 10, 0), False),  # otro ejercicio
+        "aaaaaaaa-2222-0000-0000-aaaaaaaaaaaa": (datetime.combine(_HASTA, datetime.min.time()) + timedelta(days=margen, hours=23), True),
+        "aaaaaaaa-3333-0000-0000-aaaaaaaaaaaa": (datetime.combine(_HASTA, datetime.min.time()) + timedelta(days=margen + 1), False),
+        "aaaaaaaa-4444-0000-0000-aaaaaaaaaaaa": (datetime.combine(_DESDE, datetime.min.time()) - timedelta(days=margen), True),
+        "aaaaaaaa-5555-0000-0000-aaaaaaaaaaaa": (datetime.combine(_DESDE, datetime.min.time()) - timedelta(seconds=1, days=margen), False),
+    }
+    for uuid, (fecha_emision, _) in casos.items():
+        await _n_sin_nomina(db, empresa_id=empresa.empresa_id, uuid=uuid, con_detalle=False, fecha_emision=fecha_emision)
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
 
-    assert [b.ambito for b in resultado.banderas] == ["uuid:aaaaaaaa-2222-0000-0000-aaaaaaaaaaaa"]
+    ambitos = {b.ambito for b in resultado.banderas}
+    assert ambitos == {f"uuid:{uuid}" for uuid, (_, esperada) in casos.items() if esperada}
+
+
+async def test_descripciones_que_solo_difieren_en_mayusculas_se_detectan(db: AsyncSession) -> None:
+    """`utf8mb4_unicode_ci` es insensible a mayúsculas y acentos: "SUELDO" y "Sueldo" en el
+    MISMO comprobante colapsaban en un grupo del `GROUP BY` y MySQL devolvía un representante
+    arbitrario, así que el título de la columna no era determinista y `CONCEPTO_INCONSISTENTE`
+    —la bandera que existe justo para avisar de esto— no las veía.
+
+    Con `COLLATE utf8mb4_bin` sobre la descripción son dos filas, pero **no** dos columnas: la
+    identidad de columna es `(naturaleza, tipo, clave)` y se arma en Python (R-T9), así que las
+    dos filas caen en la misma celda y su importe se suma."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="c011a710-0000-0000-0000-000000000001",
+        percepciones=[("001", "001", "SUELDO", "5000.00", "0.00"), ("001", "001", "Sueldo", "3000.00", "0.00")],
+    )
+
+    p = b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA)
+    primera = await b02.consultar(db, empresa.empresa_id, p)
+    segunda = await b02.consultar(db, empresa.empresa_id, p)
+
+    sep = b02.SEPARADOR_ETIQUETA
+    dinamicas = [c.titulo for c in primera.columnas if c.titulo.startswith(f"P{sep}001{sep}001")]
+    assert len(dinamicas) == 1, f"una sola columna para (P, 001, 001); hubo {dinamicas}"
+    assert primera.filas[0][_columna(primera, dinamicas[0])] == Decimal("8000.00")  # 5000 + 3000
+    assert any(b.clave == "CONCEPTO_INCONSISTENTE" for b in primera.banderas)
+
+    entrada = next(e for e in primera.diccionario if e.etiqueta == dinamicas[0])
+    assert entrada.concepto_canonico == "SUELDO"  # empate 1-1 → desempate alfabético estable
+    assert entrada.descripciones_alternas == ["Sueldo"]
+    assert [c.titulo for c in segunda.columnas] == [c.titulo for c in primera.columnas]
 
 
 async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:

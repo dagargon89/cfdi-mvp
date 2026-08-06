@@ -84,6 +84,16 @@ qué saber de nómina.
 _CERO = Decimal("0")
 _TOLERANCIA = Decimal("0.01")
 
+# Holgura, en días naturales y hacia los dos lados, entre `nomina.fecha_pago` (con la que se
+# acota el universo) y `Comprobante.fecha_emision` (lo único disponible para acotar los CFDI
+# que no llegaron a tener fila en `nomina`). Ver `_rango_de_emision`.
+#
+# 31 días —un mes natural— y no los ~16 que bastarían para cubrir los 11 días hábiles de la
+# regla 2.7.5.3 de la RMF: el costo de una bandera de más es que el patrón la lea y la
+# descarte; el de una de menos es un recibo que nunca ve. Con datos sanos esta consulta no
+# devuelve nada, así que el margen no cuesta ruido en la operación normal.
+_MARGEN_TIMBRADO_DIAS = 31
+
 # Orden de naturalezas del informe: replica el orden de lectura de un recibo de nómina
 # (B-02, fase 3 del algoritmo): percepciones, otros pagos, deducciones.
 _ORDEN_NATURALEZA = {"P": 0, "O": 1, "D": 2}
@@ -201,18 +211,32 @@ def _rango_de_emision(p: Parametros) -> tuple[datetime, datetime]:
     `nomina.fecha_pago` (R-T6), pero un tipo `N` que nunca se normalizó, o que llegó sin
     complemento de nómina, no tiene fila en `nomina`: no existe `fecha_pago` con la que
     acotarlo. El único dato de fecha disponible es el del encabezado del CFDI, que ya está
-    en `comprobantes`. En la práctica coinciden de periodo (el patrón timbra el recibo al
-    pagarlo), y usarlo evita arrastrar al informe banderas de ejercicios ajenos al rango
-    pedido.
+    en `comprobantes`.
 
-    Intervalo **semiabierto** `[desde 00:00:00, hasta + 1 día 00:00:00)` en vez de
-    `<= hasta 23:59:59.999999`: `fecha_emision` es `DATETIME` sin fracción de segundo, y
-    MySQL redondea los microsegundos de la constante hacia arriba al comparar, con lo que
-    `datetime.max.time()` incluiría el día siguiente completo.
+    **La fecha de timbrado NO coincide con la de pago, y el margen no es opcional.** En la
+    BD real de la empresa 11 los 8 CFDI de nómina están timbrados **al día siguiente** del
+    pago (pago 2026-06-30 → emisión 2026-07-01; pago 2026-07-15 → emisión 2026-07-16), y la
+    RMF (regla 2.7.5.3) permite timbrar hasta 11 días hábiles después del último día del
+    periodo pagado, además de admitir el timbrado anticipado. Sin margen, un informe de
+    `[2026-06-01, 2026-06-30]` con una nómina pagada el 30 de junio, timbrada el 1 de julio
+    y con el ETL fallido salía con **0 filas y 0 banderas** y el aviso "Sin CFDI de nómina en
+    el rango solicitado" — exactamente el fallo que esta consulta existe para evitar.
+
+    Por eso el margen se aplica a **los dos extremos** (`_MARGEN_TIMBRADO_DIAS`) y es
+    holgado. El criterio para elegirlo es asimétrico a propósito: **una bandera de más se ve
+    y se descarta; una de menos no se ve nunca.** Lo único que el margen debe seguir
+    acotando es que un `N` roto de un ejercicio ajeno no aparezca en el informe de este mes,
+    porque una hoja `Banderas` con decenas de entradas irrelevantes es una hoja que nadie
+    lee — que es otra forma de perder el aviso.
+
+    Intervalo **semiabierto** en el extremo superior en vez de `<= ... 23:59:59.999999`:
+    `fecha_emision` es `DATETIME` sin fracción de segundo, y MySQL redondea los microsegundos
+    de la constante hacia arriba al comparar, con lo que `datetime.max.time()` incluiría un
+    día de más.
     """
     return (
-        datetime.combine(p.fecha_desde, time.min),
-        datetime.combine(p.fecha_hasta + timedelta(days=1), time.min),
+        datetime.combine(p.fecha_desde - timedelta(days=_MARGEN_TIMBRADO_DIAS), time.min),
+        datetime.combine(p.fecha_hasta + timedelta(days=_MARGEN_TIMBRADO_DIAS + 1), time.min),
     )
 
 
@@ -304,27 +328,37 @@ async def _conceptos_por_comprobante(
         ("D", NominaDeduccion, NominaDeduccion.tipo_deduccion, NominaDeduccion.importe),
     )
     for naturaleza, modelo, columna_tipo, expresion_importe in fuentes:
+        # `COLLATE utf8mb4_bin` SOLO sobre la descripción, en el `SELECT` y en el `GROUP BY`
+        # (la misma expresión en los dos sitios, o `ONLY_FULL_GROUP_BY` la rechaza).
+        #
+        # La colación de la tabla es `utf8mb4_unicode_ci`, insensible a mayúsculas y acentos:
+        # "SUELDO" y "Sueldo" en el mismo comprobante colapsaban en un solo grupo y MySQL
+        # devolvía un representante arbitrario, con dos consecuencias — el título de la
+        # columna podía variar entre corridas, y `CONCEPTO_INCONSISTENTE`, que existe
+        # precisamente para avisar de descripciones divergentes del mismo concepto, no las
+        # veía nunca.
+        #
+        # Forzar la colación binaria **no parte la columna en dos**: la identidad de columna
+        # es `(naturaleza, tipo, clave)` y se arma en Python (R-T9, ver el `+=` de abajo), así
+        # que las dos filas que ahora devuelve el `GROUP BY` caen en la misma celda con el
+        # mismo importe total. Lo único que cambia es que las dos descripciones llegan al
+        # `Counter`, que es lo que se quería.
+        #
+        # `clave` NO se colaciona: ahí sí forma parte de la identidad de la columna, y
+        # separarla convertiría en dos columnas lo que el patrón capturó como una sola con un
+        # descuido de mayúsculas. Que la colación insensible elija un representante arbitrario
+        # de la clave queda anotado como deuda; no se ha observado en datos reales.
+        concepto = func.coalesce(modelo.concepto, "").collate("utf8mb4_bin")
         filas = await db.execute(
             select(
                 modelo.comprobante_id,
                 columna_tipo.label("tipo"),
                 func.coalesce(modelo.clave, "").label("clave"),
-                func.coalesce(modelo.concepto, "").label("concepto"),
+                concepto.label("concepto"),
                 func.sum(expresion_importe).label("importe"),
             )
             .where(modelo.comprobante_id.in_(ids))
-            # ADVERTENCIA: `modelo.concepto` se agrupa con la colación de la tabla,
-            # `utf8mb4_unicode_ci`, que es insensible a mayúsculas y a acentos. Dos
-            # descripciones que solo difieran en eso ("SUELDO" y "Sueldo", "Bonificacion" y
-            # "Bonificación") colapsan en un solo grupo y MySQL devuelve un representante
-            # arbitrario de entre ellas, así que el TÍTULO de la columna puede variar entre
-            # corridas y `CONCEPTO_INCONSISTENTE` no las verá. **Los importes siguen bien**:
-            # el `SUM` incluye todos los nodos del grupo, que es lo que va a la celda. No se
-            # cambia la colación de la tabla por esto (afectaría a toda la aplicación) ni se
-            # fuerza `COLLATE utf8mb4_bin` aquí, que partiría en dos columnas distintas lo
-            # que para el patrón es el mismo concepto — peor resultado que un título con la
-            # capitalización de una de las dos variantes.
-            .group_by(modelo.comprobante_id, columna_tipo, modelo.clave, modelo.concepto)
+            .group_by(modelo.comprobante_id, columna_tipo, modelo.clave, concepto)
         )
         for fila in filas:
             concepto_id = (naturaleza, str(fila.tipo), str(fila.clave))
