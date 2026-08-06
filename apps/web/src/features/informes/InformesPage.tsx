@@ -27,6 +27,13 @@ interface ParametrosSchema {
 
 type ValorParametro = string | boolean;
 
+const INTERVALO_SONDEO_MS = 300;
+/** Tope del sondeo. El pre-vuelo del ETL corre dentro de la tarea del informe, así que la primera
+ * generación posterior a subir `ETL_VERSION` puede tardar minutos de verdad. Pero el bucle tiene
+ * que terminar en algún momento: una pestaña girando sin fin invita a recargar y relanzar, y dos
+ * generaciones en paralelo son dos pre-vuelos concurrentes sobre los mismos comprobantes. */
+const ESPERA_MAXIMA_MS = 10 * 60 * 1000;
+
 /** Convierte `fecha_desde` → "Fecha desde" — no hay título en el schema, solo la llave. */
 function etiquetar(clave: string): string {
   const texto = clave.replace(/_/g, ' ');
@@ -84,11 +91,13 @@ export function InformesPage() {
 
   const desenmascarado = propiedades['enmascarar_datos_personales'] !== undefined && valores['enmascarar_datos_personales'] === false;
 
-  async function esperarTarea(tareaId: string) {
+  async function esperarTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida' | 'expirada'; url?: string }> {
     let estado: 'pendiente' | 'completada' | 'fallida' = 'pendiente';
     let url: string | undefined;
+    const limite = Date.now() + ESPERA_MAXIMA_MS;
     while (estado === 'pendiente') {
-      await new Promise((r) => setTimeout(r, 300));
+      if (Date.now() > limite) return { estado: 'expirada' };
+      await new Promise((r) => setTimeout(r, INTERVALO_SONDEO_MS));
       const t = await api.estadoTarea(tareaId);
       estado = t.estado;
       url = t.descarga_url;
@@ -107,6 +116,9 @@ export function InformesPage() {
       if (estado === 'completada' && url) {
         window.open(url, '_blank');
         toast(`${url.split('/').pop() ?? 'informe'} listo`, 'ok');
+      } else if (estado === 'expirada') {
+        // Sigue corriendo en el servidor: relanzarla ahora solo duplicaría el trabajo.
+        toast('El informe sigue generándose en el servidor. Espera unos minutos antes de volver a lanzarlo.', 'info');
       } else {
         toast('No se pudo generar el informe', 'error');
       }

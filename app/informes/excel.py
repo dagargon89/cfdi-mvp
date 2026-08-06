@@ -73,7 +73,11 @@ def _con_estilo(ws: Any, valor: Any, *, formato: str | None = None, negrita: boo
 def _escribir_datos(wb: Workbook, resultado: ResultadoInforme, ctx: ContextoInforme) -> None:
     ws = wb.create_sheet("Datos")
     ws.freeze_panes = "A2"
-    enmascarar_activo = bool(ctx.parametros.get("enmascarar_datos_personales"))
+    # Default `True` explícito: falla CERRADO. Si la clave no viene en el dict —un llamador
+    # que no pase por el endpoint HTTP, que sí incluye los defaults al hacer `model_dump()`—,
+    # `get()` sin default devolvería `None` y el libro saldría con CURP y NSS en claro, en
+    # contra del default declarado y publicado en el JSON Schema del informe.
+    enmascarar_activo = bool(ctx.parametros.get("enmascarar_datos_personales", True))
 
     ws.append([_con_estilo(ws, columna.titulo, negrita=True) for columna in resultado.columnas])
 

@@ -21,8 +21,11 @@ en la API pública.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import Any, Callable, cast
+
+logger = logging.getLogger(__name__)
 
 # Naturaleza (P/D/O) → tabla del catálogo embebido de `satcfdi` (ver docstring del módulo).
 _TABLAS = {
@@ -46,9 +49,13 @@ def _buscar(naturaleza: str, tipo: str) -> str | None:
         return None
     try:
         codigo = _catalog_code()(tabla, tipo)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — el informe no aborta por una descripción
         # El catálogo del SAT es un archivo externo a la librería; ante cualquier fallo de
-        # lectura, el informe no debe abortar por una clave que no se pudo resolver.
+        # lectura, el informe no debe abortar por una clave que no se pudo resolver. Pero se
+        # registra: sin este log, un sqlite corrupto o un `satcfdi` a medio instalar produce
+        # exactamente el mismo `None` que una clave nueva del SAT todavía no catalogada, y la
+        # primera causa se arregla mientras la segunda solo se anota.
+        logger.warning("catalogos: no se pudo resolver %s/%s en la tabla %s: %s", naturaleza, tipo, tabla, exc)
         return None
     descripcion = codigo.description
     return str(descripcion) if descripcion else None

@@ -86,6 +86,16 @@ class DefinicionInforme(Protocol):
     GRUPO: str
     DESCRIPCION: str
 
+    TIPOS_COMPROBANTE: tuple[str, ...]
+    """Tipos de `comprobantes.tipo_comprobante` que el informe necesita normalizados.
+
+    Lo usa el pre-vuelo del ETL (`app.worker.tasks._generar_informe_async`) para acotar
+    `ids_pendientes` a lo que el informe de verdad va a leer. Todo el grupo B declara
+    `("N",)`. Es obligatorio: un informe que no lo declare hace que su pre-vuelo reprocese
+    el histórico completo de la empresa, lo que con volúmenes reales convierte la primera
+    generación posterior a un cambio de `ETL_VERSION` en una tarea de horas.
+    """
+
     Parametros: type[Any]
 
     async def consultar(self, db: Any, empresa_id: int, parametros: Any) -> ResultadoInforme: ...

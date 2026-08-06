@@ -809,10 +809,25 @@ async def _generar_informe_async(empresa_id: int, clave: str, parametros: dict[s
         # Pre-vuelo: normaliza lo que falte. No se acota por fecha porque los informes
         # del grupo B filtran por `nomina.fecha_pago`, que solo se conoce DESPUÉS de
         # normalizar; acotar por `fecha_emision` dejaría fuera nóminas legítimas.
-        pendientes = await repo_normalizacion.ids_pendientes(db, empresa_id)
+        #
+        # Sí se acota por TIPO de comprobante, con los tipos que el informe declara en
+        # `TIPOS_COMPROBANTE`. Sin ese filtro, la primera generación posterior a subir
+        # `ETL_VERSION` —que es el mecanismo diseñado de reproceso— reprocesa el histórico
+        # completo de la empresa dentro de esta tarea, en serie y con un commit por
+        # comprobante: decenas de minutos con volúmenes reales, mientras la pantalla sondea
+        # sin ver avance y el usuario reintenta.
+        pendientes: list[int] = []
+        for tipo in definicion.TIPOS_COMPROBANTE:
+            pendientes.extend(await repo_normalizacion.ids_pendientes(db, empresa_id, solo_tipo=tipo))
         if pendientes:
             resumen = await normalizacion_lote.normalizar_lote(db, empresa_id, pendientes)
             logger.info("generar_informe: pre-vuelo del ETL para empresa %s → %s", empresa_id, resumen)
+        else:
+            # `normalizar_lote` cierra la transacción de lectura por contrato, pero solo si
+            # se la llama. Sin nada pendiente (el caso normal) los `SELECT` de arriba dejan
+            # abierta la transacción implícita, y la consulta del informe heredaría un
+            # snapshot de `REPEATABLE READ` anterior a este punto.
+            await db.rollback()
 
         resultado = await definicion.consultar(db, empresa_id, p)
 
@@ -820,8 +835,18 @@ async def _generar_informe_async(empresa_id: int, clave: str, parametros: dict[s
         clave=definicion.CLAVE,
         nombre=definicion.NOMBRE,
         usuario=actor,
-        generado_en=datetime.now(),
-        parametros=parametros,
+        # Misma convención que el resto del proyecto (y que la bitácora): UTC guardado
+        # naive. La hoja `Parámetros` existe para auditar; que su marca de tiempo no
+        # coincida con la de la bitácora del mismo hecho es justo lo que no debe pasar.
+        generado_en=datetime.now(timezone.utc).replace(tzinfo=None),
+        # Los parámetros **validados**, no el dict crudo del cliente. Dos razones:
+        # 1. `excel.escribir_libro` decide el enmascaramiento de CURP/NSS con
+        #    `parametros["enmascarar_datos_personales"]`; con el dict crudo, un llamador que
+        #    omita la clave (cualquiera que no pase por el endpoint HTTP) obtiene un libro
+        #    con datos personales en claro pese a que el default declarado es `True`.
+        # 2. La hoja `Parámetros` debe registrar los filtros EFECTIVOS para que la corrida
+        #    sea reproducible (§10 del diseño), no solo lo que el cliente escribió.
+        parametros=p.model_dump(mode="json"),
         etl_version=normalizacion.ETL_VERSION,
     )
     contenido = excel.escribir_libro(resultado, ctx)

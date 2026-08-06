@@ -83,7 +83,12 @@ async def generar_endpoint(
             actor=ctx.usuario.correo,
             accion="generar_informe",
             entidad=f"empresa:{empresa_id}",
-            detalle={"clave": clave, "enmascarar_datos_personales": False, "parametros": parametros},
+            # Los parámetros **validados**, no el dict crudo: la bitácora de un desenmascarado
+            # tiene que decir con qué filtros efectivos se generó el libro que llevó datos
+            # personales en claro, incluidos los que el cliente no escribió y tomaron su
+            # default. Es la misma razón por la que la tarea pasa `p.model_dump()` al
+            # `ContextoInforme`.
+            detalle={"clave": clave, "enmascarar_datos_personales": False, "parametros": validados.model_dump(mode="json")},
         )
         await db.commit()
 

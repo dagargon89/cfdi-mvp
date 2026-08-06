@@ -142,6 +142,21 @@ def test_columna_sensible_se_enmascara_solo_si_el_parametro_esta_activo() -> Non
     assert fila[1] == "Juan Pérez"
 
 
+def test_columna_sensible_se_enmascara_cuando_la_clave_no_viene_en_los_parametros() -> None:
+    """**Falla cerrado.** `enmascarar_datos_personales` tiene default `True` en el informe y en
+    su JSON Schema, así que un contexto que no traiga la clave —un llamador que no pase por el
+    endpoint HTTP, que sí incluye los defaults al hacer `model_dump()`— debe enmascarar igual.
+    Con `.get()` sin default, `None` es falsy y el libro salía con el CURP en claro."""
+    resultado = ResultadoInforme(
+        columnas=[Columna(titulo="CURP", tipo="texto", sensible=True)],
+        filas=[["XXXX800101HCHXXX01"]],
+    )
+    ctx = replace(_contexto(), parametros={"fecha_desde": "2026-06-01", "fecha_hasta": "2026-07-31"})
+
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))
+    assert wb["Datos"][2][0].value == "****XX01"
+
+
 def test_columna_decimal_no_se_redondea_a_dos_decimales() -> None:
     """Solo `monto` se redondea a 2 decimales (R-T4); `decimal` conserva su precisión."""
     resultado = ResultadoInforme(columnas=[Columna(titulo="Tasa", tipo="decimal")], filas=[[Decimal("12.345678")]])
