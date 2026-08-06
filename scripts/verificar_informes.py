@@ -14,6 +14,18 @@ sensibles no trajeran el dato personal dentro de una frase). B-10 interpolaba la
 su columna "Descripción del hallazgo" —no sensible, y que no puede serlo sin volverse ilegible—,
 así que 6 de 7 filas salían con el dato completo con `enmascarar_datos_personales=True`.
 
+**Alcance de esa comprobación aquí, anotado para no creerle más de lo que hace.** Este script busca
+solo por **patrón** (`validadores.dato_personal_en_texto`), no por valor: no puede consultar la BD
+para cotejar celda contra dato porque su propio contrato es no imprimir ni manejar CURP, NSS ni
+cuentas de personas reales. Dos consecuencias:
+
+1. Una CURP **mal formada** interpolada en un mensaje no se detecta (no coincide con el patrón de
+   una CURP). La suite sí cubre ese caso, por valor y por fila, en
+   `tests/test_informe_b10.py::test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos`.
+2. Solo se recorre la hoja `Datos`. La hoja `Banderas` viaja en el mismo archivo y no la audita
+   nada automático; se revisó a mano en los seis informes al cerrar la fase 2 y está limpia (ningún
+   mensaje de bandera interpola un dato personal), pero una bandera nueva que lo hiciera pasaría.
+
 Las identidades **no se implementan aquí**: viven en `app/informes/identidades_b00.py` y
 `tests/test_identidades_b00.py` las corre en cada pasada de la suite sobre XML sintéticos.
 Este script es el otro llamador de esa misma implementación, el que la ejerce contra los

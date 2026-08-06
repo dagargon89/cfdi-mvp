@@ -371,9 +371,14 @@ async def test_antiguedad_inconsistente(db: AsyncSession) -> None:
     assert "ANTIGUEDAD_INCONSISTENTE" in _claves(await b10.consultar(db, eid, _p()))
 
 
-async def test_cuenta_extranamente_larga_es_invalida_y_la_correcta_no(db: AsyncSession) -> None:
-    """`CUENTA_INVALIDA` en sus dos sentidos, sobre el mismo informe: 12 caracteres no es una
-    longitud de cuenta mexicana; 18 (CLABE) sí."""
+async def test_cuenta_con_longitud_de_clabe_no_dispara_cuenta_invalida(db: AsyncSession) -> None:
+    """La mitad **negativa** de `CUENTA_INVALIDA`: 18 caracteres es una CLABE interbancaria y no
+    debe marcarse. Sin ella, una comprobación que se disparara con cualquier cuenta pasaría igual.
+
+    El nombre dice solo esto a propósito: la versión anterior se llamaba
+    `..._es_invalida_y_la_correcta_no` y anunciaba las dos direcciones aseverando una sola. La mitad
+    positiva (12 caracteres → sí dispara) vive en
+    `test_banco_sin_cuenta_y_cuenta_invalida`."""
     eid = await _empresa(db)
     await insertar_nomina(
         db,
@@ -456,6 +461,22 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
     subcadena la CURP ni el NSS que ese mismo empleado trae en la BD. Esto se descubrió por
     mutación: reintroducir el dato crudo en el mensaje de `CURP_ESTRUCTURA` dejaba pasar la
     versión anterior de esta prueba, que solo hacía la comprobación de patrón.
+
+    **Lo que esta red NO cubre, anotado para quien la toque** (verificado a mano en los seis
+    informes al cerrar la fase 2: hoy no hay fuga viva por ninguno de los dos huecos):
+
+    1. **La comprobación por valor es por fila.** Compara cada celda contra la CURP y el NSS de *ese*
+       empleado, así que una CURP **mal formada de otro** empleado interpolada en un mensaje se
+       escaparía de las dos comprobaciones a la vez: del patrón por estar mal formada, y del valor
+       por ser de otra fila. Cubrirlo exigiría cruzar cada celda contra todos los valores del
+       universo (O(filas²) sobre cadenas), y hoy ningún mensaje del módulo nombra el dato de otro
+       empleado — los que cruzan empleados (`CURP_DUPLICADA`, `NSS_DUPLICADO`) nombran **RFC**, que
+       no es dato enmascarado en este informe.
+    2. **Solo se recorre la hoja `Datos`.** La hoja `Banderas` viaja en el mismo archivo y no la
+       audita nada automático, ni aquí ni en `scripts/verificar_informes.py`. Ningún mensaje de
+       bandera de los seis informes interpola hoy un dato personal (B-10 no emite banderas de
+       hallazgo, y las compartidas de `universo_nomina` hablan de UUID, importes y estatus), pero
+       una bandera nueva que lo hiciera pasaría sin que nadie se enterara.
     """
     eid = await _empresa(db)
     # Cuatro CFDI que entre ellos disparan **todas** las validaciones cuyo mensaje interpolaba el

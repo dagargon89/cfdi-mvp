@@ -359,7 +359,8 @@ Para que la inclusión sea explícita, todo comprobante incluido que no sea `vig
 `ESTATUS_NO_VERIFICADO` (media) o `COMPROBANTE_CANCELADO` (alta, solo alcanzable con
 `incluir_cancelados=True`).
 
-**Esa condición la cumplen los seis informes desde la revisión final de la fase 2.** Antes solo B-01 y B-02
+**Esa condición la cumplen cinco de los seis informes desde la revisión final de la fase 2** (B-01, B-02,
+B-04, B-05 y B-07; la sexta, B-10, es la excepción declarada del final de este párrafo). Antes solo B-01 y B-02
 llamaban a `universo_nomina.banderas_de_estatus`; B-04, B-05 y B-07 la omitían **sin declararlo** y ninguno
 tiene columna de estatus en `Datos` (B-01/B-02 sí: "Estado SAT"), así que no había forma de saberlo: una
 celda de la matriz de B-04 llena por un CFDI cancelado ante el SAT decía "esa quincena está cubierta" sin
@@ -420,7 +421,9 @@ todos los nodos observados, incluido el invisible, y cuadran contra el encabezad
 las más de 150 columnas no sumaban el "Total percepciones" de su propia fila, en el informe cuyo propósito es
 alimentar pólizas contables. Basta 1 CFDI para que ocurra.
 
-**"Nombre empleado" es `comprobante_detalle.nombre_receptor` en los seis informes.** B-01 y B-02 usaban
+**"Nombre empleado" es `comprobante_detalle.nombre_receptor` en los cinco informes que declaran la columna**
+(B-01, B-02, B-05, B-07 y B-10, que la llama "Nombre"; B-04 no la declara: su matriz se identifica por RFC).
+B-01 y B-02 usaban
 `comprobante.razon_social_emisor` —el nombre del **patrón**— con la justificación de que "no hay campo de
 razón social del receptor en el modelo", falsa desde la fase 2. El resultado era un papel de trabajo fiscal
 con el nombre de la empresa repetido en todas las filas de esa columna, y nada lo detectaba porque el helper

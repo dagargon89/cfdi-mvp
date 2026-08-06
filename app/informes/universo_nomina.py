@@ -23,7 +23,11 @@ Lo compartido son tres cosas:
    las de descuadre entre los totales del encabezado de Nómina y la suma de sus nodos, que no
    dependen de cómo cada informe agrupe sus columnas dinámicas.
 
-**`banderas_de_estatus()` la llaman los seis informes del grupo B**, no solo B-01/B-02. Es la
+**`banderas_de_estatus()` la llaman cinco de los seis informes del grupo B** —B-01, B-02, B-04,
+B-05 y B-07—, no solo B-01/B-02 como al cerrar la fase 2. La sexta, B-10, la omite y lo argumenta;
+ver el final de este párrafo. (No confundir con `banderas_de_no_normalizables()`, que sí la llaman
+**los seis**: un CFDI que el ETL no pudo leer tampoco se puede auditar, así que B-10 también la
+necesita.) Es la
 condición explícita con la que el §11 del diseño acepta la divergencia de R-T1 ("todo
 comprobante incluido que no sea vigente lleva bandera"): B-04, B-05 y B-07 la omitían, así que
 una celda de la matriz de B-04 llena por un CFDI cancelado ante el SAT decía "esa quincena está

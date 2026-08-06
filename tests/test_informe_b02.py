@@ -643,3 +643,26 @@ async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     assert any(b.clave == "PERIODO_TRASLAPADO" for b in resultado.banderas)
+
+
+async def test_nombre_empleado_es_del_trabajador_no_del_patron(db: AsyncSession) -> None:
+    """**El único hueco que sobrevivió al barrido por mutación del re-revisor.** La ola de
+    correcciones arregló esta columna en B-01 y en B-02 —traía `comprobante.razon_social_emisor`,
+    el nombre de la EMPRESA, repetido en todas las filas de un papel de trabajo fiscal— pero solo
+    dejó prueba en B-01, B-05 y B-07. Revertir B-02 a `razon_social_emisor` dejaba los seis
+    archivos de pruebas de informes verdes: el sesgo natural de quien arregla dos informes y prueba
+    uno.
+
+    La segunda aserción es la que hace que la prueba no sea vacua: sin ella, un `None` (el valor que
+    daba el campo cuando el helper de pruebas no insertaba `comprobante_detalle`) o cualquier otro
+    valor equivocado pasaría igual mientras no fuera el nombre esperado. `"EMISOR DE PRUEBA SA DE
+    CV"` es el default de `factories.crear_comprobante` para `razon_social_emisor`, es decir, el
+    valor exacto que la mutación pondría ahí."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="aaaa1111-bbbb-2222-cccc-333333333333",
+                          nombre_receptor="JUANA INVENTADA DE PRUEBA")
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
+    nombre = resultado.filas[0][_columna(resultado, "Nombre empleado")]
+    assert nombre == "JUANA INVENTADA DE PRUEBA"
+    assert nombre != "EMISOR DE PRUEBA SA DE CV", "es la razón social del EMISOR: el nombre del patrón, no del trabajador"
