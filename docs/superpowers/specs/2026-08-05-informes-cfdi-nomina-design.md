@@ -276,6 +276,26 @@ viva por ninguno, es blindaje de regresión):
   donde el riesgo es más real: los mensajes de bandera son texto libre, y el incidente de B-10 fue
   exactamente así.
 
+**Un reporte de fuga no puede reproducir el dato que denuncia** (ronda 1 de arreglos). Auditar la fila 1
+como una fila cualquiera es correcto, pero el nombre de columna con el que se reporta una fuga sale de esa
+misma fila 1: cuando la celda que dispara la fuga **es** el encabezado, el campo `columna` acababa siendo el
+dato personal. Y los títulos dinámicos de B-01/B-02 se construyen con el `@Concepto` del XML —texto libre no
+controlado, la misma clase de contenido que causó el incidente de B-10—, así que un título contaminado
+también se publicaría al reportar una fuga de otra fila. Dos capas:
+
+1. `_nombre_de_columna` certifica la etiqueta con el **mismo** detector que encuentra las fugas
+   (`_datos_personales_en_celda`, una sola función para que no puedan divergir) y cae a `columna N` si no es
+   segura. Es la garantía principal.
+2. `FugaDatoPersonal.__post_init__` levanta `ValueError` si algo con estructura de CURP/NSS llega a cualquier
+   campo por cualquier otra ruta de construcción. **Falla, no censura:** recortar el valor en silencio
+   dejaría la red aparentando funcionar. La excepción nombra el campo, nunca el valor.
+
+`excel.HOJAS_CON_ENCABEZADO` (`Datos`, `Banderas`, `Diccionario`) es la fuente de verdad de qué hoja tiene
+fila de títulos, y vive en el módulo que **escribe** el libro porque es un hecho de su estructura.
+`Parámetros` no la tiene —su fila 1 ya es contenido— así que sus fugas se reportan por **posición**; antes se
+reportaban como si la columna se llamara "B-05 · Acumulado anual", un diagnóstico que manda a mirar donde no
+es.
+
 **El script sí maneja CURP y NSS reales, y nunca los imprime.** El razonamiento anterior —que
 `scripts/verificar_informes.py` no debía tocar datos personales reales, y por eso solo buscaba por patrón—
 se descartó: el script ya lee la BD real (calcula las identidades de B-00 sobre los datos de nómina, que
