@@ -446,46 +446,54 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
     aplica el motor: es el archivo que circula por correo lo que hay que auditar. Y se recorren
     TODAS las celdas de texto, no solo las declaradas sensibles — verificar el mecanismo no es
     verificar el resultado.
+
+    **Dos comprobaciones, no una, porque la de patrón sola tiene un punto ciego.**
+    `dato_personal_en_texto` busca la *estructura* de una CURP o de un NSS, así que no puede ver
+    una CURP **mal formada** interpolada en un mensaje — y el mensaje de `CURP_ESTRUCTURA` es
+    justamente el que solo puede llevar una CURP mal formada. Un dato personal defectuoso sigue
+    siendo un dato personal (una CURP con un carácter equivocado identifica igual a la persona),
+    así que se agrega la comprobación por **valor**: ninguna celda de la fila puede contener como
+    subcadena la CURP ni el NSS que ese mismo empleado trae en la BD. Esto se descubrió por
+    mutación: reintroducir el dato crudo en el mensaje de `CURP_ESTRUCTURA` dejaba pasar la
+    versión anterior de esta prueba, que solo hacía la comprobación de patrón.
     """
     eid = await _empresa(db)
-    # Dos empleados que se pisan la CURP y el NSS entre sí, y con defectos de estructura: es la
-    # combinación que dispara las validaciones de conjunto, entre periodos y de estructura a la
-    # vez, es decir todas las que interpolaban el dato.
-    await insertar_nomina(
-        db,
-        empresa_id=eid,
-        uuid="c0000001-0000-0000-0000-000000000001",
-        rfc_receptor="VECJ880326XXX",
-        curp="VECJ880326HDFLNS09",
-        nss="12345678901",  # dígito verificador inválido a propósito
-        banco="002",
-        cuenta_bancaria="123456789012",
-    )
-    await insertar_nomina(
-        db,
-        empresa_id=eid,
-        uuid="c0000002-0000-0000-0000-000000000002",
-        rfc_receptor="AAAA880326XXX",
-        curp="VECJ880326HDFLNS09",
-        nss="12345678901",
-        fecha_pago=date(2026, 7, 15),
-        fecha_final_pago=date(2026, 7, 15),
-    )
-    await insertar_nomina(
-        db,
-        empresa_id=eid,
-        uuid="c0000003-0000-0000-0000-000000000003",
-        rfc_receptor="AAAA880326XXX",
-        curp="AAAA880326HZZLNS08",
-        nss="98765432101",
-        fecha_pago=date(2026, 7, 31),
-        fecha_final_pago=date(2026, 7, 31),
-    )
+    # Cuatro CFDI que entre ellos disparan **todas** las validaciones cuyo mensaje interpolaba el
+    # dato: estructura de CURP y de NSS, entidad, inconsistencia RFC/CURP, los tres duplicados y
+    # `DATOS_CAMBIANTES`. Los valores son inventados (regla 12).
+    valores_por_empleado = [
+        # (uuid, rfc, curp, nss, fecha)
+        ("c0000001-0000-0000-0000-000000000001", "VECJ880326XXX", "VECJ880326HDFLNS09", "12345678901", date(2026, 6, 30)),
+        ("c0000002-0000-0000-0000-000000000002", "AAAA880326XXX", "VECJ880326HDFLNS09", "12345678901", date(2026, 7, 15)),
+        ("c0000003-0000-0000-0000-000000000003", "AAAA880326XXX", "AAAA880326HZZLNS08", "98765432101", date(2026, 7, 31)),
+        # CURP mal formada (13 caracteres) y NSS de longitud equivocada: dispara
+        # `CURP_ESTRUCTURA`, `RFC_CURP_INCONSISTENTE` y `NSS_LONGITUD`, los tres mensajes que la
+        # comprobación de patrón por sí sola no puede auditar.
+        ("c0000004-0000-0000-0000-000000000004", "BBBB880326XXX", "MALA880326HDF", "123456789", date(2026, 7, 31)),
+    ]
+    for uuid_cfdi, rfc, curp, nss, fecha in valores_por_empleado:
+        await insertar_nomina(
+            db,
+            empresa_id=eid,
+            uuid=uuid_cfdi,
+            rfc_receptor=rfc,
+            curp=curp,
+            nss=nss,
+            fecha_pago=fecha,
+            fecha_final_pago=fecha,
+            banco="002",
+            cuenta_bancaria="123456789012",
+        )
 
     p = _p()
     assert p.enmascarar_datos_personales is True, "el default del informe es enmascarar"
     resultado = await b10.consultar(db, eid, p)
-    assert resultado.filas, "sin filas esta prueba no comprobaría nada"
+    claves = _claves(resultado)
+    # Premisa: si el fixture no dispara estas validaciones, la prueba no comprueba sus mensajes.
+    for clave_esperada in ("CURP_ESTRUCTURA", "CURP_ENTIDAD", "RFC_CURP_INCONSISTENTE", "NSS_LONGITUD",
+                           "NSS_DIGITO_VERIFICADOR", "CURP_DUPLICADA", "NSS_DUPLICADO", "RFC_DUPLICADO",
+                           "DATOS_CAMBIANTES"):
+        assert clave_esperada in claves, f"el fixture debe disparar {clave_esperada} para auditar su mensaje"
 
     ctx = ContextoInforme(
         clave=b10.CLAVE,
@@ -498,14 +506,20 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
     hoja = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))["Datos"]
 
     titulos = [c.titulo for c in resultado.columnas]
+    indice_curp, indice_nss = titulos.index("CURP"), titulos.index("NSS")
+    # Nunca el valor en el mensaje de una aserción que falla: sería la misma fuga que denuncia.
     fugas: list[str] = []
-    for numero_fila, fila in enumerate(hoja.iter_rows(min_row=2, values_only=True), start=2):
-        for indice, valor in enumerate(fila):
-            tipo = validadores.dato_personal_en_texto(valor)
-            if tipo is not None:
-                # Nunca el valor en el mensaje de la aserción: sería la misma fuga.
-                fugas.append(f"{tipo} en '{titulos[indice]}' (fila {numero_fila})")
-    assert fugas == [], f"datos personales completos en la hoja Datos con enmascaramiento activo: {fugas}"
+    for numero_fila, (fila_escrita, fila_cruda) in enumerate(zip(hoja.iter_rows(min_row=2, values_only=True), resultado.filas), start=2):
+        crudos = {"CURP": fila_cruda[indice_curp], "NSS": fila_cruda[indice_nss]}
+        for indice, valor in enumerate(fila_escrita):
+            if validadores.dato_personal_en_texto(valor) is not None:
+                fugas.append(f"patrón de {validadores.dato_personal_en_texto(valor)} en '{titulos[indice]}' (fila {numero_fila})")
+            if indice in (indice_curp, indice_nss) or not isinstance(valor, str):
+                continue
+            for tipo, crudo in crudos.items():
+                if crudo and str(crudo) in valor:
+                    fugas.append(f"valor de {tipo} del propio empleado dentro de '{titulos[indice]}' (fila {numero_fila})")
+    assert fugas == [], f"datos personales en la hoja Datos con enmascaramiento activo: {fugas}"
 
 
 async def test_sdi_menor_al_salario_diario_implicito(db: AsyncSession) -> None:
