@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
@@ -243,3 +247,109 @@ def test_un_valor_personal_demasiado_corto_no_se_busca() -> None:
     assert v.fugas_de_datos_personales_en_libro(libro, {"CURP": ["X"], "NSS": ["88"]}) == []
     # Y uno de longitud suficiente sí: sin esta mitad, la prueba pasaría con la búsqueda desactivada.
     assert v.fugas_de_datos_personales_en_libro(libro, {"CURP": ["VECJ8803"]}) != []
+
+
+# --- El renderizado del hallazgo (`FugaDatoPersonal.__repr__`) ---
+
+
+def _fuga_contaminada() -> pytest.ExceptionInfo[ValueError]:
+    """Dispara el cable trampa y devuelve el `ExceptionInfo` con el marco ya capturado.
+
+    El objeto contaminado **solo existe** dentro del marco de `__post_init__` (un dataclass con
+    `slots=True` puebla sus campos antes de correr `__post_init__`, así que `self` ya lleva el valor
+    crudo cuando la capa 2 lanza). Ese marco es justo el que el formateador de tracebacks renderiza.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        v.FugaDatoPersonal(hoja="Datos", fila=1, columna=_CURP_INVENTADA, tipo="CURP", deteccion="patrón")
+    return excinfo
+
+
+def test_el_traceback_del_cable_trampa_no_reproduce_el_valor() -> None:
+    """**El hallazgo de la ronda 2.** El mensaje de la excepción nunca llevó el valor, pero el
+    mensaje no es la única vía por la que el contexto de una excepción llega a una pantalla: el
+    formateador de tracebacks de pytest imprime los **argumentos del marco** donde se levantó la
+    excepción, y ahí `self` es el objeto contaminado (un dataclass con `slots=True` puebla sus campos
+    antes de correr `__post_init__`). Salía como:
+
+        self = FugaDatoPersonal(hoja='Datos', fila=1, columna='VECJ880326HDFLNS09', ...)
+
+    que es el incidente original por otro mecanismo.
+
+    **Ejercita el formateador de verdad**, no `repr()` a secas: `excinfo.getrepr` es el mismo que usa
+    el reporte de la terminal, con `funcargs=True` como se lo pasa pytest al renderizar un fallo.
+    Probar solo `repr(objeto)` no habría cubierto el defecto, porque el defecto no estaba en el
+    mensaje sino en cómo lo renderiza otra herramienta.
+
+    Se asevera sobre la línea `self = ...`, que es **el único marco que el `--tb=auto` por defecto
+    —el de CI— renderiza con sus argumentos**. Ver el residual declarado abajo y en el docstring de
+    `FugaDatoPersonal`.
+    """
+    excinfo = _fuga_contaminada()
+    renderizado = str(excinfo.getrepr(style="long", funcargs=True))
+
+    linea_self = next((l for l in renderizado.splitlines() if l.startswith("self = FugaDatoPersonal(")), None)
+    assert linea_self is not None, "el marco del cable trampa no se renderizó: la prueba no comprobaría nada"
+    assert _CURP_INVENTADA not in linea_self, "el traceback del cable trampa reproduce el valor que denuncia"
+    # El diagnóstico sobrevive a la elisión: se ve qué se elidió y en qué hoja/fila.
+    assert v.TEXTO_ELIDIDO in linea_self and "hoja='Datos'" in linea_self and "fila=1" in linea_self
+
+    # **Residual declarado, no cubierto por ningún `__repr__`.** Con `--tb=long` (que NO es el
+    # default) pytest renderiza también el marco del `__init__` que genera `@dataclass`, y ahí los
+    # valores crudos son sus propios parámetros: `columna = 'VECJ...'`. Ningún método del objeto
+    # puede alcanzar los locales de una función generada. Lo mismo vale para `--showlocals` y para
+    # `valores_por_tipo` en el marco del propio auditor. Lo que sí queda cerrado —y es lo que corre
+    # en CI— lo fija `test_la_salida_real_de_pytest_no_reproduce_el_valor`.
+
+
+def test_la_salida_real_de_pytest_no_reproduce_el_valor(tmp_path: Path) -> None:
+    """La comprobación autoritativa: **la salida real de `pytest`** en un subproceso, con la
+    invocación por defecto (sin `--tb`, sin `-l`), que es la de CI.
+
+    Existe porque `getrepr` es la API del formateador y podría dejar de ser la que usa el reporte
+    real. Esto ejercita el binario completo. Y la prueba interna **no** envuelve la llamada en
+    `pytest.raises`, que es la situación de las tres pruebas de `tests/test_informe_b10.py` que
+    llaman al auditor directamente — las que motivaron el hallazgo.
+
+    El valor se le pasa al subproceso por el entorno y no incrustado en el archivo generado: si
+    estuviera en el fuente, el traceback lo imprimiría como parte del código de la prueba y esto
+    fallaría por un artefacto del andamiaje, no por el defecto que persigue.
+    """
+    archivo = tmp_path / "test_fuga_sin_capturar.py"
+    archivo.write_text(
+        "import os\n"
+        "from app.informes import validadores as v\n"
+        "\n"
+        "def test_dispara_el_cable_trampa() -> None:\n"
+        "    v.FugaDatoPersonal(hoja='Datos', fila=1, columna=os.environ['CURP_DE_PRUEBA'],\n"
+        "                       tipo='CURP', deteccion='patrón')\n",
+        encoding="utf-8",
+    )
+    raiz = Path(__file__).resolve().parent.parent
+    resultado = subprocess.run(
+        [sys.executable, "-m", "pytest", str(archivo), "-p", "no:cacheprovider"],
+        capture_output=True,
+        text=True,
+        cwd=raiz,
+        env={**os.environ, "PYTHONPATH": str(raiz), "CURP_DE_PRUEBA": _CURP_INVENTADA},
+    )
+    salida = resultado.stdout + resultado.stderr
+
+    # Premisas: la prueba interna falló de verdad y su traceback se imprimió con el marco del trampa.
+    assert resultado.returncode != 0, "la prueba interna debía fallar; si no, no hay traceback que auditar"
+    assert "self = FugaDatoPersonal(" in salida, "el marco del cable trampa no se renderizó: la prueba no comprueba nada"
+    assert v.TEXTO_ELIDIDO in salida, "el campo contaminado debe verse elidido, no ausente"
+    # Nunca el valor en el mensaje de la aserción: sería la misma fuga que denuncia.
+    lineas_con_fuga = [n for n, linea in enumerate(salida.splitlines(), start=1) if _CURP_INVENTADA in linea]
+    assert lineas_con_fuga == [], f"la salida real de pytest reproduce el valor en las líneas {lineas_con_fuga}"
+
+
+def test_el_repr_conserva_el_diagnostico_de_un_hallazgo_limpio() -> None:
+    """La mitad negativa, y la razón de no usar `repr=False` a secas: el `repr` **sí** se usa en el
+    camino sano —las premisas `assert fugas == []` de `tests/test_informe_b10.py` reportan la lista
+    de hallazgos—, así que apagarlo dejaría `<FugaDatoPersonal object at 0x...>` y perdería justo lo
+    que hace accionable el fallo. Sin esta prueba, elidir todo pasaría igual."""
+    fuga = v.FugaDatoPersonal(hoja="Banderas", fila=2, columna="Mensaje", tipo="CURP", deteccion="valor")
+
+    assert repr(fuga) == "FugaDatoPersonal(hoja='Banderas', fila=2, columna='Mensaje', tipo='CURP', deteccion='valor')"
+    assert v.TEXTO_ELIDIDO not in repr(fuga)
+    assert v.TEXTO_ELIDIDO not in fuga.descripcion

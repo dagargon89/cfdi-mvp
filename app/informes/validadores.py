@@ -98,25 +98,59 @@ recortada, y hace prácticamente imposible la coincidencia accidental (además, 
 celdas que son `str`: los importes son `Decimal` y las fechas `date`, y no se comparan)."""
 
 
-@dataclass(slots=True, frozen=True)
+TEXTO_ELIDIDO = "<elidido: dato personal>"
+"""Con qué se sustituye un campo de `FugaDatoPersonal` que lleva un dato personal, en **cualquier**
+renderizado del objeto. Ver `FugaDatoPersonal._publicable`."""
+
+
+@dataclass(slots=True, frozen=True, repr=False)
 class FugaDatoPersonal:
-    """Una celda de un libro ya escrito que lleva un dato personal. **Nunca guarda el valor**:
-    solo dónde está y de qué tipo es, porque quien la reporta lo hace en una terminal cuyo
-    historial queda guardado o en la salida de una prueba.
+    """Una celda de un libro ya escrito que lleva un dato personal. **Nunca publica el valor**: solo
+    dónde está y de qué tipo es, porque quien la reporta lo hace en una terminal cuyo historial
+    queda guardado o en la salida de una prueba.
 
-    **`__post_init__` es un cable trampa, no la garantía principal.** El campo `columna` se rellena
-    con el título de la columna, que es contenido del propio libro; si ese título fuera (o
-    contuviera) un dato personal, el reporte de la fuga reproduciría el valor que denuncia — la
-    fuga dentro del aviso de fuga. La garantía principal está en `_nombre_de_columna`, que certifica
-    la etiqueta con el **mismo** detector que encuentra las fugas. Este `__post_init__` levanta la
-    excepción si aun así se cuela algo con estructura de CURP/NSS por **cualquier** ruta de
-    construcción, presente o futura: no puede comprobar la vía "por valor" (no conoce el universo),
-    pero sí la estructural, y la comprueba sin necesitar ningún argumento extra.
+    **Tres capas, y la tercera es la que cierra el renderizado.**
 
-    **Falla, no censura.** Un dato personal en un campo de este objeto significa que la garantía de
-    arriba se rompió, y eso es un bug que nadie debe poder ignorar: recortar el valor en silencio
-    dejaría la red aparentando funcionar. El mensaje de la excepción nombra el campo, nunca el
-    valor."""
+    1. `_nombre_de_columna` certifica la etiqueta con el mismo detector que encuentra las fugas, y
+       es la garantía principal: por la vía del auditor no puede llegar aquí un campo contaminado.
+    2. `__post_init__` es un cable trampa: si algo con estructura de CURP/NSS llega a un campo por
+       **cualquier otra** ruta de construcción, presente o futura, levanta `ValueError`. **Falla, no
+       censura:** un dato personal en un campo de este objeto significa que la capa 1 se rompió, y
+       recortarlo en silencio dejaría la red aparentando funcionar. No puede comprobar la vía "por
+       valor" (no conoce el universo), pero sí la estructural, y sin necesitar argumentos extra.
+    3. **`__repr__` y `descripcion` pasan por `_publicable`.** Hallazgo de la ronda 2, y es sutil:
+       un dataclass con `slots=True` **puebla sus campos antes** de correr `__post_init__`, así que
+       en el instante en que la capa 2 lanza, `self` ya contiene el valor crudo — y el formateador
+       de tracebacks de pytest (`--tb=auto`, el default) imprime los argumentos del marco donde se
+       levantó la excepción, es decir `self = FugaDatoPersonal(..., columna='VECJ...', ...)`. El
+       mensaje de la excepción nunca llevaba el valor; **el `repr` del objeto sí**, y lo imprimía
+       otra herramienta. Era el incidente original por un mecanismo distinto.
+
+    **La afirmación exacta, corregida.** Antes decía "la excepción nombra el campo, nunca el valor":
+    cierto del mensaje, falso de lo que CI imprimiría. Lo que se sostiene ahora es: *ninguna forma
+    de convertir este objeto en texto reproduce el valor*, y con el `--tb=auto` por defecto —el de
+    CI, y el único que `pyproject.toml` deja en pie— el objeto es lo único que se renderiza del
+    marco donde salta el cable trampa, así que la salida real queda limpia. Lo fija
+    `tests/test_informes_validadores.py::test_la_salida_real_de_pytest_no_reproduce_el_valor`, que
+    corre pytest de verdad en un subproceso.
+
+    **Residual declarado, que ningún `__repr__` puede cerrar.** Con `--tb=long` o `--showlocals`
+    —ninguno es el default; son acciones deliberadas de quien depura— pytest renderiza también los
+    marcos que *recibieron* el valor: el `__init__` que genera `@dataclass`, donde los campos son
+    sus propios parámetros, y el del propio auditor, donde `valores_por_tipo` trae las CURP y los
+    NSS de todo el universo. Son locales de marcos de CPython, fuera del alcance de cualquier método
+    del objeto; la segunda exposición existiría igual aunque este cable trampa no lanzara nunca,
+    porque cualquier excepción dentro del auditor produce ese mismo marco. Por eso la capa 1 es la
+    garantía y esta es la red: lo que se sostiene es que por la vía del auditor nunca llega aquí un
+    campo contaminado.
+
+    **`repr=False` + `__repr__` propio, no `repr=False` a secas.** Apagar el `repr` del dataclass
+    dejaría `<FugaDatoPersonal object at 0x7f...>`, que no dice nada — y el `repr` **sí** se usa en
+    el camino sano: las premisas `assert fugas == []` de `tests/test_informe_b10.py` reportan la
+    lista de hallazgos, y ahí saber la hoja, la fila y la columna es justo lo que hace accionable el
+    fallo. Elidir campo por campo conserva todo el diagnóstico y sacrifica solo lo que no puede
+    salir.
+    """
 
     hoja: str
     fila: int
@@ -135,11 +169,37 @@ class FugaDatoPersonal:
                     "no puede reproducir el valor que denuncia (ver `_nombre_de_columna`)"
                 )
 
+    def _publicable(self, valor: str) -> str:
+        """**Único punto por el que un campo de texto se convierte en salida.** Lo usan `__repr__` y
+        `descripcion`, que son las dos únicas formas de renderizar el objeto; tener un solo punto es
+        lo que hace que no puedan divergir, igual que `_datos_personales_en_celda` es el único
+        detector.
+
+        Con el mismo detector estructural de la capa 2, así que cubre exactamente los casos en que
+        esa capa lanza — que son los que el formateador de tracebacks acabaría imprimiendo."""
+        return TEXTO_ELIDIDO if dato_personal_en_texto(valor) is not None else valor
+
+    def __repr__(self) -> str:
+        return (
+            f"FugaDatoPersonal(hoja={self._publicable(self.hoja)!r}, fila={self.fila!r}, "
+            f"columna={self._publicable(self.columna)!r}, tipo={self._publicable(self.tipo)!r}, "
+            f"deteccion={self._publicable(self.deteccion)!r})"
+        )
+
     @property
     def descripcion(self) -> str:
-        """Único texto que se publica de una fuga. Se construye **solo** con campos ya validados por
-        `__post_init__`, así que no puede introducir un valor que los campos no tuvieran."""
-        return f"{self.tipo} (por {self.deteccion}) en la hoja '{self.hoja}', fila {self.fila}, columna '{self.columna}'"
+        """El texto que publican los dos llamadores. Cada campo pasa por `_publicable` en vez de
+        confiar en que `__post_init__` ya validó: no cambia el resultado hoy, pero deja las dos
+        rutas de renderizado con la misma garantía y sin depender del orden de construcción.
+
+        **Residual declarado:** `_publicable` comprueba lo estructural, así que un campo contaminado
+        por la vía "por valor" —una CURP mal formada del universo— no se elidiría. Es el mismo
+        residual de la capa 2 y por la misma razón (ninguna de las dos conoce el universo); lo cubre
+        la capa 1, que sí compara por valor, y por eso es ella la garantía principal."""
+        return (
+            f"{self._publicable(self.tipo)} (por {self._publicable(self.deteccion)}) en la hoja "
+            f"'{self._publicable(self.hoja)}', fila {self.fila}, columna '{self._publicable(self.columna)}'"
+        )
 
 
 def _datos_personales_en_celda(valor: object, buscables: Mapping[str, Sequence[str]]) -> list[tuple[str, str]]:
