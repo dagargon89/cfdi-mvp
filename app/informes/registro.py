@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.informes import b01_catalogo_sat, b02_conceptos_patron, b04_matriz_empleado_periodo, b05_acumulado_anual, b07_prestamos
+from app.informes import (
+    b01_catalogo_sat,
+    b02_conceptos_patron,
+    b04_matriz_empleado_periodo,
+    b05_acumulado_anual,
+    b07_prestamos,
+    b10_validacion_receptor,
+)
 from app.informes.base import DefinicionInforme
 
 _MODULOS: tuple[Any, ...] = (
@@ -17,6 +24,7 @@ _MODULOS: tuple[Any, ...] = (
     b04_matriz_empleado_periodo,
     b05_acumulado_anual,
     b07_prestamos,
+    b10_validacion_receptor,
 )
 
 REGISTRO: dict[str, DefinicionInforme] = {modulo.CLAVE: modulo for modulo in _MODULOS}
