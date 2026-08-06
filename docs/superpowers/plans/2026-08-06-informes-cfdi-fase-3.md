@@ -606,7 +606,7 @@ git commit -m "feat(config): resolucion por vigencia con invariante de confirmac
 **`tabla_vacaciones` — art. 76 de la LFT, reforma de 2023.** 12 días el primer año, +2 por año hasta 20 al quinto, y +2 cada cinco años después. **Cita el artículo en un comentario del YAML.**
 
 **`catalogo_percepcion.yaml` — las marcas del §3.1.** Es el trabajo detallado de esta tarea:
-- `es_ingreso_ordinario`: falso para separación e indemnización y para jubilaciones, pensiones y haberes de retiro; verdadero para el resto.
+- `es_ingreso_ordinario`: **falso para los cinco tipos del régimen del art. 95 de la LISR** — `022` Prima por antigüedad, `023` Pagos por separación, `025` Indemnizaciones, `039` Jubilaciones/pensiones/haberes de retiro y `044` idem en parcialidades; verdadero para el resto. **Los códigos están verificados contra el catálogo real** (`C75b_c_TipoPercepcion` de satcfdi, **44 tipos**), no tomados de memoria: `022` es *Prima por antigüedad*, no separación, y omitir `025` marcaría las indemnizaciones como ingreso ordinario, sobreestimando la base anual del ISR en B-05.
 - `base_exencion` y `factor_exencion`: del **artículo 93 de la LISR**. Casos con tope conocido: aguinaldo (30 días de UMA), prima vacacional y PTU (15 días de UMA cada uno), horas extra, previsión social, fondo de ahorro, primas de antigüedad, indemnizaciones. Los que no tienen exención llevan `NINGUNA` y factor nulo.
 - `integra_sbc`: artículo 27 de la LSS.
 - `es_provisionable`: verdadero para lo que entra en el pasivo laboral (aguinaldo, vacaciones, prima vacacional).
@@ -668,12 +668,22 @@ def test_marcas_de_percepcion_son_coherentes() -> None:
 
 
 def test_separacion_y_jubilacion_no_son_ingreso_ordinario() -> None:
-    """B-05.R4: tienen régimen fiscal propio (arts. 95 y 96 LISR) y no se acumulan al ordinario."""
+    """B-05.R4: tienen régimen fiscal propio (arts. 95 y 96 LISR) y no se acumulan al ordinario.
+
+    Los cinco códigos están verificados contra el catálogo real de satcfdi
+    (`C75b_c_TipoPercepcion`, 44 tipos), no de memoria:
+      022 Prima por antigüedad · 023 Pagos por separación · 025 Indemnizaciones
+      039 Jubilaciones, pensiones o haberes de retiro · 044 idem en parcialidades
+    Los tres primeros caen bajo el art. 95 de la LISR, que los agrupa explícitamente
+    ("primas de antigüedad, retiro e indemnizaciones u otros pagos por separación").
+    Omitir 025 marcaría las indemnizaciones como ingreso ordinario y **sobreestimaría la
+    base anual del ISR** en la columna 11 de B-05.
+    """
     datos = yaml.safe_load((_RAIZ / "catalogo_percepcion.yaml").read_text(encoding="utf-8"))
     por_tipo = {f["tipo_percepcion"]: f for f in datos["catalogo_percepcion_marca"]}
-    for tipo in ("022", "023", "039", "044"):
-        if tipo in por_tipo:
-            assert por_tipo[tipo]["es_ingreso_ordinario"] is False, f"{tipo} no es ingreso ordinario"
+    for tipo in ("022", "023", "025", "039", "044"):
+        assert tipo in por_tipo, f"falta sembrar el tipo {tipo}"
+        assert por_tipo[tipo]["es_ingreso_ordinario"] is False, f"{tipo} no es ingreso ordinario"
 
 
 def test_todo_parametro_fiscal_declara_su_fuente() -> None:
