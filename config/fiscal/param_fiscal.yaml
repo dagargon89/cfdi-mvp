@@ -2,16 +2,12 @@
 # fuente: ningún importe fiscal se codifica en el programa; todo vive aquí y en la tabla
 # `param_fiscal`, y se resuelve por fecha).
 #
-# ESTRUCTURA — todavía sin valores: los siembra la tarea 3.
+# CÓMO SE REVISA ESTE ARCHIVO. Cada renglón trae su `fuente` con la liga al documento
+# oficial que lo publica. La revisión consiste en abrir esa liga y comparar la cifra. Ver
+# `config/fiscal/README.md` para la tabla resumida y lo que falta por capturar.
 #
-#   param_fiscal:
-#     - ejercicio: 2026            # opcional; por omisión, el año de `vigencia_desde`
-#       clave: UMA_DIARIA
-#       valor: '117.31'            # ENTRECOMILLADO SIEMPRE: sin comillas el YAML lo lee
-#                                  # como float y pierde precisión. El cargador lo rechaza.
-#       vigencia_desde: 2026-02-01
-#       vigencia_hasta: null       # null = vigente hasta nuevo aviso
-#       fuente: 'INEGI, boletín UMA 2026 — https://...'
+# ENTRECOMILLADO OBLIGATORIO en `valor`: sin comillas el YAML lo lee como float y pierde
+# precisión. El cargador rechaza el float con un mensaje explícito.
 #
 # Claves esperadas y de dónde sale cada una. La lista es cerrada: el cargador rechaza
 # cualquier otra (`CLAVES_PARAM_FISCAL` en app/services/configuracion_fiscal.py), porque
@@ -36,5 +32,66 @@
 #
 # Todo lo que se cargue queda PENDIENTE DE CONFIRMACIÓN: un valor sin confirmar no calcula.
 # La confirmación se hace desde la pantalla de configuración, con nombre y fecha.
+#
+# LO QUE FALTA Y POR QUÉ IMPORTA (detallado en el README):
+#   - Los valores de 2025. La UMA cambia el 1 de febrero, así que del 1 al 31 de enero de
+#     2026 aplica todavía la UMA 2025. Con esta semilla, `valor_vigente('UMA_DIARIA',
+#     2026-01-15)` devuelve `None` y el informe reporta el hueco. Es correcto que lo reporte;
+#     lo que falta es capturar el tramo 2025 (con su `vigencia_hasta: 2026-01-31`).
+#   - `TIPO_CAMBIO_USD`. Cambia todos los días hábiles: no es una semilla, lo llena la
+#     sincronización con el DOF. No se siembra un valor "de ejemplo" a propósito — un tipo de
+#     cambio viejo confirmado es peor que la ausencia del dato.
 
-param_fiscal: []
+param_fiscal:
+  # ---------------------------------------------------------------------------------------
+  # UMA 2026 — INEGI. Vigente del 1 de febrero de 2026 al 31 de enero de 2027.
+  # Base legal: art. 26, apartado B, párrafo sexto de la Constitución, y art. 5 de la Ley
+  # para Determinar el Valor de la UMA (el INEGI publica los tres valores cada enero y
+  # entran en vigor el 1 de febrero).
+  # Relación interna: mensual = diaria x 30.4 ; anual = mensual x 12. Las tres cifras de
+  # abajo cumplen esa relación exactamente, así que un dedazo en una de ellas se nota al
+  # comprobar la multiplicación.
+  # ---------------------------------------------------------------------------------------
+  - ejercicio: 2026
+    clave: UMA_DIARIA
+    valor: '117.31'
+    vigencia_desde: 2026-02-01
+    vigencia_hasta: null
+    fuente: 'INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf'
+
+  - ejercicio: 2026
+    clave: UMA_MENSUAL
+    valor: '3566.22'
+    vigencia_desde: 2026-02-01
+    vigencia_hasta: null
+    fuente: 'INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf (117.31 x 30.4)'
+
+  - ejercicio: 2026
+    clave: UMA_ANUAL
+    valor: '42794.64'
+    vigencia_desde: 2026-02-01
+    vigencia_hasta: null
+    fuente: 'INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf (3566.22 x 12)'
+
+  # ---------------------------------------------------------------------------------------
+  # Salarios mínimos 2026 — resolución del CONASAMI publicada en el DOF el 09-12-2025.
+  # Vigentes desde el 1 de enero de 2026 (el salario mínimo cambia con el año calendario,
+  # no con la UMA: por eso las fechas de vigencia de estos dos renglones no coinciden con
+  # las de arriba, y no es un error de captura).
+  # Se siembran LAS DOS ZONAS. Cuál aplica es política de cada empresa
+  # (`configuracion_empresa.zona_salarial`) y el servicio se niega a adivinarla: Ciudad
+  # Juárez está en la Zona Libre de la Frontera Norte, donde el mínimo es ~40% mayor.
+  # ---------------------------------------------------------------------------------------
+  - ejercicio: 2026
+    clave: SALARIO_MINIMO_GENERAL
+    valor: '315.04'
+    vigencia_desde: 2026-01-01
+    vigencia_hasta: null
+    fuente: 'DOF 09-12-2025, resolución del CONASAMI (salarios mínimos 2026) — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025'
+
+  - ejercicio: 2026
+    clave: SALARIO_MINIMO_ZLFN
+    valor: '440.87'
+    vigencia_desde: 2026-01-01
+    vigencia_hasta: null
+    fuente: 'DOF 09-12-2025, resolución del CONASAMI (Zona Libre de la Frontera Norte 2026) — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025'

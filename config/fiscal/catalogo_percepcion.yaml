@@ -1,38 +1,705 @@
 # Marcas por tipo de percepción de nómina (§3.1 del documento fuente): lo que el catálogo
 # `c_TipoPercepcion` del SAT no trae y los informes B-03/B-05/B-06 necesitan.
 #
-# ESTRUCTURA — todavía sin renglones: los siembra la tarea 3, con la cita del artículo de
-# la LISR/LSS de cada marca en un comentario y un `# REVISAR: <tipo>` donde haya duda.
+# ======================================================================================
+# CÓMO SE REVISA ESTE ARCHIVO
+# ======================================================================================
+# Los 44 tipos son los del catálogo real de satcfdi (`C75b_c_TipoPercepcion`), enumerados
+# con el propio catálogo, no de memoria. Ninguno se inventó y ninguno falta.
 #
-#   catalogo_percepcion_marca:
-#     - tipo_percepcion: '002'     # ENTRECOMILLADO SIEMPRE: es clave de catálogo del SAT,
-#                                  # '002' no es 2. El cargador rechaza el entero.
-#       es_ingreso_ordinario: true
-#       base_exencion: UMA_DIAS    # UMA_DIAS | SM_DIAS | PORCENTAJE | NINGUNA
-#       factor_exencion: '30'      # entrecomillado; obligatorio salvo con NINGUNA, donde
-#                                  # debe ir ausente o null
-#       integra_sbc: true
-#       es_provisionable: true
+# Cada renglón cita el artículo del que sale su exención y su marca de SBC. Las citas de la
+# LISR y de la LSS se verificaron contra los PDF oficiales de la Cámara de Diputados
+# (LISR última reforma DOF 01-04-2024; LSS última reforma DOF 15-01-2026), no de memoria:
+# la numeración de fracciones del art. 93 que circula en resúmenes suele estar corrida.
 #
-# Qué significa cada marca:
+# Cada duda declarada va en un comentario `# REVISAR (0NN): ...` inmediatamente arriba del
+# renglón, y dice QUÉ genera la duda, no solo que la hay. `config/fiscal/README.md` los
+# lista todos agrupados por gravedad. **Es mejor una duda declarada que un factor
+# inventado**: donde no hay base sólida en el art. 93 se sembró `NINGUNA` (gravado) y se
+# marcó, en vez de fabricar un factor.
 #
-#   es_ingreso_ordinario  Falso para lo que tiene régimen fiscal propio y no se acumula al
-#                         ingreso ordinario (separación e indemnización; jubilaciones,
-#                         pensiones y haberes de retiro). Verdadero para el resto.
-#   base_exencion         Sobre qué se calcula el tramo exento del art. 93 LISR: días de
-#                         UMA, días de salario mínimo, un porcentaje, o ninguna exención.
-#   factor_exencion       Cuántos días o qué porcentaje, según la base.
-#   integra_sbc           Si integra al salario base de cotización (art. 27 LSS).
-#   es_provisionable      Si entra al pasivo laboral (aguinaldo, vacaciones, prima
-#                         vacacional) que calcula B-06.
+# Estas marcas quedan PENDIENTES DE CONFIRMACIÓN al cargarse, igual que `param_fiscal`: una
+# marca sin confirmar no participa en ningún cálculo de exención, y si al recargar cambia
+# cualquiera de sus campos, la confirmación anterior se limpia.
 #
-# Como `param_fiscal`, estas marcas quedan PENDIENTES DE CONFIRMACIÓN al cargarse: una marca
-# sin confirmar no participa en ningún cálculo de exención, y si al recargar cambia
-# cualquiera de sus campos, la confirmación anterior se limpia. La razón por la que la puerta
-# pesa más aquí que en la UMA: la UMA se verifica contra un único boletín oficial, y estos
-# son ~46 factores derivados a mano del art. 93 de la LISR.
+# ======================================================================================
+# CONVENCIONES DE CAPTURA
+# ======================================================================================
+#   tipo_percepcion   ENTRECOMILLADO SIEMPRE: es clave de catálogo del SAT, '002' no es 2 y
+#                     '022' suelto lo lee YAML como el entero 22. El cargador rechaza el
+#                     entero y exige exactamente tres posiciones.
+#   base_exencion     UMA_DIAS | SM_DIAS | PORCENTAJE | NINGUNA
+#   factor_exencion   Entrecomillado (float pierde precisión). Obligatorio salvo con
+#                     NINGUNA, donde debe ir ausente o null.
+#                       · con UMA_DIAS  = número de días de UMA exentos
+#                       · con SM_DIAS   = número de días de salario mínimo exentos
+#                       · con PORCENTAJE = **porcentaje del importe, escala 0-100**
+#                         ('100' = exento total, '50' = la mitad). No es una fracción.
+#                         Esta convención la fija esta semilla; quien consuma
+#                         `factor_exencion` debe respetarla.
+#   integra_sbc       Si integra al salario base de cotización (art. 27 LSS). Ojo: el art.
+#                     27 dice que TODO integra salvo nueve exclusiones tasadas, y varias de
+#                     esas exclusiones son PARCIALES (hasta un tope; el excedente sí
+#                     integra). Este campo es booleano y no puede expresar un tope: donde la
+#                     exclusión es parcial se capturó el caso típico y se marcó la duda.
+#   es_provisionable  Si entra al pasivo laboral que calcula B-06.
+#
+# ======================================================================================
+# TRES LÍMITES DEL MODELO QUE NINGÚN RENGLÓN PUEDE EXPRESAR
+# ======================================================================================
+# 1. El TOPE CONJUNTO DE PREVISIÓN SOCIAL (penúltimo párrafo del art. 93 LISR): la suma de
+#    las exenciones de previsión social se limita a 1 UMA anual cuando el sueldo más la
+#    exención pasan de 7 UMA anuales. Es un tope por trabajador y por año sobre la SUMA de
+#    varios tipos, no un factor por tipo. Los tipos afectados llevan `PORCENTAJE: '100'`
+#    (la exención "en bruto") y su nota de revisión lo dice. Quien calcule la exención tiene
+#    que aplicar ese tope aparte; si no, sobreestimará el monto exento.
+#    El mismo párrafo EXCEPTÚA del tope a: jubilaciones, pensiones y haberes de retiro,
+#    indemnizaciones por riesgos de trabajo o enfermedades, reembolsos de gastos médicos y
+#    de funeral, seguros de gastos médicos, seguros de vida y fondos de ahorro.
+# 2. Los FACTORES QUE NO SON DEL PERIODO: 90 UMA "por cada año de servicio" (093-XIII),
+#    15 UMA "diarias" (093-IV), 1 UMA "por cada domingo laborado" (093-XIV). El factor está
+#    capturado con el número de la ley, pero el multiplicador (años, días, domingos) NO
+#    viene en el CFDI de nómina y hay que obtenerlo de otro lado.
+# 3. Las CONDICIONES QUE EL CFDI NO INFORMA: "que se concedan de manera general", "cuando
+#    reúnan los requisitos de deducibilidad", "cuando se comprueben con CFDI". Se sembró
+#    suponiendo que la condición se cumple, porque es el caso normal, y se marcó la duda.
+#
+# ======================================================================================
+# UNA NOTA SOBRE "SALARIO MÍNIMO" EN EL TEXTO DEL ART. 93
+# ======================================================================================
+# El texto vigente de la LISR sigue diciendo "salario mínimo general del área geográfica".
+# Se captura como UMA_DIAS y no como SM_DIAS porque el art. 26-B de la Constitución
+# (reforma DOF 27-01-2016) y su tercero transitorio ordenan que toda referencia al salario
+# mínimo como unidad de cuenta para obligaciones fiscales se entienda hecha a la UMA. El
+# salario mínimo solo se usa como salario. Por eso no hay ningún renglón con `SM_DIAS`.
 #
 # Dos renglones con el mismo `tipo_percepcion` son un error: el cargador los rechaza diciendo
 # en qué renglón venía el primero.
 
-catalogo_percepcion_marca: []
+catalogo_percepcion_marca:
+
+  # ------------------------------------------------------------------------------------
+  # Salario y conceptos ordinarios
+  # ------------------------------------------------------------------------------------
+
+  # 001 Sueldos, Salarios Rayas y Jornales.
+  # Gravado íntegro: es la cuota diaria del art. 27, primer párrafo, LSS, y ninguna fracción
+  # del art. 93 LISR lo exenta. Integra al SBC por definición.
+  - tipo_percepcion: '001'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 002 Gratificación Anual (Aguinaldo).
+  # Exención: art. 93, fracción XIV LISR — "hasta el equivalente del salario mínimo general
+  # [UMA] elevado a 30 días, cuando dichas gratificaciones se otorguen en forma general".
+  # SBC: "gratificaciones" está en la lista de integrantes del art. 27, primer párrafo, LSS
+  # y no aparece en ninguna de las nueve exclusiones.
+  # Provisionable: es el pasivo laboral clásico de B-06 (art. 87 LFT).
+  - tipo_percepcion: '002'
+    es_ingreso_ordinario: true
+    base_exencion: UMA_DIAS
+    factor_exencion: '30'
+    integra_sbc: true
+    es_provisionable: true
+
+  # 003 Participación de los Trabajadores en las Utilidades (PTU).
+  # Exención: art. 93, fracción XIV LISR — 15 días de UMA.
+  # SBC: art. 27, fracción IV LSS excluye expresamente "las participaciones en las
+  # utilidades de la empresa".
+  - tipo_percepcion: '003'
+    es_ingreso_ordinario: true
+    base_exencion: UMA_DIAS
+    factor_exencion: '15'
+    integra_sbc: false
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Previsión social y prestaciones en especie
+  # ------------------------------------------------------------------------------------
+
+  # 004 Reembolso de Gastos Médicos Dentales y Hospitalarios.
+  # Exención: art. 93, fracción VI LISR — exentos íntegros, pero solo "que se concedan de
+  # manera general, de acuerdo con las leyes o contratos de trabajo".
+  # SBC: no está en las nueve exclusiones del art. 27 LSS; se marca no integrante por ser
+  # previsión social que no se entrega "por su trabajo", que es criterio, no texto.
+  # REVISAR (004): la generalidad de la prestación no viene en el CFDI. Si el reembolso se
+  #   dio solo a algunos trabajadores, es gravado y esta marca lo exentaría de más. Además
+  #   `integra_sbc: false` se apoya en criterio, no en una fracción del art. 27 LSS.
+  - tipo_percepcion: '004'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 005 Fondo de Ahorro.
+  # Exención: art. 93, fracción XI LISR — exento "cuando reúnan los requisitos de
+  # deducibilidad del Título II" (art. 27, fracción XI LISR: generalidad, aportación patronal
+  # igual a la del trabajador y tope del 13% del salario). Está exceptuado del tope conjunto
+  # de previsión social por el último párrafo del art. 93.
+  # SBC: art. 27, fracción II LSS excluye "el ahorro, cuando se integre por un depósito de
+  # cantidad semanaria, quincenal o mensual igual del trabajador y de la empresa; si se
+  # constituye en forma diversa o puede el trabajador retirarlo más de dos veces al año,
+  # integrará salario".
+  # REVISAR (005): las dos marcas son condicionales y las condiciones no vienen en el CFDI
+  #   (aportación pareja, tope del 13%, número de retiros al año). Si el fondo no cumple, el
+  #   concepto es gravado Y integra al SBC: las dos marcas cambian a la vez.
+  - tipo_percepcion: '005'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 006 Caja de ahorro.
+  # Misma base que el fondo de ahorro: art. 93, fracción XI LISR y art. 27, fracción II LSS.
+  # REVISAR (006): mismas condiciones que el 005, y una más: la caja de ahorro suele ser un
+  #   mecanismo de los trabajadores (no una aportación patronal), en cuyo caso el reintegro
+  #   del ahorro propio no es ingreso y ni siquiera debería estar en la nómina como percepción.
+  - tipo_percepcion: '006'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 009 Contribuciones a Cargo del Trabajador Pagadas por el Patrón.
+  # Gravado: no lo exenta ninguna fracción del art. 93 (el ISR que el patrón absorbe es
+  # ingreso del trabajador; solo la CUOTA DE SEGURIDAD SOCIAL tiene exención propia, y esa
+  # tiene su tipo aparte, el 027).
+  # REVISAR (009): se sembró `integra_sbc: true` porque es una cantidad entregada al
+  #   trabajador por su trabajo (art. 27, primer párrafo LSS) y no está en las exclusiones;
+  #   existe criterio de que absorber una contribución no incrementa el SBC. Confirmar.
+  - tipo_percepcion: '009'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 010 Premios por puntualidad.
+  # Gravado: ninguna fracción del art. 93 exenta los premios de puntualidad.
+  # REVISAR (010): el SBC no es un sí/no. El art. 27, fracción VII LSS excluye los premios
+  #   por asistencia y puntualidad "siempre que el importe de cada uno de estos conceptos no
+  #   rebase el diez por ciento del salario base de cotización", y el penúltimo párrafo del
+  #   mismo artículo aclara que si lo rebasa "solamente se integrarán los excedentes". Se
+  #   sembró `true` (el caso conservador: integra) porque el modelo no expresa el tope.
+  - tipo_percepcion: '010'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 011 Prima de Seguro de vida.
+  # Exención: la prima pagada por el patrón es previsión social; el art. 93, fracción XXI
+  # LISR exenta lo que las aseguradoras pagan por seguros de vida contratados por el
+  # empleador, y el último párrafo del art. 93 exceptúa a los seguros de vida del tope
+  # conjunto de previsión social, siempre que se cumplan los requisitos de las fracciones XI
+  # y XXI del art. 27 LISR.
+  # SBC: art. 27, fracción VIII LSS (cantidades aportadas para fines sociales).
+  # REVISAR (011): el art. 93 exenta lo que la ASEGURADORA paga al beneficiario; que la PRIMA
+  #   pagada por el patrón no sea ingreso gravable del trabajador es criterio de previsión
+  #   social, no un texto que yo pueda citar. `PORCENTAJE 100` puede ser demasiado generoso.
+  - tipo_percepcion: '011'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 012 Seguro de Gastos Médicos Mayores.
+  # Exención: art. 93, fracción VI LISR (gastos médicos concedidos de manera general) y
+  # último párrafo del art. 93, que exceptúa a los seguros de gastos médicos del tope
+  # conjunto de previsión social.
+  # REVISAR (012): misma duda que el 011 — la exención está redactada para el REEMBOLSO, y
+  #   aquí lo que se registra es la prima pagada por el patrón. Además la condición de
+  #   generalidad no viene en el CFDI.
+  - tipo_percepcion: '012'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 013 Cuotas Sindicales Pagadas por el Patrón.
+  # REVISAR (013): NO ENCONTRÉ BASE EN EL ART. 93 para exentar esto — no lo mencionan las
+  #   fracciones VI ni VIII, y no me parece "de naturaleza análoga" a becas o guarderías. Se
+  #   sembró GRAVADO por prudencia, en vez de inventarle un factor. Para el SBC sí hay texto:
+  #   el art. 27, fracción II LSS excluye "las cantidades otorgadas por el patrón para fines
+  #   sociales de carácter sindical", y por eso `integra_sbc: false`.
+  - tipo_percepcion: '013'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false
+
+  # 014 Subsidios por incapacidad.
+  # Exención: art. 93, fracción VIII LISR los nombra expresamente ("subsidios por
+  # incapacidad") como previsión social, lo que los sujeta al tope conjunto; pero el último
+  # párrafo del art. 93 exceptúa del tope a "las indemnizaciones por riesgos de trabajo o
+  # enfermedades" (art. 93, fracción III), que es lo que un subsidio por riesgo de trabajo es.
+  # REVISAR (014): cuál de los dos regímenes aplica depende de si la incapacidad es por
+  #   riesgo de trabajo o por enfermedad general, y eso NO viene en el nodo de percepciones
+  #   del CFDI (viene en el nodo `Incapacidades`, que es otra cosa). Se sembró exento al 100%
+  #   sin tope; si es previsión social ordinaria, hay que aplicarle el tope conjunto.
+  - tipo_percepcion: '014'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 015 Becas para trabajadores y/o hijos.
+  # Exención: art. 93, fracción VIII LISR las nombra expresamente ("becas educacionales para
+  # los trabajadores o sus hijos"), concedidas de manera general.
+  # REVISAR (015): está SUJETA AL TOPE CONJUNTO de previsión social del penúltimo párrafo del
+  #   art. 93 (no está en la lista de exceptuados). `PORCENTAJE 100` es la exención en bruto;
+  #   quien calcule tiene que aplicarle el tope de 1 UMA anual junto con los demás conceptos
+  #   de previsión social del mismo trabajador, o exentará de más.
+  - tipo_percepcion: '015'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Tiempo extra y primas
+  # ------------------------------------------------------------------------------------
+
+  # 019 Horas extra.
+  # Exención: art. 93, fracción I LISR — para los trabajadores de salario mínimo, el 100% del
+  # tiempo extraordinario dentro del límite de la LFT; "tratándose de los demás trabajadores,
+  # el 50% ... sin que esta exención exceda del equivalente de cinco veces el salario mínimo
+  # general [UMA] ... por cada semana de servicios".
+  # SBC: art. 27, fracción IX LSS excluye "el tiempo extraordinario dentro de los márgenes
+  # señalados en la Ley Federal del Trabajo" (nueve horas por semana, arts. 66-68 LFT); el
+  # excedente sí integra.
+  # REVISAR (019): el renglón captura SOLO el 50% del caso general y se pierden tres cosas
+  #   que el modelo no puede expresar: (a) el 100% para quien gana el salario mínimo, (b) el
+  #   tope de 5 UMA por semana, (c) que solo aplica dentro del límite de horas de la LFT. El
+  #   `integra_sbc: false` supone que las horas extra están dentro de los márgenes legales.
+  - tipo_percepcion: '019'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '50'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 020 Prima dominical.
+  # Exención: art. 93, fracción XIV LISR — "hasta por el equivalente de un salario mínimo
+  # general [UMA] ... por cada domingo que se labore".
+  # SBC: "primas" está en la lista de integrantes del art. 27, primer párrafo LSS.
+  # REVISAR (020): el factor '1' es POR DOMINGO LABORADO, no un tope del periodo. El número
+  #   de domingos trabajados no viene en el CFDI de nómina; sin ese dato el cálculo exentaría
+  #   una sola UMA por periodo, que es menos de lo que la ley permite.
+  - tipo_percepcion: '020'
+    es_ingreso_ordinario: true
+    base_exencion: UMA_DIAS
+    factor_exencion: '1'
+    integra_sbc: true
+    es_provisionable: false
+
+  # 021 Prima vacacional.
+  # Exención: art. 93, fracción XIV LISR — 15 días de UMA, "en forma general".
+  # SBC: "primas" integra (art. 27, primer párrafo LSS); es parte del factor de integración.
+  # Provisionable: pasivo laboral de B-06 (art. 80 LFT, prima no menor al 25%).
+  - tipo_percepcion: '021'
+    es_ingreso_ordinario: true
+    base_exencion: UMA_DIAS
+    factor_exencion: '15'
+    integra_sbc: true
+    es_provisionable: true
+
+  # ------------------------------------------------------------------------------------
+  # Separación, indemnización y retiro — RÉGIMEN FISCAL PROPIO (art. 95 LISR)
+  #
+  # El art. 95 LISR: "Cuando se obtengan ingresos por concepto de primas de antigüedad,
+  # retiro e indemnizaciones u otros pagos, por separación, se calculará el impuesto anual,
+  # conforme a las siguientes reglas: ..." — separa una cantidad igual al último sueldo
+  # mensual ordinario y al resto le aplica la tasa efectiva. NO se acumulan al ingreso
+  # ordinario, y por eso estos tipos llevan `es_ingreso_ordinario: false`: incluirlos
+  # sobreestimaría la base anual del ISR en la columna 11 de B-05.
+  # ------------------------------------------------------------------------------------
+
+  # 022 Prima por antigüedad.
+  # Exención: art. 93, fracción XIII LISR — "hasta por el equivalente a noventa veces el
+  # salario mínimo general [UMA] ... por cada año de servicio ... Toda fracción de más de
+  # seis meses se considerará un año completo".
+  # SBC: se paga al terminar la relación laboral, no "por su trabajo" en un periodo de
+  # cotización.
+  # REVISAR (022): el factor '90' es POR CADA AÑO DE SERVICIO, no un tope absoluto. Los años
+  #   de antigüedad no vienen en el nodo de percepciones del CFDI; si se aplica '90' como
+  #   tope plano, la exención de un trabajador con antigüedad larga sale muy por debajo.
+  - tipo_percepcion: '022'
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '90'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 023 Pagos por separación.
+  # Misma base que el 022: art. 93, fracción XIII LISR y art. 95 LISR.
+  # REVISAR (023): mismo problema del factor "por año de servicio" que el 022.
+  - tipo_percepcion: '023'
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '90'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 024 Seguro de retiro.
+  # REVISAR (024) — ESTA ES LA DECISIÓN MÁS IMPORTANTE DE ESTE ARCHIVO Y NO LA TOMÉ YO.
+  #   El art. 95 LISR agrupa "primas de antigüedad, RETIRO e indemnizaciones u otros pagos,
+  #   por separación", y el art. 93, fracción XIII exenta también "los obtenidos con cargo a
+  #   la subcuenta del seguro de retiro" hasta 90 UMA por año. Por el nombre, este tipo cabría
+  #   ahí, y entonces debería llevar `es_ingreso_ordinario: false` y `UMA_DIAS 90` como el
+  #   022/023/025. Se sembró como ordinario y gravado porque la lista verificada del plan son
+  #   exactamente cinco tipos (022, 023, 025, 039, 044) y este no está en ella; no quise
+  #   ampliarla por mi cuenta. MI RECOMENDACIÓN es cambiarlo a `false` + `UMA_DIAS 90` si en
+  #   la práctica se usa para pagos de retiro por separación. Decidir antes de confirmar.
+  - tipo_percepcion: '024'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false
+
+  # 025 Indemnizaciones.
+  # Misma base que el 022: art. 93, fracción XIII LISR y art. 95 LISR ("indemnizaciones u
+  # otros pagos, por separación"). Omitir este tipo del régimen de separación marcaría las
+  # indemnizaciones como ingreso ordinario y sobreestimaría la base anual del ISR.
+  # REVISAR (025): mismo problema del factor "por año de servicio" que el 022.
+  - tipo_percepcion: '025'
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '90'
+    integra_sbc: false
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Reembolsos y cuotas
+  # ------------------------------------------------------------------------------------
+
+  # 026 Reembolso por funeral.
+  # Exención: art. 93, fracción VI LISR — nombra expresamente los gastos "de funeral", y el
+  # último párrafo del art. 93 los exceptúa del tope conjunto de previsión social.
+  # REVISAR (026): la fracción VI exige que se concedan "de manera general, de acuerdo con
+  #   las leyes o contratos de trabajo", condición que el CFDI no informa.
+  - tipo_percepcion: '026'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 027 Cuotas de seguridad social pagadas por el patrón.
+  # Exención: art. 93, fracción XII LISR — "La cuota de seguridad social de los trabajadores
+  # pagada por los patrones". Sin condiciones ni topes: es la exención más limpia del archivo.
+  # REVISAR (027): la duda es SOLO el SBC. El art. 27, fracción IV LSS excluye "las cuotas
+  #   que en términos de esta Ley le corresponde cubrir AL PATRÓN", y aquí se trata de la
+  #   cuota OBRERA que el patrón absorbe, que es un caso distinto y no está en la lista de
+  #   exclusiones. Se sembró `false` siguiendo el criterio habitual; confirmar.
+  - tipo_percepcion: '027'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 028 Comisiones.
+  # Gravado: ninguna fracción del art. 93 las exenta.
+  # SBC: "comisiones" aparece literalmente en la lista de integrantes del art. 27, primer
+  # párrafo LSS.
+  - tipo_percepcion: '028'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Vales y ayudas — el bloque con más criterio y menos texto expreso
+  # ------------------------------------------------------------------------------------
+
+  # 029 Vales de despensa.
+  # Exención: art. 93, fracción VIII LISR, como previsión social "de naturaleza análoga"
+  # concedida de manera general. Sujeta al tope conjunto del penúltimo párrafo.
+  # SBC: art. 27, fracción VI LSS excluye "las despensas en especie o en dinero, siempre y
+  # cuando su importe no rebase el cuarenta por ciento del salario mínimo general diario";
+  # el excedente sí integra.
+  # REVISAR (029): dos límites a la vez. (a) La exención está sujeta al tope conjunto de
+  #   previsión social y `PORCENTAJE 100` es la exención en bruto. (b) La exclusión del SBC
+  #   es parcial (40% del salario mínimo diario) y se sembró `false`, que es el caso típico
+  #   pero no el único.
+  - tipo_percepcion: '029'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 030 Vales de restaurante.
+  # REVISAR (030): NO ENCONTRÉ BASE EXPRESA. La fracción VIII del art. 93 no los nombra y su
+  #   analogía con "despensa" es discutible: la despensa sí tiene su propia exclusión de SBC
+  #   (art. 27, fracción VI LSS), los vales de restaurante no. Se sembró exento al 100% por
+  #   analogía con el 029, que es la práctica común, PERO es la marca de la que menos seguro
+  #   estoy de todo el bloque de vales. Si se decide que no es previsión social, va `NINGUNA`
+  #   e `integra_sbc: true`.
+  - tipo_percepcion: '030'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 031 Vales de gasolina.
+  # REVISAR (031): NO ENCONTRÉ BASE EN EL ART. 93 y no me parece previsión social de
+  #   naturaleza análoga a becas, guarderías o actividades culturales (fracción VIII): la
+  #   gasolina no atiende una necesidad social del trabajador. Se sembró GRAVADO y con SBC,
+  #   que es lo prudente, en vez de inventarle un factor. Si en la empresa se entrega como
+  #   instrumento de trabajo, no debería ir como percepción de nómina.
+  - tipo_percepcion: '031'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 032 Vales de ropa.
+  # REVISAR (032): NO ENCONTRÉ BASE EN EL ART. 93. Ojo con una confusión fácil: el art. 27,
+  #   fracción I LSS excluye del SBC "los instrumentos de trabajo tales como herramientas,
+  #   ROPA y otros similares" — eso es el uniforme, no un vale de ropa entregado como
+  #   prestación. Se sembró gravado y con SBC.
+  - tipo_percepcion: '032'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 033 Ayuda para renta.
+  # REVISAR (033): hay dos caminos posibles y ninguno encaja bien. El art. 93, fracción X
+  #   exenta "las casas habitación proporcionadas a los trabajadores ... cuando se reúnan los
+  #   requisitos de deducibilidad", pero eso es la casa, no una ayuda en efectivo; y la
+  #   fracción VIII exigiría considerarla previsión social análoga. Se sembró GRAVADO por
+  #   prudencia. Si se decide que es previsión social, lleva el tope conjunto.
+  - tipo_percepcion: '033'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 034 Ayuda para artículos escolares.
+  # Exención: art. 93, fracción VIII LISR, por analogía directa con "becas educacionales para
+  # los trabajadores o sus hijos", que la fracción sí nombra.
+  # REVISAR (034): sujeta al tope conjunto de previsión social; `PORCENTAJE 100` es la
+  #   exención en bruto. Y la analogía con "beca" es mía, no del texto.
+  - tipo_percepcion: '034'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 035 Ayuda para anteojos.
+  # Exención: art. 93, fracción VI LISR (gasto médico) o fracción VIII (previsión social
+  # análoga), según cómo se documente.
+  # REVISAR (035): de cuál de las dos fracciones venga cambia el resultado — la VI está
+  #   EXCEPTUADA del tope conjunto y la VIII no. Se sembró exento al 100% sin decidir cuál.
+  - tipo_percepcion: '035'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 036 Ayuda para transporte.
+  # REVISAR (036): NO ENCONTRÉ BASE EXPRESA en el art. 93; el criterio está dividido entre
+  #   tratarla como previsión social análoga (fracción VIII) y como ingreso gravado. Se sembró
+  #   GRAVADO por prudencia, en vez de inventar un factor.
+  - tipo_percepcion: '036'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 037 Ayuda para gastos de funeral.
+  # Exención: art. 93, fracción VI LISR nombra los gastos "de funeral".
+  # REVISAR (037): la fracción VI habla de REEMBOLSO (para eso está el tipo 026); una AYUDA
+  #   que no se condiciona a comprobar el gasto podría no calificar y ser previsión social del
+  #   art. 93, fracción VIII, sujeta al tope conjunto. Se sembró como el 026.
+  - tipo_percepcion: '037'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 038 Otros ingresos por salarios.
+  # REVISAR (038): es un cajón de sastre — el tratamiento depende de qué se pagó realmente y
+  #   no hay una marca correcta para todos los casos. Se sembró GRAVADO y con SBC, que es el
+  #   default prudente: exentar por default un concepto desconocido es la peor opción.
+  - tipo_percepcion: '038'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Jubilaciones, pensiones y haberes de retiro — RÉGIMEN FISCAL PROPIO
+  # ------------------------------------------------------------------------------------
+
+  # 039 Jubilaciones, pensiones o haberes de retiro (pago en una sola exhibición).
+  # Exención: art. 93, fracción XIII LISR — 90 UMA por cada año de contribución, que es a lo
+  # que remite expresamente el art. 96-Bis, fracción IV LISR para los pagos en una sola
+  # exhibición con cargo a la subcuenta de retiro.
+  # No es ingreso ordinario: tiene su propio procedimiento de retención (art. 96-Bis).
+  # REVISAR (039): dos dudas. (a) Que este tipo signifique "en una sola exhibición" se deduce
+  #   de que el 044 sea "en parcialidades"; el catálogo del SAT no lo dice. Si en realidad se
+  #   usa para pagos periódicos, aplica el art. 93, fracción IV con 15 UMA DIARIAS, no 90.
+  #   (b) El factor '90' es por año de contribución, no un tope absoluto.
+  - tipo_percepcion: '039'
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '90'
+    integra_sbc: false
+    es_provisionable: false
+
+  # 044 Jubilaciones, pensiones o haberes de retiro en parcialidades.
+  # Exención: art. 93, fracción IV LISR — exentas las que provienen de la subcuenta de retiro
+  # o de la cuenta individual "cuyo monto diario no exceda de quince veces el salario mínimo
+  # general [UMA] ... Por el excedente se pagará el impuesto".
+  # REVISAR (044): el factor '15' es un tope DIARIO, no del periodo de pago. En una nómina
+  #   quincenal el tope real son 15 UMA x 15 días; si se aplica '15' contra el importe del
+  #   periodo, la exención sale un orden de magnitud por debajo. Además el art. 93, fracción V
+  #   obliga a considerar TODAS las pensiones del trabajador, las pague quien las pague, y eso
+  #   el Hub no lo puede saber con los CFDI de un solo patrón.
+  - tipo_percepcion: '044'
+    es_ingreso_ordinario: false
+    base_exencion: UMA_DIAS
+    factor_exencion: '15'
+    integra_sbc: false
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Otros conceptos
+  # ------------------------------------------------------------------------------------
+
+  # 045 Ingresos en acciones o títulos valor que representan bienes.
+  # REVISAR (045): gravado por default, pero el art. 94, fracción VII LISR le da a las
+  #   opciones sobre acciones un momento de acumulación y una base propios (la diferencia
+  #   entre el valor de mercado al ejercer la opción y el precio pactado) que este modelo de
+  #   marcas no puede expresar. `NINGUNA` es correcto en cuanto a que no hay exención, pero
+  #   no basta para calcular bien.
+  - tipo_percepcion: '045'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 046 Ingresos asimilados a salarios.
+  # Gravado: los asimilados se acumulan en el Capítulo I del Título IV (art. 94 LISR) y no
+  # tienen exención propia.
+  # SBC: no hay relación laboral, así que no hay salario base de cotización.
+  # REVISAR (046): al no haber relación laboral, varias marcas de este renglón son
+  #   cuestionables por construcción. Confirmar sobre todo que B-05 quiera sumarlos en la base
+  #   ordinaria del trabajador; según para qué se use el informe puede convenir separarlos.
+  - tipo_percepcion: '046'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false
+
+  # 047 Alimentación.
+  # Gravado: no hay fracción del art. 93 que exente la alimentación entregada al trabajador.
+  # SBC: art. 27, primer párrafo LSS la nombra como integrante, y la fracción V solo la
+  # excluye "cuando se entregue en forma onerosa ... cuando el trabajador pague por cada una
+  # de ellas, como mínimo, el veinte por ciento del salario mínimo general diario".
+  # REVISAR (047): si la alimentación fue onerosa NO integra al SBC, y el CFDI no dice si el
+  #   trabajador pagó por ella. Se sembró `true` (gratuita), que es el caso que integra.
+  - tipo_percepcion: '047'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 048 Habitación.
+  # REVISAR (048): dos dudas independientes. (a) El art. 93, fracción X LISR exenta "las casas
+  #   habitación proporcionadas a los trabajadores ... cuando se reúnan los requisitos de
+  #   deducibilidad", así que este renglón podría no ser gravado; se sembró `NINGUNA` porque
+  #   no puedo verificar los requisitos. (b) Igual que el 047, el art. 27, fracción V LSS solo
+  #   la excluye del SBC si fue onerosa, dato que el CFDI no trae.
+  - tipo_percepcion: '048'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 049 Premios por asistencia.
+  # Gravado: ninguna fracción del art. 93 los exenta.
+  # REVISAR (049): igual que el 010, el art. 27, fracción VII LSS los excluye del SBC solo
+  #   hasta el 10% del salario base de cotización y "solamente se integrarán los excedentes".
+  #   Se sembró `true` porque el modelo no expresa una exclusión parcial.
+  - tipo_percepcion: '049'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: true
+    es_provisionable: false
+
+  # 050 Viáticos.
+  # Exención: art. 93, fracción XVII LISR — "Los viáticos, cuando sean efectivamente erogados
+  # en servicio del patrón y se compruebe esta circunstancia con los comprobantes fiscales
+  # correspondientes".
+  # REVISAR (050): la exención es CONDICIONAL y la condición no viene en el CFDI de nómina.
+  #   Un viático no comprobado es ingreso gravado, y esta marca lo exentaría al 100%. Además
+  #   el art. 93 remata que la exención no aplica si el ingreso no se declara estando obligado
+  #   a ello (referencia al art. 150, tercer párrafo). El `integra_sbc: false` se apoya en que
+  #   el viático no se entrega "por su trabajo", que es criterio y no una de las nueve
+  #   exclusiones del art. 27 LSS.
+  - tipo_percepcion: '050'
+    es_ingreso_ordinario: true
+    base_exencion: PORCENTAJE
+    factor_exencion: '100'
+    integra_sbc: false
+    es_provisionable: false
+
+  # ------------------------------------------------------------------------------------
+  # Pagos a extrabajadores jubilados (tipos 051, 052 y 053)
+  #
+  # Son las incorporaciones recientes del catálogo y las tres tienen la misma duda de fondo,
+  # descrita renglón por renglón abajo.
+  # ------------------------------------------------------------------------------------
+
+  # 051 Pagos por gratificaciones, primas, compensaciones, recompensas u otros a
+  #     extrabajadores derivados de jubilación en parcialidades.
+  # REVISAR (051): CREO QUE ESTA MARCA ESTÁ MAL Y NO LA CAMBIÉ POR MI CUENTA. Por el nombre,
+  #   esto es un pago derivado de una jubilación en parcialidades y debería compartir régimen
+  #   con el 044 (`es_ingreso_ordinario: false`, art. 93 fracción IV, 15 UMA diarias). Se
+  #   sembró como ingreso ordinario y gravado porque la lista verificada del plan son cinco
+  #   tipos (022, 023, 025, 039, 044) y este no está; ampliarla es una decisión fiscal que le
+  #   toca al dueño del repo. MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 044.
+  - tipo_percepcion: '051'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false
+
+  # 052 Pagos que se realicen a extrabajadores que obtengan una jubilación en parcialidades
+  #     derivados de la ejecución de resoluciones judicial o de un laudo.
+  # REVISAR (052): misma situación que el 051 — por el nombre debería seguir al 044
+  #   (`false`, art. 93 fracción IV, 15 UMA diarias). Sembrado ordinario y gravado por la
+  #   misma razón. MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 044.
+  - tipo_percepcion: '052'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false
+
+  # 053 Pagos que se realicen a extrabajadores que obtengan una jubilación en una sola
+  #     exhibición derivados de la ejecución de resoluciones judicial o de un laudo.
+  # REVISAR (053): misma situación que el 051 y el 052, pero apuntando al 039 en vez de al
+  #   044 porque es en una sola exhibición (art. 93 fracción XIII y art. 96-Bis, 90 UMA por
+  #   año). MI RECOMENDACIÓN: cambiarlo a `false` con la marca del 039.
+  - tipo_percepcion: '053'
+    es_ingreso_ordinario: true
+    base_exencion: NINGUNA
+    integra_sbc: false
+    es_provisionable: false

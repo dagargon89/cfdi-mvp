@@ -1,18 +1,62 @@
 # Días de vacaciones por año de antigüedad — artículo 76 de la Ley Federal del Trabajo
 # (reforma publicada en el DOF el 27-12-2022, en vigor desde el 1 de enero de 2023).
 #
+# FUENTE — texto vigente del art. 76 LFT, verificado contra el PDF oficial de la Cámara de
+# Diputados (https://www.diputados.gob.mx/LeyesBiblio/pdf/LFT.pdf):
+#
+#   "Las personas trabajadoras que tengan más de un año de servicios disfrutarán de un
+#    periodo anual de vacaciones pagadas, que en ningún caso podrá ser inferior a doce días
+#    laborables, y que aumentará en dos días laborables, hasta llegar a veinte, por cada año
+#    subsecuente de servicios.
+#    A partir del sexto año, el periodo de vacaciones aumentará en dos días por cada cinco
+#    de servicios."
+#
 # Es ley federal, no política de cada patrón: por eso la tabla es global, sin `empresa_id`,
 # y por eso el servicio la aplica sin exigir confirmación humana (a diferencia de los
-# importes de `param_fiscal`, que sí la exigen).
+# importes de `param_fiscal`, que sí la exigen). Un error de captura aquí lo atrapa la
+# prueba de monotonía de `tests/test_semillas_fiscales.py`.
 #
-# ESTRUCTURA — todavía sin renglones: los siembra la tarea 3.
+# CÓMO SE LEE ESTA TABLA. `dias_de_vacaciones()` toma el renglón con el mayor
+# `anios_antiguedad` que no exceda la antigüedad consultada, no el renglón exacto. Por eso
+# el segundo párrafo del art. 76 (que crece de cinco en cinco) se captura solo en el primer
+# año de cada tramo: 6 cubre de 6 a 10, 11 cubre de 11 a 15, y así. Capturar los años
+# intermedios sería redundante y multiplicaría las oportunidades de teclear mal.
 #
-#   tabla_vacaciones:
-#     - anios_antiguedad: 1
-#       dias: 12
-#
-# El resolutor toma el renglón con el mayor `anios_antiguedad` que no exceda la antigüedad
-# consultada, no el renglón exacto: después del quinto año el art. 76 crece cada cinco
-# años, así que con 7 años de antigüedad aplica el renglón de 5.
+# Menos de un año cumplido NO sale de esta tabla: el art. 77 LFT da un derecho proporcional
+# y por eso el resolutor devuelve `None` con `anios = 0`, en vez de cero días.
 
-tabla_vacaciones: []
+tabla_vacaciones:
+  # Primer párrafo del art. 76: 12 días al primer año, +2 por cada año subsecuente hasta 20.
+  - anios_antiguedad: 1
+    dias: 12
+  - anios_antiguedad: 2
+    dias: 14
+  - anios_antiguedad: 3
+    dias: 16
+  - anios_antiguedad: 4
+    dias: 18
+  - anios_antiguedad: 5
+    dias: 20
+  # Segundo párrafo del art. 76: a partir del sexto año, +2 días por cada cinco de servicios.
+  # Cada renglón abre un tramo de cinco años (6-10, 11-15, ...).
+  - anios_antiguedad: 6
+    dias: 22
+  - anios_antiguedad: 11
+    dias: 24
+  - anios_antiguedad: 16
+    dias: 26
+  - anios_antiguedad: 21
+    dias: 28
+  - anios_antiguedad: 26
+    dias: 30
+  - anios_antiguedad: 31
+    dias: 32
+  - anios_antiguedad: 36
+    dias: 34
+  - anios_antiguedad: 41
+    dias: 36
+  # La tabla se corta a los 46 años de antigüedad (38 días), que cubre hasta 50 años de
+  # servicio. La progresión del art. 76 no tiene tope: si algún día hace falta un tramo más,
+  # se agrega aquí, no en código.
+  - anios_antiguedad: 46
+    dias: 38
