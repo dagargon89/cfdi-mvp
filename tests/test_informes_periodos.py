@@ -90,3 +90,34 @@ def test_asignar_a_corte_irregular_va_al_mas_cercano() -> None:
 
 def test_asignar_a_corte_con_eje_vacio() -> None:
     assert periodos.asignar_a_corte([], date(2026, 6, 30)) == (-1, True)
+
+
+# Ronda de correcciones 1: el ancla de `_cortes_de_paso_fijo` solo retrocedía. Si el
+# ancla ya era anterior a `desde`, la condición de retroceso nunca disparaba y el ancla
+# se quedaba fuera del rango, generando un eje corrido (o, con anclas muy antiguas,
+# decenas de cortes de sobra empezando años atrás).
+
+
+def test_eje_semanal_con_ancla_anterior_al_rango_avanza_conservando_fase() -> None:
+    """Ancla unos días antes de `desde`: el primer corte debe caer dentro del rango y
+    conservar la fase del ancla (la diferencia sigue siendo múltiplo del paso)."""
+    eje = periodos.construir_eje("02", date(2026, 6, 1), date(2026, 6, 28), primer_corte_observado=date(2026, 5, 25))
+    assert eje[0].fin == date(2026, 6, 1)
+    assert (eje[0].fin - date(2026, 5, 25)).days % 7 == 0
+    assert [c.fin for c in eje] == [date(2026, 6, 1), date(2026, 6, 8), date(2026, 6, 15), date(2026, 6, 22)]
+
+
+def test_eje_semanal_con_ancla_muy_anterior_no_genera_cortes_de_sobra() -> None:
+    """Ancla de más de un año antes del rango: el número de cortes debe ser el del
+    rango pedido, no decenas arrancando en el pasado lejano."""
+    eje = periodos.construir_eje("02", date(2026, 6, 1), date(2026, 6, 28), primer_corte_observado=date(2025, 1, 3))
+    assert len(eje) == 4
+    assert eje[0].fin == date(2026, 6, 5)
+    assert (eje[0].fin - date(2025, 1, 3)).days % 7 == 0
+
+
+def test_eje_semanal_con_ancla_posterior_a_hasta_queda_vacio() -> None:
+    """Si el ancla observado cae después de `hasta`, no hay ningún corte teórico dentro
+    del rango pedido: el eje queda vacío a propósito, no por un error silencioso."""
+    eje = periodos.construir_eje("02", date(2026, 6, 1), date(2026, 6, 3), primer_corte_observado=date(2026, 6, 7))
+    assert eje == []

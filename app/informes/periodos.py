@@ -79,6 +79,11 @@ def _cortes_de_paso_fijo(periodicidad: str, desde: date, hasta: date, ancla: dat
     `desde` más un paso, que es lo mejor que se puede hacer sin datos."""
     paso = _DIAS_POR_PERIODICIDAD[periodicidad]
     primer_fin = ancla if ancla is not None else desde + timedelta(days=paso - 1)
+    # Normaliza el ancla en las dos direcciones sin alterar su fase (el resto módulo
+    # `paso` respecto al ancla se conserva; solo cambia el punto de arranque).
+    # Avanza si el ancla es anterior al rango (p. ej. un ancla de hace más de un año).
+    while primer_fin < desde:
+        primer_fin += timedelta(days=paso)
     # Retrocede hasta el primer corte que caiga en el rango o justo antes de `desde`.
     while primer_fin - timedelta(days=paso) >= desde:
         primer_fin -= timedelta(days=paso)
