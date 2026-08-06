@@ -54,6 +54,20 @@ PARAMETROS_CON_LOS_TRES_TOTALES = {
     "total": "8408.90",
 }
 
+# Recibo ordinario con el subsidio al empleo pagado de verdad (120.50), no en 0.00: es lo que
+# hace que la identidad 3 compare dos números y no `0 == 0`. Todo lo demás sale de los valores
+# por defecto del fixture: percepciones 8759.70 + 500.00 = 9259.70, deducciones 1091.10.
+# subtotal = 9259.70 + 120.50 = 9380.20; total = 9380.20 − 1091.10 = 8289.10.
+PARAMETROS_CON_OTRO_PAGO_NO_CERO = {
+    "otros_pagos_xml": (
+        '<nomina12:OtroPago TipoOtroPago="002" Clave="035" Concepto="Subs al Empleo mes" Importe="120.50">'
+        '<nomina12:SubsidioAlEmpleo SubsidioCausado="120.50" /></nomina12:OtroPago>'
+    ),
+    "total_otros_pagos": "120.50",
+    "subtotal": "9380.20",
+    "total": "8289.10",
+}
+
 
 async def _normalizar_xml(db: AsyncSession, empresa_id: int, uuid: str, xml: bytes, total: str) -> int:
     """Deja el XML en disco, registra su comprobante y lo pasa por el ETL de verdad.
@@ -85,19 +99,29 @@ async def _normalizar_xml(db: AsyncSession, empresa_id: int, uuid: str, xml: byt
 async def test_las_nueve_identidades_se_cumplen_en_el_recibo_ordinario(db: AsyncSession) -> None:
     """El caso base, que además es el espejo del fondo de ahorro (R-T10): los mismos 500.00
     aparecen como percepción exenta (005/031) y como deducción (004/067). El ETL no consolida,
-    y las identidades tienen que cuadrar igual con el flujo duplicado."""
+    y las identidades tienen que cuadrar igual con el flujo duplicado.
+
+    El `OtroPago` lleva un importe **distinto de cero** a propósito. Con el 0.00 del fixture
+    por defecto, la identidad 3 (`total_otros_pagos`) se cumplía comparando 0 contra 0, que es
+    verdad para cualquier ETL, incluso uno que no leyera el nodo `OtrosPagos`. Con 120.50, el
+    valor tiene que haber salido del XML — y arrastra a las identidades 6 y 8, porque el
+    subtotal es percepciones + otros pagos."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _normalizar_xml(
         db,
         empresa.empresa_id,
         "77777777-7777-7777-7777-777777777777",
-        fixtures_cfdi.cfdi_nomina(),
-        total="8168.60",
+        fixtures_cfdi.cfdi_nomina(**PARAMETROS_CON_OTRO_PAGO_NO_CERO),
+        total="8289.10",
     )
 
-    evaluados, fallas = await identidades_b00.verificar(db, empresa.empresa_id)
-    assert fallas == []
-    assert evaluados == 1
+    v = await identidades_b00.verificar(db, empresa.empresa_id)
+    assert v.fallas == []
+    assert v.comprobantes == 1
+    # No basta con que no haya fallas: hay que saber que los 10 cotejos se ejecutaron. Un
+    # cotejo que no corre no puede fallar, así que sin esta aserción borrar ocho de las nueve
+    # identidades dejaría esta prueba verde.
+    assert v.cotejos == identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO
 
 
 async def test_identidades_con_concepto_repetido_del_mismo_tipo_y_clave(db: AsyncSession) -> None:
@@ -128,9 +152,10 @@ async def test_identidades_con_concepto_repetido_del_mismo_tipo_y_clave(db: Asyn
         total="8418.60",
     )
 
-    evaluados, fallas = await identidades_b00.verificar(db, empresa.empresa_id)
-    assert fallas == []
-    assert evaluados == 1
+    v = await identidades_b00.verificar(db, empresa.empresa_id)
+    assert v.fallas == []
+    assert v.comprobantes == 1
+    assert v.cotejos == identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO
 
 
 async def test_identidades_con_los_nodos_opcionales_ausentes(db: AsyncSession) -> None:
@@ -158,9 +183,13 @@ async def test_identidades_con_los_nodos_opcionales_ausentes(db: AsyncSession) -
         total="8000.00",
     )
 
-    evaluados, fallas = await identidades_b00.verificar(db, empresa.empresa_id)
-    assert fallas == []
-    assert evaluados == 1
+    v = await identidades_b00.verificar(db, empresa.empresa_id)
+    assert v.fallas == []
+    assert v.comprobantes == 1
+    # Uno menos que el recibo completo: sin nodo `Deducciones` no hay atributo
+    # `TotalImpuestosRetenidos` que cotejar (identidad 9). Ausente no se compara y por eso
+    # tampoco cuenta — pero el número se asevera para que se note si desaparece otro.
+    assert v.cotejos == identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO - 1
 
 
 async def test_identidades_con_los_tres_totales_de_percepciones_poblados(db: AsyncSession) -> None:
@@ -175,9 +204,10 @@ async def test_identidades_con_los_tres_totales_de_percepciones_poblados(db: Asy
         total="8408.90",
     )
 
-    evaluados, fallas = await identidades_b00.verificar(db, empresa.empresa_id)
-    assert fallas == []
-    assert evaluados == 1
+    v = await identidades_b00.verificar(db, empresa.empresa_id)
+    assert v.fallas == []
+    assert v.comprobantes == 1
+    assert v.cotejos == identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO
 
     totales = await db.scalar(select(NominaTotales).where(NominaTotales.comprobante_id == cid))
     assert totales is not None
@@ -203,8 +233,9 @@ async def test_un_descuadre_en_la_base_si_se_detecta(db: AsyncSession) -> None:
     await db.execute(update(Nomina).where(Nomina.comprobante_id == cid).values(total_percepciones=Decimal("9999.99")))
     await db.commit()
 
-    evaluados, fallas = await identidades_b00.verificar(db, empresa.empresa_id)
-    assert evaluados == 1
-    assert len(fallas) == 1
-    assert "total_percepciones" in fallas[0]
-    assert "bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb" in fallas[0]
+    v = await identidades_b00.verificar(db, empresa.empresa_id)
+    assert v.comprobantes == 1
+    assert v.cotejos == identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO
+    assert len(v.fallas) == 1
+    assert "total_percepciones" in v.fallas[0]
+    assert "bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb" in v.fallas[0]

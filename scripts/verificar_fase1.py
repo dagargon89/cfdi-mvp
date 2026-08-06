@@ -40,14 +40,24 @@ EMPRESA_ID = 11
 
 async def _verificar_identidades_b00(db: AsyncSession) -> tuple[int, list[str]]:
     """Corre las identidades del módulo compartido y las reporta por consola."""
-    evaluados, fallas = await identidades_b00.verificar(db, EMPRESA_ID)
+    v = await identidades_b00.verificar(db, EMPRESA_ID)
 
-    print(f"CFDI de nómina normalizados: {evaluados}")
-    if not evaluados:
+    print(f"CFDI de nómina normalizados: {v.comprobantes}")
+    if not v.comprobantes:
         print("FALLA: no hay nóminas normalizadas; ¿corrió el reproceso (normalizacion_lote.normalizar_lote)?")
         return 0, ["no hay CFDI de nómina normalizados"]
 
-    return evaluados, fallas
+    # `cotejos` es lo que hace auditable a la propia verificación: sin él, "cero fallas" no
+    # distingue entre "todo cuadra" y "no se comprobó nada". Se imprime el número real, no el
+    # teórico: un atributo ausente en el XML no se compara y por tanto no cuenta.
+    print(f"Cotejos ejecutados: {v.cotejos} (máximo {identidades_b00.COTEJOS_POR_COMPROBANTE_COMPLETO} por CFDI)")
+    if v.cotejos < v.comprobantes * identidades_b00.IDENTIDADES_POR_COMPROBANTE:
+        print(
+            f"AVISO: se esperaban al menos {v.comprobantes * identidades_b00.IDENTIDADES_POR_COMPROBANTE} cotejos. "
+            "Algún atributo del complemento no vino en el XML; revisa qué CFDI y por qué."
+        )
+
+    return v.comprobantes, v.fallas
 
 
 async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> list[str]:
@@ -103,8 +113,7 @@ async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> li
 async def main() -> int:
     async with SessionLocal() as db:
         comprobantes_normalizados, fallas_b00 = await _verificar_identidades_b00(db)
-        evaluadas = comprobantes_normalizados * identidades_b00.IDENTIDADES_POR_COMPROBANTE
-        print(f"Identidades de B-00 evaluadas: {evaluadas} ({identidades_b00.IDENTIDADES_POR_COMPROBANTE} por CFDI)")
+        print(f"Identidades de B-00 por CFDI: {identidades_b00.IDENTIDADES_POR_COMPROBANTE}")
 
         fallas_b02 = await _verificar_b02(db, comprobantes_normalizados)
 

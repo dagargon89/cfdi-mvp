@@ -51,6 +51,18 @@ CLAVE_TIPO_DEDUCCION_ISR = "002"
 
 IDENTIDADES_POR_COMPROBANTE = 9
 
+COTEJOS_POR_COMPROBANTE_COMPLETO = 10
+"""Cotejos que evalúa un CFDI de nómina con **todos** sus atributos presentes.
+
+Son las 9 identidades más la compuesta (`total = Σ percepciones + Σ otros − Σ deducciones`,
+calculada de nodos sin pasar por `subtotal`/`descuento`).
+
+Existe para que las pruebas puedan aseverar **cuántos** cotejos se hicieron y no solo que no
+hubo fallas. Sin ese conteo, borrar ocho de las nueve identidades dejaría la suite verde: un
+cotejo que no se ejecuta no puede producir una falla, y `fallas == []` es indistinguible de
+"no se comprobó nada". Un comprobante con atributos ausentes evalúa menos y eso es correcto
+(ver `_checar`); la prueba de ese caso asevera su número exacto."""
+
 
 def _dec(valor: object) -> Decimal:
     """`func.sum` puede devolver `float`/`None` según el dialecto; siempre se compara como
@@ -100,21 +112,36 @@ async def sumas_de_nodos(db: AsyncSession, comprobante_id: int) -> SumasNodos:
     )
 
 
-def _checar(fallas: list[str], uuid_cfdi: str, nombre: str, declarado: Decimal | None, calculado: Decimal) -> None:
+@dataclass(slots=True)
+class Verificacion:
+    """Resultado de una corrida. `cotejos` es lo que hace auditable a la propia verificación:
+    dice cuántas comparaciones se ejecutaron de verdad, no solo que ninguna falló."""
+
+    comprobantes: int
+    cotejos: int
+    fallas: list[str]
+
+
+def _checar(v: Verificacion, uuid_cfdi: str, nombre: str, declarado: Decimal | None, calculado: Decimal) -> None:
+    """Cuenta el cotejo **solo si se pudo hacer**: un atributo que el XML no trae (p. ej.
+    `TotalImpuestosRetenidos` cuando no hubo ISR retenido) llega como `None` y no se compara,
+    así que tampoco suma al conteo. Ausencia no es descuadre, pero tampoco es comprobación."""
     if declarado is None:
-        return  # el atributo no vino en el XML: no hay nada que comparar
+        return
+    v.cotejos += 1
     if abs(declarado - calculado) > TOLERANCIA:
-        fallas.append(f"{uuid_cfdi}: {nombre} declarado {declarado} ≠ calculado {calculado} (diff {abs(declarado - calculado)})")
+        v.fallas.append(f"{uuid_cfdi}: {nombre} declarado {declarado} ≠ calculado {calculado} (diff {abs(declarado - calculado)})")
 
 
-async def verificar(db: AsyncSession, empresa_id: int) -> tuple[int, list[str]]:
-    """Evalúa las 9 identidades sobre cada CFDI de nómina normalizado de la empresa.
+async def verificar(db: AsyncSession, empresa_id: int) -> Verificacion:
+    """Evalúa las 9 identidades (más la compuesta) sobre cada CFDI de nómina normalizado.
 
-    Devuelve `(comprobantes_evaluados, fallas)`. Una lista de fallas vacía con cero
-    comprobantes evaluados **no** es un éxito: significa que no hay nada normalizado, y es el
-    llamador quien decide si eso es un fallo de su escenario.
+    Una lista de fallas vacía con cero comprobantes evaluados **no** es un éxito: significa
+    que no hay nada normalizado, y es el llamador quien decide si eso es un fallo de su
+    escenario. Lo mismo con `cotejos`: sin comprobarlo, "cero fallas" no distingue entre
+    "todo cuadra" y "no se comprobó nada".
     """
-    fallas: list[str] = []
+    v = Verificacion(comprobantes=0, cotejos=0, fallas=[])
 
     filas = (
         await db.execute(
@@ -132,40 +159,41 @@ async def verificar(db: AsyncSession, empresa_id: int) -> tuple[int, list[str]]:
         sumas = await sumas_de_nodos(db, comprobante.comprobante_id)
 
         # 1-3: los tres totales del encabezado de Nómina contra la suma de sus nodos.
-        _checar(fallas, uuid_cfdi, "total_percepciones", nomina.total_percepciones, sumas.percepciones)
-        _checar(fallas, uuid_cfdi, "total_deducciones", nomina.total_deducciones, sumas.deducciones)
-        _checar(fallas, uuid_cfdi, "total_otros_pagos", nomina.total_otros_pagos, sumas.otros_pagos)
+        _checar(v, uuid_cfdi, "total_percepciones", nomina.total_percepciones, sumas.percepciones)
+        _checar(v, uuid_cfdi, "total_deducciones", nomina.total_deducciones, sumas.deducciones)
+        _checar(v, uuid_cfdi, "total_otros_pagos", nomina.total_otros_pagos, sumas.otros_pagos)
 
         # 4-5 y 9: el desglose de `nomina_totales` (fusión de `nomina_percepciones_tot` y
         # `nomina_deducciones_tot` del documento fuente) contra la suma por percepción.
         if totales is not None:
-            _checar(fallas, uuid_cfdi, "total_gravado", totales.total_gravado, sumas.gravado)
-            _checar(fallas, uuid_cfdi, "total_exento", totales.total_exento, sumas.exento)
-            _checar(fallas, uuid_cfdi, "total_impuestos_retenidos", totales.total_impuestos_retenidos, sumas.isr_retenido)
+            _checar(v, uuid_cfdi, "total_gravado", totales.total_gravado, sumas.gravado)
+            _checar(v, uuid_cfdi, "total_exento", totales.total_exento, sumas.exento)
+            _checar(v, uuid_cfdi, "total_impuestos_retenidos", totales.total_impuestos_retenidos, sumas.isr_retenido)
         else:
-            fallas.append(f"{uuid_cfdi}: no tiene fila en nomina_totales")
+            v.fallas.append(f"{uuid_cfdi}: no tiene fila en nomina_totales")
 
         # 6-8: el encabezado extendido (`comprobante_detalle`) y el total del CFDI
         # (`comprobantes.total`, tabla que ya existía y no se toca en el reproceso).
         if detalle is not None:
-            _checar(fallas, uuid_cfdi, "subtotal (= percepciones + otros pagos)", detalle.subtotal, sumas.percepciones + sumas.otros_pagos)
-            _checar(fallas, uuid_cfdi, "descuento (= deducciones)", detalle.descuento, sumas.deducciones)
+            _checar(v, uuid_cfdi, "subtotal (= percepciones + otros pagos)", detalle.subtotal, sumas.percepciones + sumas.otros_pagos)
+            _checar(v, uuid_cfdi, "descuento (= deducciones)", detalle.descuento, sumas.deducciones)
             if detalle.subtotal is not None and detalle.descuento is not None and comprobante.total is not None:
                 _checar(
-                    fallas,
+                    v,
                     uuid_cfdi,
                     "total del CFDI (= subtotal − descuento)",
                     Decimal(str(comprobante.total)),
                     detalle.subtotal - detalle.descuento,
                 )
         else:
-            fallas.append(f"{uuid_cfdi}: no tiene fila en comprobante_detalle")
+            v.fallas.append(f"{uuid_cfdi}: no tiene fila en comprobante_detalle")
 
         # Identidad compuesta, además de las 9: el total del CFDI contra
         # percepciones + otros pagos − deducciones calculado directamente de los nodos, sin
         # pasar por el subtotal/descuento del encabezado.
         if comprobante.total is not None:
             neto = sumas.percepciones + sumas.otros_pagos - sumas.deducciones
-            _checar(fallas, uuid_cfdi, "total del CFDI (= percepciones + otros − deducciones, de nodos)", Decimal(str(comprobante.total)), neto)
+            _checar(v, uuid_cfdi, "total del CFDI (= percepciones + otros − deducciones, de nodos)", Decimal(str(comprobante.total)), neto)
 
-    return len(filas), fallas
+    v.comprobantes = len(filas)
+    return v
