@@ -244,6 +244,25 @@ conservando los últimos 4 caracteres.
 - Generar **sin enmascarar**: rol `OPERADOR` o superior, y se registra en bitácora con usuario, fecha,
   clave del informe y los **parámetros validados** (con sus defaults resueltos).
 
+**Un informe sin datos personales NO declara el parámetro** (revisión final de la fase 2). B-07 lo
+declaraba con la nota "sin efecto en este informe" y ninguna columna `sensible=True`. No era cosmético: el
+endpoint gatea por el **parámetro**, no por si hay algo que enmascarar, así que desmarcar la casilla en B-07
+devolvía `403` a un `CONSULTA` y, a un `OPERADOR`, escribía en bitácora un asiento de divulgación de datos
+personales que nunca ocurrió — peor que una casilla inútil. Sin el parámetro, el endpoint lee el default con
+`getattr(..., True)` y el motor con `.get(..., True)`, así que nada cambia. Los informes que sí lo declaran
+son los que emiten CURP, NSS o cuenta bancaria.
+
+**El enmascaramiento no se puede burlar por el texto de una celda no sensible** (revisión final de la fase 2,
+el hallazgo más grave del conjunto). Marcar la columna es condición necesaria pero no suficiente: B-10
+interpolaba la CURP y el NSS crudos en el mensaje de su columna "Descripción del hallazgo" —que no es
+sensible y no puede serlo sin volverse ilegible—, así que 6 de 7 filas salían con el dato completo con el
+default `enmascarar_datos_personales=true`. **Regla: ningún mensaje de hallazgo ni de bandera interpola un
+dato que alguna columna del mismo informe declara sensible.** El dato ya viaja en su columna; el mensaje
+describe el problema. `app.informes.validadores.dato_personal_en_texto` audita la regla desde fuera y la
+usan tanto la suite (`tests/test_informe_b10.py`) como `scripts/verificar_informes.py`, que ahora recorre
+**todas** las celdas de texto de la hoja `Datos` buscando la estructura de una CURP o de un NSS completos —
+antes verificaba el mecanismo (que las columnas sensibles salieran enmascaradas) y nunca el resultado.
+
 **Falla cerrado.** La decisión de enmascarar la toma el motor (`app.informes.excel.escribir_libro`) leyendo
 `ContextoInforme.parametros`, y lo hace con `get("enmascarar_datos_personales", True)`: si la clave no está
 —un llamador que no pase por el endpoint HTTP— se enmascara igual. Además la tarea de generación pasa al
@@ -272,6 +291,15 @@ aparecer en la hoja `Datos` — no hay datos que poner. Cada informe emite estas
 `Comprobante.fecha_emision` (los comprobantes sin normalizar no tienen `nomina.fecha_pago` con
 la que acotarlos). Las banderas se resuelven **antes** del retorno por informe vacío: un libro
 sin filas y sin banderas es indistinguible de un periodo en el que no hubo nómina.
+
+**Los seis informes la llaman, incluido B-05** (revisión final de la fase 2). B-05 era el único que no lo
+hacía, y es el que menos podía permitírselo: un CFDI de nómina del ejercicio cuyo XML el ETL no pudo leer
+desaparecía sin rastro, el acumulado del empleado salía corto por ese recibo y el patrón emitía la
+**constancia de percepciones** —el documento con el que el trabajador declara ante el SAT— con una quincena
+de menos, creyendo que estaba completa. Su universo es por ejercicio y sin filtro de `rfc_emisor` (B-05.R3
+depende de ver todos los patrones), así que usa un adaptador que traduce el ejercicio a
+`[1 de enero, 31 de diciembre]` y pasa `rfc_empresa=None` para que la consulta de banderas tampoco filtre
+por emisor: un `N` roto de un segundo patrón es exactamente el caso que ese informe existe para señalar.
 
 **La ventana de esas banderas lleva 31 días de margen a cada lado, y no es opcional.** La fecha
 de timbrado no coincide con la de pago: en la BD real de la empresa 11 los 8 CFDI de nómina
@@ -331,6 +359,23 @@ Para que la inclusión sea explícita, todo comprobante incluido que no sea `vig
 `ESTATUS_NO_VERIFICADO` (media) o `COMPROBANTE_CANCELADO` (alta, solo alcanzable con
 `incluir_cancelados=True`).
 
+**Esa condición la cumplen los seis informes desde la revisión final de la fase 2.** Antes solo B-01 y B-02
+llamaban a `universo_nomina.banderas_de_estatus`; B-04, B-05 y B-07 la omitían **sin declararlo** y ninguno
+tiene columna de estatus en `Datos` (B-01/B-02 sí: "Estado SAT"), así que no había forma de saberlo: una
+celda de la matriz de B-04 llena por un CFDI cancelado ante el SAT decía "esa quincena está cubierta" sin
+marca, un hueco de B-07 podía quedar tapado por un CFDI que el SAT ya no reconoce (`DESCUENTO_INTERRUMPIDO`
+no se disparaba) y el acumulado de B-05 mezclaba `vigente` con `no_verificado` sin distinguirlos. Y no es un
+borde: la verificación contra el SAT es asíncrona por diseño, así que `no_verificado` es el estado **normal**
+de un ejercicio recién descargado. **B-10 es la única excepción y la declara y argumenta en su docstring**:
+su grano es el hallazgo, no el comprobante.
+
+**`COMPROBANTE_CANCELADO` significa lo mismo en todos: "se incluyó y sus importes suman".** B-05 la usaba
+para lo contrario ("se excluyó del acumulado"), así que quien filtrara la hoja `Banderas` por esa clave en
+B-02 y en B-05 del mismo periodo sacaba conclusiones opuestas del mismo dato; y con `incluir_cancelados=true`
+metía el cancelado al acumulado **sin emitir ninguna bandera**, inflando el ingreso anual del empleado en su
+constancia sin advertencia. El caso propio de B-05 ("cancelado no sustituido, excluido del acumulado") lleva
+ahora su propia clave, `CANCELADO_EXCLUIDO` (alta).
+
 | Clave | Nombre | Fase | Completitud |
 |---|---|---|---|
 | B-02 | Nómina agrupada por conceptos del patrón | 1 | Completo |
@@ -338,7 +383,7 @@ Para que la inclusión sea explícita, todo comprobante incluido que no sea `vig
 | B-04 | Matriz empleado × periodo | 2 | Completo |
 | B-05 | Acumulado anual por empleado | 2 | Columnas 1–23; 24–26 (ISR anual teórico) requieren `tarifa_isr` |
 | B-07 | Cartera de préstamos y descuentos recurrentes | 2 | Columnas 1–9 y 14; 10–13 requieren capturar el monto original |
-| B-10 | Validación de datos del receptor | 2 | 21 de 23 reglas; solo `SBC_SOBRE_TOPE` (UMA) y `SBC_BAJO_MINIMO` (salario mínimo) esperan a `param_fiscal` en la fase 3 |
+| B-10 | Validación de datos del receptor | 2 | 21 de 23 reglas; solo `SBC_SOBRE_TOPE` (UMA) y `SBC_BAJO_MINIMO` (salario mínimo) esperan a `param_fiscal` en la fase 3. `DATOS_CAMBIANTES` ya no cubre la CURP: ese caso lo reporta `RFC_DUPLICADO` y las dos claves generaban dos filas para un solo defecto (revisión final de la fase 2) |
 | B-03 | Desglose gravado / exento por percepción | 3 | Completo con las tablas de configuración |
 | B-06 | Costo de nómina por centro de costo | 3 | Sin la columna 15 (costo patronal): no es derivable del CFDI |
 | B-08 | Provisión de pasivo laboral | 3 | Estimación con base en CFDI, no cálculo actuarial (B-08.R3) |
@@ -355,6 +400,40 @@ típicos de las herramientas comerciales:
   grupo espejo. Aplica al fondo de ahorro de la empresa 11.
 - **B-04.R2** — hueco intermedio es omisión de timbrado; hueco al final es baja probable. No se marcan
   igual.
+
+**Las identidades #4 y #5 de B-00 (gravado y exento) se cotejan al generar cualquier informe**, no solo en
+las pruebas y en el script (revisión final de la fase 2:
+`universo_nomina.banderas_de_gravado_y_exento_descuadrados`, que emite `TOTALES_DESCUADRADOS`). "Total
+gravado" y "Total exento" significan dos cosas distintas a propósito: B-01/B-02 reportan lo que **declara el
+encabezado** (`nomina_totales`), B-05 lo **recalcula de los nodos** porque una constancia de percepciones no
+debe heredar sin cotejar un descuadre del encabezado. Las dos lecturas son correctas para su propósito y no
+se cambian, pero con un CFDI descuadrado daban cifras distintas del mismo concepto para el mismo periodo sin
+que ningún informe avisara; y dentro de una misma fila de B-05 "Total percepciones" (encabezado) no cuadraba
+con gravado + exento (nodos) en silencio.
+
+**Un tipo fuera del catálogo no desaparece de B-01 (`TIPO_FUERA_DE_CATALOGO`, alta).** B-01.R1 genera las
+columnas iterando **el catálogo** y filtrando por lo observado, nunca iterando lo observado: un tipo que la
+versión pinada de `satcfdi` no trae (el SAT publica uno nuevo, un PAC timbra con uno desconocido) no tiene
+columna —ni con `solo_tipos_con_movimiento`, porque el filtro no cambia la fuente de la iteración— y su
+importe desaparecía de la hoja. `TOTALES_DESCUADRADOS` no lo atrapaba, porque las sumas de la fila recorren
+todos los nodos observados, incluido el invisible, y cuadran contra el encabezado; el único síntoma era que
+las más de 150 columnas no sumaban el "Total percepciones" de su propia fila, en el informe cuyo propósito es
+alimentar pólizas contables. Basta 1 CFDI para que ocurra.
+
+**"Nombre empleado" es `comprobante_detalle.nombre_receptor` en los seis informes.** B-01 y B-02 usaban
+`comprobante.razon_social_emisor` —el nombre del **patrón**— con la justificación de que "no hay campo de
+razón social del receptor en el modelo", falsa desde la fase 2. El resultado era un papel de trabajo fiscal
+con el nombre de la empresa repetido en todas las filas de esa columna, y nada lo detectaba porque el helper
+de pruebas nunca insertaba una fila de `comprobante_detalle` (con `detalle is None` el campo correcto y el
+equivocado daban los dos `None`). Corregido en la revisión final de la fase 2, junto con el helper.
+
+**B-04 y B-07 NO ubican el mismo CFDI en el mismo periodo, y hay que documentarlo en los dos.** B-04 asigna
+por `fecha_final_pago` (el fin del periodo devengado define si esa quincena tuvo nómina); B-07 por
+`fecha_pago` (para la continuidad de un préstamo importa en qué periodo apareció el descuento). Cada elección
+es correcta para su propósito y ninguna se cambia, pero con el patrón real de la empresa (pago y timbrado
+desfasados del cierre) **las etiquetas no coinciden**: un `PERIODO_FALTANTE` de `2026-06 Q2` en B-04 se lee
+como hueco de `2026-07 Q1` en B-07 — que además habla de comparar contra "la secuencia teórica de B-04". Al
+cruzar los dos informes hay que traducir la etiqueta.
 
 ## 12. Tablas de configuración (fase 3)
 
@@ -399,6 +478,22 @@ llamadores:
 - `scripts/verificar_informes.py` (renombrado desde `verificar_fase1.py` en la fase 2, Task 8, al
   extenderlo a los seis informes del catálogo), **en vivo contra los datos reales, sin que nada entre
   a git**: los mismos cotejos sobre los CFDI de la empresa 11 tras el reproceso.
+
+**El mismo remedio del conteo se aplica a las 21 validaciones de B-10** (revisión final de la fase 2), por la
+misma razón y con la misma evidencia empírica: el revisor borró **siete** validaciones del módulo y
+`pytest tests/test_informe_b10.py tests/test_informes_validadores.py -q` siguió dando 26 passed. Diez de las
+21 no tenían ninguna prueba que verificara que disparan, y lo único que las "cubría" era
+`test_datos_correctos_no_generan_hallazgos`, que asevera `filas == []` — el patrón exacto donde borrar una
+comprobación no rompe la prueba, **la hace pasar más fácil**. Dos medidas complementarias:
+
+- `consultar()` emite `VALIDACIONES_EJECUTADAS` (baja, ámbito `informe`) con **cuántas validaciones se
+  ejecutaron de verdad** en la corrida, y una prueba asevera ese número contra las constantes del módulo
+  (`VALIDACIONES_POR_EMPLEADO_COMPLETO` + `VALIDACIONES_DE_CONJUNTO` + `VALIDACIONES_ENTRE_PERIODOS_POR_RFC`).
+  Una validación omitida por falta de dato no cuenta, igual que un atributo ausente en `identidades_b00`. Esto
+  protege contra **borrados**.
+- Una prueba por validación que verifica que **dispara** con el dato malo correspondiente, y en varios casos
+  su gemela negativa (dato bueno → no dispara). Esto protege contra una **condición invertida**, que el conteo
+  no ve.
 
 Los informes se prueban comparando valores de celda, no bytes del archivo.
 
