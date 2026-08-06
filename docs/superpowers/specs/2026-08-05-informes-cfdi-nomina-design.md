@@ -242,7 +242,13 @@ conservando los últimos 4 caracteres.
 
 - Generar **enmascarado**: rol `CONSULTA`.
 - Generar **sin enmascarar**: rol `OPERADOR` o superior, y se registra en bitácora con usuario, fecha,
-  clave del informe y rango solicitado.
+  clave del informe y los **parámetros validados** (con sus defaults resueltos).
+
+**Falla cerrado.** La decisión de enmascarar la toma el motor (`app.informes.excel.escribir_libro`) leyendo
+`ContextoInforme.parametros`, y lo hace con `get("enmascarar_datos_personales", True)`: si la clave no está
+—un llamador que no pase por el endpoint HTTP— se enmascara igual. Además la tarea de generación pasa al
+contexto los parámetros ya validados, nunca el dict crudo del cliente, así que el default declarado en el
+JSON Schema y el efectivo en el libro son el mismo por construcción.
 
 ## 9. Manejo de errores
 
@@ -251,18 +257,31 @@ Ningún fallo individual aborta una corrida.
 | Situación | Tratamiento |
 |---|---|
 | XML corrupto o ilegible | Se marca el comprobante; bandera `SIN_NORMALIZAR` en el informe |
-| XML ausente en disco | Igual; no lanza excepción |
+| XML resguardado que ya no está en disco | Igual (es pérdida de datos); no lanza excepción |
+| Comprobante sin `xml_path` (nunca se descargó) | **Se omite**: no hay nada que normalizar y eso no es un error |
 | CFDI tipo `N` sin complemento de nómina | Bandera `COMPLEMENTO_AUSENTE` |
+| CFDI ya normalizado cuyo reproceso falló | Se conservan los hijos de la última corrida buena y la fila entra al informe con bandera `DATOS_DE_CORRIDA_ANTERIOR` |
+| Dos normalizaciones concurrentes del mismo comprobante | El perdedor (deadlock 1213 / `IntegrityError`) re-verifica `necesita_normalizar` y cuenta como omitido: nunca se marca error sobre un comprobante sano |
 | Informe sin filas | Libro con hoja de Parámetros y aviso, no un `500` |
-| Volumen grande | Consulta por lotes, como el export actual |
+| Volumen grande | Consulta por lotes, como el export actual; el pre-vuelo se acota con los `TIPOS_COMPROBANTE` que declara el informe |
+
+**Cómo llegan `SIN_NORMALIZAR` y `COMPLEMENTO_AUSENTE` al informe.** La consulta del universo
+de todo informe del grupo B hace `join` con `nomina`, así que un tipo `N` sin fila ahí no puede
+aparecer en la hoja `Datos` — no hay datos que poner. Cada informe emite estas banderas con una
+**segunda consulta** sobre los `N` de la empresa que no pueden entrar, acotada por
+`Comprobante.fecha_emision` (los comprobantes sin normalizar no tienen `nomina.fecha_pago` con
+la que acotarlos). Las banderas se resuelven **antes** del retorno por informe vacío: un libro
+sin filas y sin banderas es indistinguible de un periodo en el que no hubo nómina.
 
 ## 10. Estructura del libro de Excel
 
 Cuatro hojas en todo informe:
 
 1. **Datos** — el informe. Fila de encabezado congelada, formatos numéricos por tipo de columna.
-2. **Parámetros** — usuario, fecha y hora, filtros exactos, `etl_version`, número de filas. Sin esta hoja
-   un Excel circulando por correo no se puede reproducir ni auditar después.
+2. **Parámetros** — usuario, fecha y hora (UTC naive, misma convención que la bitácora), **filtros
+   efectivos** (los parámetros ya validados, con sus defaults resueltos, no el dict crudo del cliente),
+   `etl_version`, número de filas. Sin esta hoja un Excel circulando por correo no se puede reproducir ni
+   auditar después.
 3. **Banderas** — una fila por hallazgo: clave, severidad, ámbito (UUID o empleado), mensaje. Filtrable, y
    no se pierde al copiar celdas, como sí ocurre con el coloreado.
 4. **Diccionario** — en B-02 y en B-01 con conjunto reducido:
@@ -276,8 +295,18 @@ reales de la empresa 11) colapsan en una sola columna. Los nulos se emiten como 
 ## 11. Informes en alcance
 
 **Universo del Grupo B:** comprobantes `tipo_comprobante='N'` **emitidos** por la empresa (la empresa es el
-patrón), con complemento de Nómina 1.2. El periodo se determina por `nomina.fecha_pago` (R-T6), salvo B-04
-que asigna por `fecha_final_pago` (B-04, fase 2). Por defecto solo `VIGENTE` (R-T1).
+patrón, así que `rfc_emisor = empresa.rfc`), con complemento de Nómina 1.2. El periodo se determina por
+`nomina.fecha_pago` (R-T6), salvo B-04 que asigna por `fecha_final_pago` (B-04, fase 2).
+
+**R-T1, divergencia declarada (decisión del dueño del repo, revisión final de la fase 1).** El criterio
+original era "por defecto solo `VIGENTE`". Lo implementado excluye únicamente los `CANCELADO`: los
+`no_verificado` **sí entran**. Razón: la verificación de estatus contra el SAT es un proceso asíncrono e
+independiente de la descarga, así que exigir `VIGENTE` borraría del informe toda la nómina cuyo estatus
+todavía no se ha consultado. Una fila que desaparece en silencio es peor que una fila presente con su
+estatus a la vista — y en este dominio una fila que falta es un error fiscal, no un detalle de producto.
+Para que la inclusión sea explícita, todo comprobante incluido que no sea `vigente` lleva bandera:
+`ESTATUS_NO_VERIFICADO` (media) o `COMPROBANTE_CANCELADO` (alta, solo alcanzable con
+`incluir_cancelados=True`).
 
 | Clave | Nombre | Fase | Completitud |
 |---|---|---|---|
@@ -331,10 +360,18 @@ reales. **No se commitean.** Los fixtures son sintéticos y cubren exactamente l
 - Nodos opcionales ausentes (sin `OtrosPagos`, sin `Incapacidades`).
 - Percepción con importe exento > 0 y tipo que no admite exención.
 
-**Verificación contra datos reales, en vivo, sin que nada entre a git:** las **9 identidades de B-00**
-(`total_percepciones = Σ percepciones`, `subtotal = total_percepciones + total_otros_pagos`,
-`descuento = total_deducciones`, `total = subtotal − descuento`, etc.) evaluadas sobre los 8 CFDI de la
-empresa 11 tras el reproceso. Si el ETL lee mal cualquier nodo, ahí truena.
+**Las 9 identidades de B-00** (`total_percepciones = Σ percepciones`,
+`subtotal = total_percepciones + total_otros_pagos`, `descuento = total_deducciones`,
+`total = subtotal − descuento`, etc.) son la comprobación más fuerte que existe sobre el ETL y la única que
+detecta que lee mal un nodo. Su implementación es **una sola** (`app/informes/identidades_b00.py`) con dos
+llamadores:
+
+- `tests/test_identidades_b00.py`, sobre XML sintéticos que pasan por el ETL completo. Está dentro de
+  `testpaths`, así que cada corrida de la suite las mantiene verdes. Incluye un caso negativo que altera un
+  total ya normalizado y exige que la verificación lo señale: sin él, "cero fallas" podría significar tanto
+  "todo cuadra" como "no se comprobó nada".
+- `scripts/verificar_fase1.py`, **en vivo contra los datos reales, sin que nada entre a git**: los mismos
+  cotejos sobre los CFDI de la empresa 11 tras el reproceso.
 
 Los informes se prueban comparando valores de celda, no bytes del archivo.
 

@@ -6093,6 +6093,56 @@ no un hallazgo del informe.
 disparadores, el motor de informes con el libro de cuatro hojas, B-02 completo con su
 Diccionario, y la sección Informes en la web.
 
+### Correcciones de la revisión final (posteriores a las 15 tareas)
+
+La revisión de todo el conjunto encontró 7 hallazgos que se cerraron en una ola posterior.
+Donde contradicen lo escrito en las tareas de arriba, **esto es lo vigente**:
+
+1. **Ningún CFDI de nómina desaparece del informe en silencio.** El universo de B-02 hace
+   `join` con `nomina`, así que un tipo `N` que el ETL no pudo normalizar quedaba fuera de la
+   hoja `Datos` y de las `Banderas`: el Excel salía con 7 filas donde había 8 y el patrón
+   conciliaba siete recibos creyendo que eran todos. `consultar` ahora hace una **segunda
+   consulta** (`_banderas_de_no_normalizables`) que emite `SIN_NORMALIZAR` o
+   `COMPLEMENTO_AUSENTE` con el UUID de cada uno, acotada por `Comprobante.fecha_emision`
+   porque estos comprobantes no tienen `nomina.fecha_pago`. Se resuelve antes del retorno por
+   informe vacío. Las dos banderas venían exigidas por §9 del diseño y nunca se implementaron.
+2. **El enmascaramiento falla cerrado.** La tarea pasa `p.model_dump(mode="json")` al
+   `ContextoInforme` (parámetros validados, no el dict crudo del cliente) y
+   `excel.escribir_libro` lee `get("enmascarar_datos_personales", True)`. Antes, un llamador
+   que omitiera la clave —cualquiera que no pase por el endpoint HTTP— obtenía un libro con
+   CURP y NSS en claro. La bitácora del desenmascarado registra también los validados.
+3. **Divergencia declarada de R-T1** (ver §11 del diseño): los `no_verificado` entran al
+   informe, con bandera `ESTATUS_NO_VERIFICADO` (media); los `cancelado` incluidos a propósito
+   llevan `COMPROBANTE_CANCELADO` (alta). Excluirlos borraría filas en silencio.
+4. **`xml_path IS NULL` se omite, no es error.** `normalizar_lote` distingue "nunca se
+   descargó" (omitido) de "el XML resguardado ya no está en disco" (error grave, pérdida de
+   datos). Antes, `alcance="todos"` creaba una fila de error con hash falso por cada
+   comprobante sin XML, en cada corrida.
+5. **`DATOS_DE_CORRIDA_ANTERIOR`.** `registrar_error` conserva a propósito los hijos de la
+   última corrida buena y su docstring exige que el consumidor filtre
+   `error_normalizacion IS NULL`. B-02 presenta la fila —perderla sería peor— y lo declara con
+   esta bandera.
+6. **Una carrera ya no marca un comprobante sano como corrupto.** El `except` de
+   `normalizar_lote` distingue el fallo de concurrencia (`IntegrityError`, o `OperationalError`
+   con código 1213/1205) del fallo de datos: re-verifica `necesita_normalizar` y, si otro
+   proceso ya lo normalizó, cuenta como omitido. Antes la marca de error quedaba **permanente**,
+   porque el hash y la `ETL_VERSION` ya coincidían.
+7. **Las 9 identidades de B-00 viven en la suite.** `app/informes/identidades_b00.py` es la
+   única implementación; `tests/test_identidades_b00.py` la corre sobre XML sintéticos y
+   `scripts/verificar_fase1.py` sobre los datos reales. Antes solo existían en el script, fuera
+   de `testpaths`.
+8. **El pre-vuelo se acota por tipo.** Cada informe declara `TIPOS_COMPROBANTE` (todo el grupo
+   B: `("N",)`) y la tarea lo pasa a `ids_pendientes`. Sin eso, la primera generación posterior
+   a subir `ETL_VERSION` reprocesaba el histórico completo dentro de la tarea del informe.
+   También: `ids_pendientes` usa intervalo semiabierto para `hasta` (el
+   `datetime.max.time()` anterior incluía el día siguiente en una columna `DATETIME(0)`), y el
+   pre-vuelo sin pendientes cierra su transacción de lectura.
+9. **Menores:** `generado_en` en UTC naive como el resto del proyecto; log en el `except` de
+   `catalogos.py`; advertencia sobre la colación `utf8mb4_unicode_ci` del `GROUP BY` por
+   descripción; `rfc_emisor == empresa.rfc` en el universo (§11: los `N` **emitidos** por la
+   empresa); aserción de celda sobre `Total sueldos`, `Total separación indemnización` y
+   `Total jubilación pensión retiro`.
+
 **Lo que sigue (fases 2 y 3 del spec §14),** cada una con su propio plan:
 
 - **Fase 2:** B-01, B-04, B-05 (columnas 1–23), B-07, B-10 (21 de 23 reglas). Ninguno
