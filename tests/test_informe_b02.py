@@ -12,15 +12,23 @@ fallan (según el §B-02 del documento fuente):
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b02_conceptos_patron as b02
+from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
 from tests import factories
+
+# Rango de pruebas: todas las nóminas normalizadas de este archivo pagan el 2026-06-30.
+_DESDE = date(2026, 6, 1)
+_HASTA = date(2026, 7, 31)
+# Fecha de emisión dentro de ese mismo rango, para los comprobantes que NO tienen fila en
+# `nomina` y por tanto se acotan por `Comprobante.fecha_emision` (ver `_rango_de_emision`).
+_EMITIDO_EN_RANGO = datetime(2026, 6, 30, 9, 30)
 
 
 async def _nomina(
@@ -421,6 +429,247 @@ async def test_serie_sale_del_detalle_del_comprobante(db: AsyncSession) -> None:
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     assert resultado.filas[0][_columna(resultado, "Serie")] == "N"
+
+
+async def _n_sin_nomina(
+    db: AsyncSession,
+    *,
+    empresa_id: int,
+    uuid: str,
+    error_normalizacion: str | None = None,
+    con_detalle: bool = True,
+    rfc_emisor: str = "CHL960913IX9",
+    fecha_emision: datetime = _EMITIDO_EN_RANGO,
+    estatus: EstatusCfdi = EstatusCfdi.VIGENTE,
+) -> int:
+    """Un CFDI tipo `N` **sin fila en `nomina`**: el que el `join` interno del universo borra
+    del informe. `con_detalle=False` es el que nunca pasó por el ETL; con detalle y
+    `error_normalizacion` es el que el ETL intentó y no pudo; con detalle y sin error es un
+    tipo `N` que el SAT entregó sin complemento de nómina."""
+    comprobante = await factories.crear_comprobante(
+        db,
+        empresa_id=empresa_id,
+        uuid=uuid,
+        rfc_emisor=rfc_emisor,
+        tipo_comprobante="N",
+        estatus=estatus,
+        fecha_emision=fecha_emision,
+    )
+    if con_detalle:
+        db.add(
+            ComprobanteDetalle(
+                comprobante_id=comprobante.comprobante_id,
+                version="4.0",
+                xml_hash="f" * 64,
+                etl_version=1,
+                error_normalizacion=error_normalizacion,
+            )
+        )
+        await db.commit()
+    return comprobante.comprobante_id
+
+
+async def test_nomina_que_fallo_el_etl_no_desaparece_del_informe_sin_bandera(db: AsyncSession) -> None:
+    """**El hallazgo Critical de la revisión final.** El universo hace `join` con `nomina`, así
+    que un tipo `N` cuyo XML se corrompió en disco queda fuera de la hoja `Datos`. Sin la
+    segunda consulta, el Excel sale con una fila donde debería haber dos, la hoja `Parámetros`
+    declara "Filas: 1" y la hoja `Banderas` está vacía: el patrón concilia un recibo creyendo
+    que son todos. Un recibo que desaparece en silencio es un error fiscal, no un bug."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-0000-0000-0000-111111111111")
+    await _n_sin_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="22222222-0000-0000-0000-222222222222",
+        error_normalizacion="XMLSyntaxError: Premature end of data in tag Comprobante",
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert len(resultado.filas) == 1
+    assert resultado.filas[0][_columna(resultado, "UUID")] == "11111111-0000-0000-0000-111111111111"
+    faltantes = [b for b in resultado.banderas if b.clave == "SIN_NORMALIZAR"]
+    assert len(faltantes) == 1, f"se esperaba una bandera SIN_NORMALIZAR; hubo {[b.clave for b in resultado.banderas]}"
+    assert faltantes[0].ambito == "uuid:22222222-0000-0000-0000-222222222222"
+    assert faltantes[0].severidad == "alta"
+    assert "Premature end of data" in faltantes[0].mensaje
+
+
+async def test_nomina_que_nunca_paso_por_el_etl_tambien_lleva_bandera(db: AsyncSession) -> None:
+    """Sin fila en `comprobante_detalle` en absoluto: se descargó y nunca se normalizó."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _n_sin_nomina(db, empresa_id=empresa.empresa_id, uuid="33333333-0000-0000-0000-333333333333", con_detalle=False)
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    bandera = next(b for b in resultado.banderas if b.clave == "SIN_NORMALIZAR")
+    assert bandera.ambito == "uuid:33333333-0000-0000-0000-333333333333"
+    assert "nunca pasó por el ETL" in bandera.mensaje
+
+
+async def test_tipo_n_sin_complemento_de_nomina_da_complemento_ausente(db: AsyncSession) -> None:
+    """§9 del diseño: el ETL hizo su trabajo y el XML no traía complemento de nómina. Es un
+    caso distinto de `SIN_NORMALIZAR` y se distingue porque se arregla distinto."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _n_sin_nomina(db, empresa_id=empresa.empresa_id, uuid="44444444-0000-0000-0000-444444444444")
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    bandera = next(b for b in resultado.banderas if b.clave == "COMPLEMENTO_AUSENTE")
+    assert bandera.ambito == "uuid:44444444-0000-0000-0000-444444444444"
+    assert bandera.severidad == "alta"
+    assert not any(b.clave == "SIN_NORMALIZAR" for b in resultado.banderas)
+
+
+async def test_si_fallan_todas_el_libro_vacio_no_sale_mudo(db: AsyncSession) -> None:
+    """El peor caso: ningún CFDI del rango se pudo normalizar. La hoja `Datos` sale vacía —no
+    hay nada que poner— pero el aviso "sin CFDI de nómina en el rango" sería una mentira si no
+    fuera acompañado de las banderas. Un libro vacío y sin banderas es indistinguible de un
+    periodo en el que de verdad no hubo nómina."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _n_sin_nomina(db, empresa_id=empresa.empresa_id, uuid="55555555-0000-0000-0000-555555555555", error_normalizacion="XML ilegible")
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert resultado.filas == []
+    assert resultado.aviso is not None
+    assert [b.clave for b in resultado.banderas] == ["SIN_NORMALIZAR"]
+
+
+async def test_bandera_de_datos_de_corrida_anterior_cuando_el_reproceso_fallo(db: AsyncSession) -> None:
+    """El contrato de `registrar_error`: ante un fallo del ETL los hijos de la última corrida
+    buena se conservan a propósito y el consumidor debe comprobar `error_normalizacion IS NULL`
+    antes de confiar en la fila. Escenario: se normalizó bien, subió `ETL_VERSION`, el reproceso
+    falló. La fila entra con los importes viejos —perderla sería peor— y la bandera avisa de que
+    no son los del XML que hay hoy en disco."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    cid = await _nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-0000-0000-0000-666666666666")
+    db.add(
+        ComprobanteDetalle(
+            comprobante_id=cid,
+            version="4.0",
+            serie="N",
+            xml_hash="a" * 64,
+            etl_version=2,
+            error_normalizacion="DataError: valor demasiado largo para comprobante_detalle.moneda",
+        )
+    )
+    await db.commit()
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert len(resultado.filas) == 1  # la fila NO se pierde
+    bandera = next(b for b in resultado.banderas if b.clave == "DATOS_DE_CORRIDA_ANTERIOR")
+    assert bandera.ambito == "uuid:66666666-0000-0000-0000-666666666666"
+    assert bandera.severidad == "alta"
+    assert "DataError" in bandera.mensaje
+
+
+async def test_no_verificado_entra_con_bandera_media(db: AsyncSession) -> None:
+    """Divergencia declarada de R-T1: los `no_verificado` entran (excluirlos borraría del
+    informe toda nómina cuyo estatus aún no se ha consultado al SAT), pero nunca sin
+    distinguirse de los vigentes."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="77777777-0000-0000-0000-777777777777", estatus=EstatusCfdi.NO_VERIFICADO)
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert len(resultado.filas) == 1
+    bandera = next(b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO")
+    assert bandera.ambito == "uuid:77777777-0000-0000-0000-777777777777"
+    assert bandera.severidad == "media"
+
+
+async def test_cancelado_incluido_a_proposito_lleva_bandera_alta(db: AsyncSession) -> None:
+    """Con `incluir_cancelados=True` los importes del cancelado suman en el `importe_total` del
+    Diccionario. Antes entraban sin distinguirse de los vigentes."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-888888888888", estatus=EstatusCfdi.CANCELADO)
+
+    p = b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA, incluir_cancelados=True)
+    resultado = await b02.consultar(db, empresa.empresa_id, p)
+
+    assert len(resultado.filas) == 1
+    bandera = next(b for b in resultado.banderas if b.clave == "COMPROBANTE_CANCELADO")
+    assert bandera.ambito == "uuid:88888888-0000-0000-0000-888888888888"
+    assert bandera.severidad == "alta"
+    # Un vigente no lleva ninguna de las dos banderas de estatus.
+    await _nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-999999999999", rfc_receptor="XEXX010101000")
+    resultado = await b02.consultar(db, empresa.empresa_id, p)
+    ambitos = {b.ambito for b in resultado.banderas if b.clave in {"COMPROBANTE_CANCELADO", "ESTATUS_NO_VERIFICADO"}}
+    assert ambitos == {"uuid:88888888-0000-0000-0000-888888888888"}
+
+
+async def test_universo_solo_los_emitidos_por_la_empresa(db: AsyncSession) -> None:
+    """§11 del diseño: el universo del grupo B son los `N` **emitidos** por la empresa, que es
+    el patrón. Inerte hoy con una sola empresa, pero sin la condición el informe mezclaría dos
+    patrones en la misma hoja en cuanto exista una segunda — o en cuanto se descargue una
+    nómina recibida. Aplica tanto a la hoja `Datos` como a las banderas."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    ajeno = await factories.crear_comprobante(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="99999999-0000-0000-0000-999999999999",
+        rfc_emisor="OTRO900101AAA",
+        tipo_comprobante="N",
+        estatus=EstatusCfdi.VIGENTE,
+        fecha_emision=_EMITIDO_EN_RANGO,
+    )
+    db.add(
+        Nomina(
+            comprobante_id=ajeno.comprobante_id,
+            version_nomina="1.2",
+            tipo_nomina="O",
+            fecha_pago=date(2026, 6, 30),
+            total_percepciones=Decimal("100.00"),
+            total_deducciones=Decimal("0.00"),
+            total_otros_pagos=Decimal("0.00"),
+        )
+    )
+    await db.commit()
+    # Y uno ajeno más que además está sin normalizar: tampoco debe generar bandera.
+    await _n_sin_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="99999999-0000-0000-0000-aaaaaaaaaaaa", rfc_emisor="OTRO900101AAA", con_detalle=False
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert resultado.filas == []
+    assert resultado.banderas == []
+
+
+async def test_las_banderas_se_acotan_al_rango_de_emision(db: AsyncSession) -> None:
+    """Los comprobantes sin fila en `nomina` no tienen `fecha_pago` con la que acotarlos, así
+    que se usa `fecha_emision`. Un `N` sin normalizar de otro ejercicio no debe aparecer en un
+    informe de junio: el rango pedido acota también las banderas."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _n_sin_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="aaaaaaaa-1111-0000-0000-aaaaaaaaaaaa",
+        con_detalle=False,
+        fecha_emision=datetime(2025, 3, 15, 10, 0),
+    )
+    # Límite superior: el último instante del día `fecha_hasta` sí entra…
+    await _n_sin_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="aaaaaaaa-2222-0000-0000-aaaaaaaaaaaa",
+        con_detalle=False,
+        fecha_emision=datetime(2026, 7, 31, 23, 59, 59),
+    )
+    # …y el primer instante del día siguiente, no.
+    await _n_sin_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="aaaaaaaa-3333-0000-0000-aaaaaaaaaaaa",
+        con_detalle=False,
+        fecha_emision=datetime(2026, 8, 1, 0, 0, 0),
+    )
+
+    resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
+
+    assert [b.ambito for b in resultado.banderas] == ["uuid:aaaaaaaa-2222-0000-0000-aaaaaaaaaaaa"]
 
 
 async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:

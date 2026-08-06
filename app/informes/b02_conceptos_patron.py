@@ -23,12 +23,30 @@ Las cuatro trampas que este módulo evita a propósito:
 pero se aplaza: duplicaría el conjunto de columnas dinámicas y alteraría su orden (B-02.R5),
 y es trabajo suficiente para ameritar su propia tarea. Por ahora la celda de cada percepción
 reporta `importe_gravado + importe_exento` ya sumados (ver `_conceptos_por_comprobante`).
+
+**Divergencia declarada de R-T1 (§11 del diseño).** El diseño dice "por defecto solo
+`VIGENTE`". Lo implementado excluye únicamente los `CANCELADO`, así que los `no_verificado`
+—los que todavía no se le han consultado al SAT— **sí entran al informe**. Es una decisión
+tomada a propósito, no un descuido: la verificación de estatus contra el SAT es un proceso
+asíncrono e independiente de la descarga, así que exigir `VIGENTE` borraría del informe toda
+la nómina cuyo estatus aún no se ha consultado — pérdida silenciosa de filas, que en este
+dominio es peor que el problema que resuelve. Para que la inclusión no sea invisible, cada
+comprobante incluido que no sea `vigente` lleva bandera: `ESTATUS_NO_VERIFICADO` (media) o
+`COMPROBANTE_CANCELADO` (alta, que solo puede aparecer con `incluir_cancelados=True`).
+
+**Ningún CFDI de nómina desaparece en silencio.** La consulta principal exige fila en
+`nomina`, así que un tipo `N` que el ETL no pudo normalizar (XML corrupto, XML perdido) o
+que llegó sin complemento de nómina no puede aparecer en la hoja `Datos` — no hay datos que
+poner. Lo que sí ocurre siempre es que aparezca en `Banderas`, con su UUID:
+`_banderas_de_no_normalizables` lo garantiza (§9 del diseño). Un patrón que concilia siete
+recibos creyendo que son ocho comete un error fiscal que descubre cuando la autoridad se lo
+señala.
 """
 
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -40,6 +58,7 @@ from app.informes import catalogos
 from app.informes.base import Bandera, Columna, EntradaDiccionario, ResultadoInforme, SEPARADOR_ETIQUETA
 from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.comprobante import Comprobante
+from app.models.empresa import Empresa
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
 
@@ -50,6 +69,17 @@ DESCRIPCION = (
     "Una fila por CFDI de nómina, con una columna por cada concepto del patrón. "
     "Sirve para cotejar el CFDI timbrado contra el recibo del sistema de nómina, concepto por concepto."
 )
+
+TIPOS_COMPROBANTE: tuple[str, ...] = ("N",)
+"""Tipos de comprobante que este informe necesita normalizados (todo el grupo B: solo `N`).
+
+Lo consume el pre-vuelo del ETL (`app.worker.tasks._generar_informe_async`) para acotar
+`ids_pendientes`. Sin este filtro, la primera generación de informe posterior a subir
+`ETL_VERSION` reprocesa el histórico completo de la empresa —ingresos, egresos, pagos—
+dentro de la tarea del informe, en serie y con un commit por comprobante. La constante
+vive aquí, en el informe que declara lo que necesita, y no en la tarea, que no tiene por
+qué saber de nómina.
+"""
 
 _CERO = Decimal("0")
 _TOLERANCIA = Decimal("0.01")
@@ -133,8 +163,14 @@ _COLUMNAS_TOTALES: tuple[tuple[str, str, bool], ...] = (
 )
 
 
-def _universo(empresa_id: int, p: Parametros) -> Select[Any]:
-    """Fase 1 del algoritmo: qué comprobantes entran."""
+def _universo(empresa_id: int, rfc_empresa: str, p: Parametros) -> Select[Any]:
+    """Fase 1 del algoritmo: qué comprobantes entran.
+
+    `rfc_emisor == rfc_empresa` implementa el "**emitidos** por la empresa" del universo del
+    grupo B (§11 del diseño): la empresa es el patrón. Con una sola empresa que es a la vez
+    patrón la condición es inerte, pero en cuanto exista una segunda empresa —o se descargue
+    una nómina recibida— sin ella el informe mezclaría dos patrones en la misma hoja.
+    """
     consulta = (
         select(Comprobante, Nomina, NominaReceptor, NominaTotales, ComprobanteDetalle)
         .join(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
@@ -143,6 +179,7 @@ def _universo(empresa_id: int, p: Parametros) -> Select[Any]:
         .outerjoin(ComprobanteDetalle, ComprobanteDetalle.comprobante_id == Comprobante.comprobante_id)
         .where(
             Comprobante.empresa_id == empresa_id,
+            Comprobante.rfc_emisor == rfc_empresa,
             Comprobante.tipo_comprobante == "N",
             Nomina.fecha_pago >= p.fecha_desde,
             Nomina.fecha_pago <= p.fecha_hasta,
@@ -154,6 +191,101 @@ def _universo(empresa_id: int, p: Parametros) -> Select[Any]:
     if p.tipo_nomina != "AMBOS":
         consulta = consulta.where(Nomina.tipo_nomina == p.tipo_nomina)
     return consulta
+
+
+def _rango_de_emision(p: Parametros) -> tuple[datetime, datetime]:
+    """Rango de `Comprobante.fecha_emision` con el que se acotan los CFDI de nómina que
+    **no** pueden entrar al informe.
+
+    **Por qué el criterio es distinto al del universo.** El universo se acota por
+    `nomina.fecha_pago` (R-T6), pero un tipo `N` que nunca se normalizó, o que llegó sin
+    complemento de nómina, no tiene fila en `nomina`: no existe `fecha_pago` con la que
+    acotarlo. El único dato de fecha disponible es el del encabezado del CFDI, que ya está
+    en `comprobantes`. En la práctica coinciden de periodo (el patrón timbra el recibo al
+    pagarlo), y usarlo evita arrastrar al informe banderas de ejercicios ajenos al rango
+    pedido.
+
+    Intervalo **semiabierto** `[desde 00:00:00, hasta + 1 día 00:00:00)` en vez de
+    `<= hasta 23:59:59.999999`: `fecha_emision` es `DATETIME` sin fracción de segundo, y
+    MySQL redondea los microsegundos de la constante hacia arriba al comparar, con lo que
+    `datetime.max.time()` incluiría el día siguiente completo.
+    """
+    return (
+        datetime.combine(p.fecha_desde, time.min),
+        datetime.combine(p.fecha_hasta + timedelta(days=1), time.min),
+    )
+
+
+async def _banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_empresa: str, p: Parametros) -> list[Bandera]:
+    """Los CFDI de nómina que el informe **no puede** presentar, uno por bandera (§9 del diseño).
+
+    La consulta del universo hace `join` con `nomina`: sin fila en `nomina` el comprobante
+    queda fuera de la hoja `Datos`, y ahí se acaba cualquier rastro de que existió. Esta
+    segunda consulta lo recupera y lo reporta con su UUID, distinguiendo tres causas:
+
+    - sin fila en `comprobante_detalle` → `SIN_NORMALIZAR`: nunca pasó por el ETL.
+    - con `error_normalizacion` → `SIN_NORMALIZAR`: el ETL lo intentó y falló (XML corrupto
+      o perdido en disco).
+    - con detalle y sin error → `COMPLEMENTO_AUSENTE`: es un tipo `N` que el SAT entregó sin
+      complemento de nómina. El ETL hizo su trabajo; el XML no trae nómina que normalizar.
+
+    Los tres son de severidad alta: cada uno significa un recibo que el patrón no verá en la
+    hoja `Datos` y que, sin bandera, conciliaría creyendo que no existe.
+
+    No se aplica el filtro `tipo_nomina`: es un atributo del complemento de nómina, que estos
+    comprobantes justamente no tienen. Un `N` sin normalizar se reporta con cualquier valor
+    del parámetro — no se puede saber si habría entrado al filtro, y callarlo sería el fallo
+    que esta consulta existe para evitar.
+    """
+    inicio, fin = _rango_de_emision(p)
+    consulta = (
+        select(Comprobante.uuid, ComprobanteDetalle.comprobante_id, ComprobanteDetalle.error_normalizacion)
+        .outerjoin(ComprobanteDetalle, ComprobanteDetalle.comprobante_id == Comprobante.comprobante_id)
+        .outerjoin(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
+        .where(
+            Comprobante.empresa_id == empresa_id,
+            Comprobante.rfc_emisor == rfc_empresa,
+            Comprobante.tipo_comprobante == "N",
+            Nomina.comprobante_id.is_(None),
+            Comprobante.fecha_emision >= inicio,
+            Comprobante.fecha_emision < fin,
+        )
+        .order_by(Comprobante.comprobante_id)
+    )
+    if not p.incluir_cancelados:
+        consulta = consulta.where(Comprobante.estatus != EstatusCfdi.CANCELADO)
+
+    banderas: list[Bandera] = []
+    for uuid_cfdi, detalle_id, error in (await db.execute(consulta)).all():
+        ambito = f"uuid:{uuid_cfdi}"
+        if detalle_id is None:
+            banderas.append(
+                Bandera(
+                    clave="SIN_NORMALIZAR",
+                    severidad="alta",
+                    ambito=ambito,
+                    mensaje="CFDI de nómina que nunca pasó por el ETL: no tiene fila en `comprobante_detalle` y no aparece en la hoja Datos.",
+                )
+            )
+        elif error:
+            banderas.append(
+                Bandera(
+                    clave="SIN_NORMALIZAR",
+                    severidad="alta",
+                    ambito=ambito,
+                    mensaje=f"El ETL no pudo leer su XML, así que no aparece en la hoja Datos: {error}",
+                )
+            )
+        else:
+            banderas.append(
+                Bandera(
+                    clave="COMPLEMENTO_AUSENTE",
+                    severidad="alta",
+                    ambito=ambito,
+                    mensaje="CFDI tipo N sin complemento de nómina: no hay datos de nómina que reportar, así que no aparece en la hoja Datos.",
+                )
+            )
+    return banderas
 
 
 async def _conceptos_por_comprobante(
@@ -181,6 +313,17 @@ async def _conceptos_por_comprobante(
                 func.sum(expresion_importe).label("importe"),
             )
             .where(modelo.comprobante_id.in_(ids))
+            # ADVERTENCIA: `modelo.concepto` se agrupa con la colación de la tabla,
+            # `utf8mb4_unicode_ci`, que es insensible a mayúsculas y a acentos. Dos
+            # descripciones que solo difieran en eso ("SUELDO" y "Sueldo", "Bonificacion" y
+            # "Bonificación") colapsan en un solo grupo y MySQL devuelve un representante
+            # arbitrario de entre ellas, así que el TÍTULO de la columna puede variar entre
+            # corridas y `CONCEPTO_INCONSISTENTE` no las verá. **Los importes siguen bien**:
+            # el `SUM` incluye todos los nodos del grupo, que es lo que va a la celda. No se
+            # cambia la colación de la tabla por esto (afectaría a toda la aplicación) ni se
+            # fuerza `COLLATE utf8mb4_bin` aquí, que partiría en dos columnas distintas lo
+            # que para el patrón es el mismo concepto — peor resultado que un título con la
+            # capitalización de una de las dos variantes.
             .group_by(modelo.comprobante_id, columna_tipo, modelo.clave, modelo.concepto)
         )
         for fila in filas:
@@ -199,6 +342,7 @@ def _banderas_del_comprobante(
     nomina: Nomina,
     receptor: NominaReceptor | None,
     totales: NominaTotales | None,
+    detalle: ComprobanteDetalle | None,
     suma_percepciones: Decimal,
     suma_deducciones: Decimal,
     suma_otros: Decimal,
@@ -210,6 +354,51 @@ def _banderas_del_comprobante(
     """
     banderas: list[Bandera] = []
     ambito = f"uuid:{comprobante.uuid}"
+
+    # Contrato de `repositories.normalizacion.registrar_error`: ante un fallo del ETL los
+    # hijos de la última corrida buena se conservan a propósito (es el mejor estado conocido)
+    # y el consumidor debe comprobar `error_normalizacion IS NULL` antes de confiar en la
+    # fila. B-02 elige presentarla —perder el recibo sería peor— y avisar: los importes son
+    # los de la corrida anterior, no los del XML que hay hoy en disco.
+    if detalle is not None and detalle.error_normalizacion:
+        banderas.append(
+            Bandera(
+                clave="DATOS_DE_CORRIDA_ANTERIOR",
+                severidad="alta",
+                ambito=ambito,
+                mensaje=(
+                    "La última normalización de este CFDI falló; la fila se construyó con los datos de la corrida "
+                    f"anterior del ETL y pueden estar desactualizados: {detalle.error_normalizacion}"
+                ),
+            )
+        )
+
+    # Divergencia declarada de R-T1 (ver docstring del módulo): los no verificados entran,
+    # pero nunca sin distinguirse de los vigentes.
+    if comprobante.estatus == EstatusCfdi.CANCELADO:
+        banderas.append(
+            Bandera(
+                clave="COMPROBANTE_CANCELADO",
+                severidad="alta",
+                ambito=ambito,
+                mensaje=(
+                    "El CFDI está cancelado ante el SAT y se incluyó porque `incluir_cancelados=True`; "
+                    "sus importes suman en el `importe_total` del Diccionario."
+                ),
+            )
+        )
+    elif comprobante.estatus == EstatusCfdi.NO_VERIFICADO:
+        banderas.append(
+            Bandera(
+                clave="ESTATUS_NO_VERIFICADO",
+                severidad="media",
+                ambito=ambito,
+                mensaje=(
+                    "Su estatus todavía no se le ha consultado al SAT, así que podría estar cancelado. "
+                    "Se incluye a propósito para no perder filas (divergencia declarada de R-T1)."
+                ),
+            )
+        )
 
     identidades = (
         ("total_percepciones", nomina.total_percepciones, suma_percepciones),
@@ -309,13 +498,32 @@ def _banderas_de_periodos_traslapados(filas_crudas: list[tuple[Comprobante, Nomi
 
 
 async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme:
-    filas_universo = list((await db.execute(_universo(empresa_id, p))).all())
+    rfc_empresa = await db.scalar(select(Empresa.rfc).where(Empresa.empresa_id == empresa_id))
+    if rfc_empresa is None:
+        return ResultadoInforme(
+            columnas=[
+                Columna(titulo=titulo, tipo=tipo, sensible=sensible)  # type: ignore[arg-type]
+                for titulo, tipo, sensible in _COLUMNAS_FIJAS + _COLUMNAS_TOTALES
+            ],
+            aviso="La empresa no existe.",
+        )
+
+    filas_universo = list((await db.execute(_universo(empresa_id, rfc_empresa, p))).all())
+    # Se resuelve ANTES del retorno temprano: si el ETL falló en TODOS los CFDI del rango, la
+    # hoja Datos sale vacía y estas banderas son el único rastro de que había nómina que
+    # reportar. Un libro vacío sin banderas es indistinguible de "no hubo nómina".
+    banderas_fuera = await _banderas_de_no_normalizables(db, empresa_id, rfc_empresa, p)
+
     if not filas_universo:
         columnas = [
             Columna(titulo=titulo, tipo=tipo, sensible=sensible)  # type: ignore[arg-type]
             for titulo, tipo, sensible in _COLUMNAS_FIJAS + _COLUMNAS_TOTALES
         ]
-        return ResultadoInforme(columnas=columnas, aviso="Sin CFDI de nómina en el rango solicitado.")
+        return ResultadoInforme(
+            columnas=columnas,
+            banderas=banderas_fuera,
+            aviso="Sin CFDI de nómina en el rango solicitado.",
+        )
 
     ids = [fila[0].comprobante_id for fila in filas_universo]
     importes, descripciones = await _conceptos_por_comprobante(db, ids)
@@ -327,7 +535,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         key=lambda c: (_ORDEN_NATURALEZA.get(c[0], 9), c[1], c[2]),
     )
 
-    banderas: list[Bandera] = []
+    banderas: list[Bandera] = list(banderas_fuera)
     diccionario: list[EntradaDiccionario] = []
     etiquetas: dict[tuple[str, str, str], str] = {}
     for concepto in conceptos:
@@ -384,7 +592,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     for comprobante, nomina, receptor, totales, detalle in filas_universo:
         cid = comprobante.comprobante_id
         suma = suma_por_comprobante.get(cid, {"P": _CERO, "O": _CERO, "D": _CERO})
-        banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
+        banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, detalle, suma["P"], suma["D"], suma["O"]))
 
         # CURP y NSS salen en claro: `Columna(sensible=True)` ya lo declaró arriba, y es
         # el motor (`app.informes.excel.escribir_libro`) quien enmascara, no esta consulta
