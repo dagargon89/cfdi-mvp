@@ -457,26 +457,28 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
     una CURP **mal formada** interpolada en un mensaje — y el mensaje de `CURP_ESTRUCTURA` es
     justamente el que solo puede llevar una CURP mal formada. Un dato personal defectuoso sigue
     siendo un dato personal (una CURP con un carácter equivocado identifica igual a la persona),
-    así que se agrega la comprobación por **valor**: ninguna celda de la fila puede contener como
-    subcadena la CURP ni el NSS que ese mismo empleado trae en la BD. Esto se descubrió por
-    mutación: reintroducir el dato crudo en el mensaje de `CURP_ESTRUCTURA` dejaba pasar la
-    versión anterior de esta prueba, que solo hacía la comprobación de patrón.
+    así que se agrega la comprobación por **valor**. Esto se descubrió por mutación: reintroducir
+    el dato crudo en el mensaje de `CURP_ESTRUCTURA` dejaba pasar la versión de esta prueba que
+    solo hacía la comprobación de patrón.
 
-    **Lo que esta red NO cubre, anotado para quien la toque** (verificado a mano en los seis
-    informes al cerrar la fase 2: hoy no hay fuga viva por ninguno de los dos huecos):
+    **Los dos huecos que tenía esta red, ya cerrados** (no había fuga viva por ninguno cuando se
+    cerraron: esto es blindaje de regresión, no un incidente):
 
-    1. **La comprobación por valor es por fila.** Compara cada celda contra la CURP y el NSS de *ese*
-       empleado, así que una CURP **mal formada de otro** empleado interpolada en un mensaje se
-       escaparía de las dos comprobaciones a la vez: del patrón por estar mal formada, y del valor
-       por ser de otra fila. Cubrirlo exigiría cruzar cada celda contra todos los valores del
-       universo (O(filas²) sobre cadenas), y hoy ningún mensaje del módulo nombra el dato de otro
-       empleado — los que cruzan empleados (`CURP_DUPLICADA`, `NSS_DUPLICADO`) nombran **RFC**, que
-       no es dato enmascarado en este informe.
-    2. **Solo se recorre la hoja `Datos`.** La hoja `Banderas` viaja en el mismo archivo y no la
-       audita nada automático, ni aquí ni en `scripts/verificar_informes.py`. Ningún mensaje de
-       bandera de los seis informes interpola hoy un dato personal (B-10 no emite banderas de
-       hallazgo, y las compartidas de `universo_nomina` hablan de UUID, importes y estatus), pero
-       una bandera nueva que lo hiciera pasaría sin que nadie se enterara.
+    1. **La comprobación por valor era por fila.** Comparaba cada celda contra la CURP y el NSS de
+       *ese* empleado, así que una CURP **mal formada de otro** empleado interpolada en un mensaje
+       se escapaba de las dos comprobaciones a la vez: del patrón por estar mal formada, y del
+       valor por compararse contra la fila equivocada. Ahora se recoge el conjunto de CURP y NSS de
+       **todos** los empleados del universo una sola vez y se busca cualquiera de ellos en
+       cualquier celda (ver `test_una_curp_de_otro_empleado_en_una_celda_es_fuga`).
+    2. **Solo se recorría la hoja `Datos`.** Las hojas `Banderas`, `Parámetros` y `Diccionario`
+       viajan en el **mismo archivo**, así que un mensaje de bandera que interpolara un dato
+       personal salía igual de la empresa — y es donde el riesgo es más real, porque los mensajes
+       de bandera son texto libre. Ahora se auditan las cuatro (ver
+       `test_un_dato_personal_en_la_hoja_banderas_es_fuga`).
+
+    Las dos correcciones viven en `validadores.fugas_de_datos_personales_en_libro`, compartida con
+    `scripts/verificar_informes.py`: tenerlas en un solo sitio es lo que evita que las dos copias
+    de la red vuelvan a divergir con un hueco distinto cada una.
     """
     eid = await _empresa(db)
     # Cuatro CFDI que entre ellos disparan **todas** las validaciones cuyo mensaje interpolaba el
@@ -516,7 +518,17 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
                            "DATOS_CAMBIANTES"):
         assert clave_esperada in claves, f"el fixture debe disparar {clave_esperada} para auditar su mensaje"
 
-    ctx = ContextoInforme(
+    libro = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, _ctx(p))))
+    # Las cuatro hojas viajan en el mismo archivo, así que se auditan las cuatro.
+    assert set(libro.sheetnames) == {"Datos", "Parámetros", "Banderas", "Diccionario"}
+
+    # Nunca el valor en el mensaje de una aserción que falla: sería la misma fuga que denuncia.
+    fugas = validadores.fugas_de_datos_personales_en_libro(libro, _valores_personales(valores_por_empleado))
+    assert fugas == [], f"datos personales en el libro con enmascaramiento activo: {[f.descripcion for f in fugas]}"
+
+
+def _ctx(p: b10.Parametros) -> ContextoInforme:
+    return ContextoInforme(
         clave=b10.CLAVE,
         nombre=b10.NOMBRE,
         usuario="consulta@test.mx",
@@ -524,23 +536,98 @@ async def test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos(db: AsyncSessi
         parametros=p.model_dump(mode="json"),
         etl_version=1,
     )
-    hoja = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))["Datos"]
 
-    titulos = [c.titulo for c in resultado.columnas]
-    indice_curp, indice_nss = titulos.index("CURP"), titulos.index("NSS")
-    # Nunca el valor en el mensaje de una aserción que falla: sería la misma fuga que denuncia.
-    fugas: list[str] = []
-    for numero_fila, (fila_escrita, fila_cruda) in enumerate(zip(hoja.iter_rows(min_row=2, values_only=True), resultado.filas), start=2):
-        crudos = {"CURP": fila_cruda[indice_curp], "NSS": fila_cruda[indice_nss]}
-        for indice, valor in enumerate(fila_escrita):
-            if validadores.dato_personal_en_texto(valor) is not None:
-                fugas.append(f"patrón de {validadores.dato_personal_en_texto(valor)} en '{titulos[indice]}' (fila {numero_fila})")
-            if indice in (indice_curp, indice_nss) or not isinstance(valor, str):
-                continue
-            for tipo, crudo in crudos.items():
-                if crudo and str(crudo) in valor:
-                    fugas.append(f"valor de {tipo} del propio empleado dentro de '{titulos[indice]}' (fila {numero_fila})")
-    assert fugas == [], f"datos personales en la hoja Datos con enmascaramiento activo: {fugas}"
+
+def _valores_personales(valores_por_empleado: list[tuple[str, str, str, str, date]]) -> dict[str, list[str]]:
+    """CURP y NSS de **todos** los empleados del universo, no los de una fila.
+
+    Es el cierre del primer hueco: comparar celda contra fila dejaba pasar la CURP mal formada de
+    *otro* empleado interpolada en un mensaje. Se toman del fixture, que aquí **es** el universo.
+    """
+    return {
+        "CURP": [curp for _uuid, _rfc, curp, _nss, _fecha in valores_por_empleado],
+        "NSS": [nss for _uuid, _rfc, _curp, nss, _fecha in valores_por_empleado],
+    }
+
+
+async def test_una_curp_de_otro_empleado_en_una_celda_es_fuga(db: AsyncSession) -> None:
+    """**Cierre del hueco A**, comprobado con la fuga que antes se escapaba de las dos redes.
+
+    Una CURP **mal formada de otro** empleado interpolada en la celda de un tercero: invisible para
+    el detector por patrón (está mal formada) e invisible para la comparación por valor mientras
+    esta fuera por fila (el dato es de otra fila). Con el conjunto del universo completo se ve.
+
+    Se inyecta sobre el libro ya escrito, no sobre el módulo: lo que se está probando es la red,
+    no B-10 — que hoy está limpio.
+    """
+    eid = await _empresa(db)
+    curp_ajena = "MALA880326HDF"  # 13 caracteres: no cumple el patrón de una CURP
+    valores_por_empleado = [
+        ("d0000001-0000-0000-0000-000000000001", "VECJ880326XXX", "VECJ880326HDFLNS09", "12345678901", date(2026, 6, 30)),
+        ("d0000002-0000-0000-0000-000000000002", "BBBB880326XXX", curp_ajena, "98765432101", date(2026, 7, 15)),
+    ]
+    for uuid_cfdi, rfc, curp, nss, fecha in valores_por_empleado:
+        await insertar_nomina(db, empresa_id=eid, uuid=uuid_cfdi, rfc_receptor=rfc, curp=curp, nss=nss,
+                              fecha_pago=fecha, fecha_final_pago=fecha)
+
+    p = _p()
+    resultado = await b10.consultar(db, eid, p)
+    libro = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, _ctx(p))))
+    valores = _valores_personales(valores_por_empleado)
+
+    # Premisa: el libro real está limpio, así que la fuga que se detecte es la inyectada.
+    assert validadores.fugas_de_datos_personales_en_libro(libro, valores) == []
+
+    # La CURP del segundo empleado, escrita en la fila de **otro** empleado: es el caso exacto que
+    # la comparación por fila no podía ver.
+    hoja = libro["Datos"]
+    titulos = [celda.value for celda in hoja[1]]
+    columna_rfc, columna_descripcion = titulos.index("RFC empleado") + 1, titulos.index("Descripción del hallazgo") + 1
+    fila_de_otro = next(
+        numero for numero in range(2, hoja.max_row + 1) if hoja.cell(row=numero, column=columna_rfc).value == "VECJ880326XXX"
+    )
+    hoja.cell(row=fila_de_otro, column=columna_descripcion, value=f"Revisar la captura de {curp_ajena} en el sistema de nómina.")
+
+    fugas = validadores.fugas_de_datos_personales_en_libro(libro, valores)
+    assert [(f.hoja, f.tipo, f.deteccion) for f in fugas] == [("Datos", "CURP", "valor")], [f.descripcion for f in fugas]
+    assert validadores.dato_personal_en_texto(hoja.cell(row=fila_de_otro, column=columna_descripcion).value) is None, (
+        "la premisa del hueco A: esta CURP está mal formada, así que el detector por patrón no la ve"
+    )
+
+
+async def test_un_dato_personal_en_la_hoja_banderas_es_fuga(db: AsyncSession) -> None:
+    """**Cierre del hueco B**: las hojas `Banderas`, `Parámetros` y `Diccionario` viajan en el
+    mismo archivo que `Datos`, así que una bandera cuyo mensaje interpolara una CURP saldría igual
+    de la empresa. Es donde el riesgo es más real —los mensajes de bandera son texto libre— y ya
+    hubo un incidente exactamente así con los mensajes de B-10.
+    """
+    eid = await _empresa(db)
+    valores_por_empleado = [
+        ("d0000003-0000-0000-0000-000000000003", "VECJ880326XXX", "VECJ880326HDFLNS09", "12345678901", date(2026, 6, 30)),
+    ]
+    for uuid_cfdi, rfc, curp, nss, fecha in valores_por_empleado:
+        await insertar_nomina(db, empresa_id=eid, uuid=uuid_cfdi, rfc_receptor=rfc, curp=curp, nss=nss,
+                              fecha_pago=fecha, fecha_final_pago=fecha)
+
+    p = _p()
+    resultado = await b10.consultar(db, eid, p)
+    # B-10 sí emite `VALIDACIONES_EJECUTADAS`, así que la hoja `Banderas` tiene al menos una fila
+    # que mutar: la premisa de la prueba no depende de que haya hallazgos.
+    assert resultado.banderas, "el fixture debe producir alguna bandera que auditar"
+    libro = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, _ctx(p))))
+    valores = _valores_personales(valores_por_empleado)
+
+    assert validadores.fugas_de_datos_personales_en_libro(libro, valores) == []
+
+    hoja = libro["Banderas"]
+    # Columna 4 = "Mensaje" (ver `excel._escribir_banderas`); fila 2 = la primera bandera.
+    hoja.cell(row=2, column=4, value=f"Corregir la CURP {valores['CURP'][0]} del empleado.")
+
+    fugas = validadores.fugas_de_datos_personales_en_libro(libro, valores)
+    # Esta CURP sí está bien formada, así que la ven las dos redes: se reporta por patrón y por
+    # valor. Lo que importa es que se reporte, y que se reporte en la hoja `Banderas`.
+    assert {(f.hoja, f.columna, f.tipo) for f in fugas} == {("Banderas", "Mensaje", "CURP")}, [f.descripcion for f in fugas]
+    assert {f.deteccion for f in fugas} == {"patrón", "valor"}
 
 
 async def test_sdi_menor_al_salario_diario_implicito(db: AsyncSession) -> None:

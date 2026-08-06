@@ -16,6 +16,8 @@ haya ajustado el validador para que lo acepte.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from typing import Any, Iterable, Mapping
 
 # RFC de persona física (spec B-10): 4 letras (incluye Ñ y &, usados en apellidos
 # compuestos/paterno de una sola letra), 6 dígitos de fecha, 3 caracteres de homoclave.
@@ -80,6 +82,104 @@ def dato_personal_en_texto(texto: object) -> str | None:
     if _PATRON_NSS_EMBEBIDO.search(texto):
         return "NSS"
     return None
+
+
+LONGITUD_MINIMA_VALOR_PERSONAL = 8
+"""Longitud mínima de un valor personal para buscarlo como subcadena en las celdas del libro.
+
+Una CURP tiene 18 caracteres y un NSS 11, pero la comprobación **por valor** existe justamente
+para atrapar los mal formados (una CURP de 13 caracteres identifica igual a la persona), así que
+no se puede exigir la longitud canónica. El piso está para lo contrario: un valor muy corto
+—`"X"`, `"0"`, una captura basura de dos caracteres— aparecería como subcadena de media hoja y
+convertiría la red en ruido. 8 caracteres deja pasar un NSS truncado de 9 dígitos y una CURP
+recortada, y hace prácticamente imposible la coincidencia accidental (además, solo se buscan en
+celdas que son `str`: los importes son `Decimal` y las fechas `date`, y no se comparan)."""
+
+
+@dataclass(slots=True, frozen=True)
+class FugaDatoPersonal:
+    """Una celda de un libro ya escrito que lleva un dato personal. **Nunca guarda el valor**:
+    solo dónde está y de qué tipo es, porque quien la reporta lo hace en una terminal cuyo
+    historial queda guardado o en la salida de una prueba."""
+
+    hoja: str
+    fila: int
+    columna: str
+    tipo: str
+    """`"CURP"` o `"NSS"`."""
+    deteccion: str
+    """`"patrón"` (la estructura de una CURP/NSS bien formados) o `"valor"` (coincide con el dato
+    de algún empleado del universo, esté bien formado o no)."""
+
+    @property
+    def descripcion(self) -> str:
+        return f"{self.tipo} (por {self.deteccion}) en la hoja '{self.hoja}', fila {self.fila}, columna '{self.columna}'"
+
+
+def _nombre_de_columna(encabezados: tuple[Any, ...], indice: int) -> str:
+    """Título de la columna según la primera fila de la hoja, o su posición si ahí no hay texto
+    (la hoja `Parámetros` no tiene encabezados: su primera fila ya es contenido)."""
+    if indice < len(encabezados):
+        encabezado = encabezados[indice]
+        if isinstance(encabezado, str) and encabezado.strip():
+            return encabezado
+    return f"columna {indice + 1}"
+
+
+def fugas_de_datos_personales_en_libro(libro: Any, valores_por_tipo: Mapping[str, Iterable[object]]) -> list[FugaDatoPersonal]:
+    """Audita **las cuatro hojas** de un libro ya escrito buscando datos personales, por patrón
+    y por valor. Devuelve una `FugaDatoPersonal` por celda afectada; lista vacía = limpio.
+
+    Es la red anti-fuga completa, en un solo sitio, para sus dos llamadores: la prueba de
+    `tests/test_informe_b10.py` (sobre datos sintéticos, en cada pasada de la suite) y
+    `scripts/verificar_informes.py` (sobre los datos reales de la empresa). Estaba duplicada y
+    con dos huecos distintos en cada copia; tenerla una sola vez es lo que hace que cerrarlos
+    valga para las dos.
+
+    **Los dos huecos que cierra.**
+
+    1. *La comprobación por valor era por fila.* Cada celda se comparaba contra la CURP y el NSS
+       de **ese** empleado, así que una CURP mal formada **de otro** empleado interpolada en un
+       mensaje se escapaba de las dos redes a la vez: del patrón por estar mal formada, y del
+       valor por compararse contra la fila equivocada. Aquí `valores_por_tipo` trae los valores
+       de **todos** los empleados del universo y se buscan en cualquier celda.
+    2. *Solo se auditaba la hoja `Datos`.* Las hojas `Banderas`, `Parámetros` y `Diccionario`
+       viajan en el **mismo archivo**, así que un mensaje de bandera que interpolara un dato
+       personal salía igual de la empresa. Es donde el riesgo es más real: los mensajes de
+       bandera son texto libre, y ya hubo un incidente exactamente así (los mensajes de B-10
+       interpolaban la CURP). Se recorren las cuatro hojas, incluida la fila de encabezados
+       —B-02 y B-01 construyen títulos de columna dinámicos a partir de datos—.
+
+    `valores_por_tipo` es `{"CURP": [...], "NSS": [...]}`; los `None`, los vacíos y los más
+    cortos que `LONGITUD_MINIMA_VALOR_PERSONAL` se descartan (ver esa constante). El costo es
+    `celdas × valores` de búsquedas de subcadena, lineal en las dos: con el histórico de una
+    empresa mediana son unos millones de comparaciones en memoria, aceptable para una
+    verificación que corre fuera de la ruta de servicio.
+    """
+    buscables: dict[str, list[str]] = {}
+    for tipo, valores in valores_por_tipo.items():
+        vistos = {str(valor) for valor in valores if valor is not None and len(str(valor)) >= LONGITUD_MINIMA_VALOR_PERSONAL}
+        if vistos:
+            buscables[tipo] = sorted(vistos)
+
+    fugas: list[FugaDatoPersonal] = []
+    for hoja in libro.worksheets:
+        filas = list(hoja.iter_rows(values_only=True))
+        if not filas:
+            continue
+        encabezados = filas[0]
+        for numero_fila, fila in enumerate(filas, start=1):
+            for indice, valor in enumerate(fila):
+                tipo_por_patron = dato_personal_en_texto(valor)
+                if tipo_por_patron is not None:
+                    fugas.append(FugaDatoPersonal(hoja.title, numero_fila, _nombre_de_columna(encabezados, indice), tipo_por_patron, "patrón"))
+                if not isinstance(valor, str):
+                    continue
+                for tipo, valores_del_tipo in buscables.items():
+                    if any(buscable in valor for buscable in valores_del_tipo):
+                        fugas.append(FugaDatoPersonal(hoja.title, numero_fila, _nombre_de_columna(encabezados, indice), tipo, "valor"))
+    return fugas
+
 
 _DIAS_POR_ANIO = 365
 """Aproximación deliberada (ver `antiguedad_iso_a_dias`): un año calendario real tiene 365

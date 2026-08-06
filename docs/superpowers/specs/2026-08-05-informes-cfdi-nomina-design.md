@@ -258,10 +258,30 @@ interpolaba la CURP y el NSS crudos en el mensaje de su columna "Descripción de
 sensible y no puede serlo sin volverse ilegible—, así que 6 de 7 filas salían con el dato completo con el
 default `enmascarar_datos_personales=true`. **Regla: ningún mensaje de hallazgo ni de bandera interpola un
 dato que alguna columna del mismo informe declara sensible.** El dato ya viaja en su columna; el mensaje
-describe el problema. `app.informes.validadores.dato_personal_en_texto` audita la regla desde fuera y la
-usan tanto la suite (`tests/test_informe_b10.py`) como `scripts/verificar_informes.py`, que ahora recorre
-**todas** las celdas de texto de la hoja `Datos` buscando la estructura de una CURP o de un NSS completos —
-antes verificaba el mecanismo (que las columnas sensibles salieran enmascaradas) y nunca el resultado.
+describe el problema. La regla se audita desde fuera con
+`app.informes.validadores.fugas_de_datos_personales_en_libro`, **una sola implementación** que usan sus dos
+llamadores: la suite (`tests/test_informe_b10.py`) y `scripts/verificar_informes.py`. Antes cada uno tenía
+su copia, y cada copia un hueco distinto; los dos están cerrados (fase 2, cierre de mejoras — no había fuga
+viva por ninguno, es blindaje de regresión):
+
+- **Por patrón y por valor, contra el universo completo.** La búsqueda estructural
+  (`dato_personal_en_texto`) no puede ver una CURP **mal formada** interpolada en un mensaje, y la
+  comparación por valor era **por fila**: contra la CURP y el NSS de *ese* empleado. Una CURP mal formada
+  **de otro** empleado se escapaba de las dos redes a la vez. Ahora se recoge el conjunto de CURP y NSS de
+  todos los empleados del universo una vez y se busca cualquiera de ellos en cualquier celda de texto (con
+  un piso de `LONGITUD_MINIMA_VALOR_PERSONAL` = 8 caracteres para que un valor basura de dos caracteres no
+  convierta la red en ruido).
+- **Las cuatro hojas, no solo `Datos`.** `Banderas`, `Parámetros` y `Diccionario` viajan en el **mismo
+  archivo**, así que un mensaje de bandera que interpolara un dato personal salía igual de la empresa. Es
+  donde el riesgo es más real: los mensajes de bandera son texto libre, y el incidente de B-10 fue
+  exactamente así.
+
+**El script sí maneja CURP y NSS reales, y nunca los imprime.** El razonamiento anterior —que
+`scripts/verificar_informes.py` no debía tocar datos personales reales, y por eso solo buscaba por patrón—
+se descartó: el script ya lee la BD real (calcula las identidades de B-00 sobre los datos de nómina, que
+incluyen al receptor), compararlos en memoria sin imprimirlos es seguro, y es la única forma de atrapar una
+CURP mal formada. **Requisito duro:** cuando encuentra una fuga reporta la hoja, la fila, la columna y el
+tipo de dato, **nunca el valor** — igual que `dato_personal_en_texto`, que devuelve el tipo y no el dato.
 
 **Falla cerrado.** La decisión de enmascarar la toma el motor (`app.informes.excel.escribir_libro`) leyendo
 `ContextoInforme.parametros`, y lo hace con `get("enmascarar_datos_personales", True)`: si la clave no está
@@ -311,6 +331,37 @@ el margen es asimétrico a propósito: **una bandera de más se ve y se descarta
 se ve nunca.** Lo único que la ventana debe seguir acotando es que un `N` roto de un ejercicio
 ajeno no aparezca en el informe de este mes, porque una hoja `Banderas` con decenas de entradas
 irrelevantes deja de leerse.
+
+**`ESTATUS_NO_VERIFICADO` se colapsa por umbral, y solo esa clave** (fase 2, cierre de mejoras). La
+verificación de estatus contra el SAT es asíncrona por diseño, así que `no_verificado` es el estado
+**normal** de un ejercicio recién descargado, no un caso de borde: con la nómina real de la empresa (4
+empleados × 24 quincenas) una bandera por comprobante son ~96 filas idénticas en la hoja `Banderas` de cada
+uno de los cinco informes que llaman a `universo_nomina.banderas_de_estatus` — en B-05 serían 96 banderas
+para **4 filas** de datos. El daño no es cosmético: **entierra** las banderas de severidad alta de la misma
+hoja (`SIN_NORMALIZAR`, `TOTALES_DESCUADRADOS`, `MULTI_PATRON`, `TIPO_FUERA_DE_CATALOGO`), que son los
+hallazgos accionables. Es el mismo criterio del párrafo anterior aplicado al revés: allá el margen se elige
+holgado porque el riesgo es perder un aviso; aquí el umbral se elige bajo porque el riesgo es *sepultar* los
+avisos que sí importan.
+
+- Con **menos de `UMBRAL_COLAPSO_NO_VERIFICADO` = 15** comprobantes afectados: una bandera por UUID, como
+  antes. Retrocompatible — el `ambito` por UUID es la columna por la que se filtra la hoja `Banderas` y la
+  aseveran las pruebas de B-02, B-04, B-05 y B-07, así que reemplazarla *siempre* por un resumen sería un
+  cambio del contrato de salida, no una mejora.
+- A partir de 15: **una sola** bandera con `ambito="informe"`, cuyo mensaje lleva el conteo de comprobantes
+  afectados, por qué importa (la verificación es asíncrona; conviene correrla y regenerar el informe antes
+  de conciliar) y una **muestra** de 3 UUID declarada como muestra, con el total.
+- El umbral es 15 porque el piso lo fija el caso cotidiano —un mes del histórico real son 8 comprobantes, y
+  ese caso debe seguir trazable por UUID, con margen para crecer— y el techo la legibilidad: con ~15 filas
+  de la misma clave media, una `SIN_NORMALIZAR` todavía se ve en la primera pantalla de la hoja.
+- **`COMPROBANTE_CANCELADO` y `DATOS_DE_CORRIDA_ANTERIOR` no se colapsan.** El primero exige que el usuario
+  pida `incluir_cancelados=True` explícitamente, así que su volumen es una decisión suya y no una
+  consecuencia del calendario de la verificación asíncrona. El segundo exige un fallo del ETL sobre ese CFDI
+  concreto: es raro, y cada caso importa individualmente porque su mensaje trae el `error_normalizacion`
+  propio — colapsarlos perdería información, no ruido.
+
+El colapso es una decisión sobre el **conjunto**, así que `banderas_de_estatus` recibe el universo completo
+en vez de un comprobante. Al no existir ya un punto de entrada por comprobante, ningún informe puede emitir
+esta clave con un grano distinto al de los otros cuatro: aplica a los cinco por construcción.
 
 **Residual conocido de la protección contra carreras (deuda anotada).** La protección consiste
 en re-consultar `necesita_normalizar` al detectar un fallo de concurrencia, y eso solo funciona

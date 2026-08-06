@@ -5,7 +5,8 @@ informes-cfdi.md`, sección "B-00 · Definiciones comunes al grupo") sobre los C
 nómina ya normalizados, que B-02 produce filas y columnas dinámicas consistentes con esos
 mismos datos, y (desde la fase 2) que **los seis informes del catálogo** —no solo B-02—
 corren sin lanzar, no salen vacíos por error, enmascaran toda columna `sensible=True` y **no
-dejan ninguna CURP ni ningún NSS completos en ninguna celda de la hoja `Datos`**.
+dejan ninguna CURP ni ningún NSS de ningún empleado en ninguna celda de ninguna de las cuatro
+hojas**.
 
 Esa última comprobación se agregó en la revisión final de la fase 2 y es la razón por la que
 este script no vio la fuga más grave del catálogo: comprobaba el **mecanismo** (que las columnas
@@ -14,17 +15,21 @@ sensibles no trajeran el dato personal dentro de una frase). B-10 interpolaba la
 su columna "Descripción del hallazgo" —no sensible, y que no puede serlo sin volverse ilegible—,
 así que 6 de 7 filas salían con el dato completo con `enmascarar_datos_personales=True`.
 
-**Alcance de esa comprobación aquí, anotado para no creerle más de lo que hace.** Este script busca
-solo por **patrón** (`validadores.dato_personal_en_texto`), no por valor: no puede consultar la BD
-para cotejar celda contra dato porque su propio contrato es no imprimir ni manejar CURP, NSS ni
-cuentas de personas reales. Dos consecuencias:
+**Ahora compara por patrón Y por valor, sobre las cuatro hojas.** La red vive en
+`validadores.fugas_de_datos_personales_en_libro`, compartida con la prueba anti-fuga de
+`tests/test_informe_b10.py`. Hasta el cierre de la fase 2 este script solo buscaba por **patrón**
+y solo en la hoja `Datos`, con el argumento de que no debía manejar CURP ni NSS reales. Ese
+argumento se descartó a propósito: el script **ya** lee la BD real (calcula las identidades de
+B-00 sobre los datos de nómina, que incluyen al receptor), así que ya tiene acceso; compararlos en
+memoria sin imprimirlos es seguro; y es la **única** forma de atrapar una CURP **mal formada**
+interpolada en un mensaje, que por definición no coincide con el patrón de una CURP. Las hojas
+`Banderas`, `Parámetros` y `Diccionario` se auditan porque viajan en el mismo archivo: un mensaje
+de bandera que interpolara un dato personal salía igual de la empresa, y los mensajes de bandera
+son texto libre.
 
-1. Una CURP **mal formada** interpolada en un mensaje no se detecta (no coincide con el patrón de
-   una CURP). La suite sí cubre ese caso, por valor y por fila, en
-   `tests/test_informe_b10.py::test_ninguna_celda_de_datos_lleva_curp_ni_nss_completos`.
-2. Solo se recorre la hoja `Datos`. La hoja `Banderas` viaja en el mismo archivo y no la audita
-   nada automático; se revisó a mano en los seis informes al cerrar la fase 2 y está limpia (ningún
-   mensaje de bandera interpola un dato personal), pero una bandera nueva que lo hiciera pasaría.
+**Contrato duro que eso no cambia:** este script **nunca imprime** una CURP, un NSS ni una cuenta
+bancaria. Cuando encuentra una fuga reporta la hoja, la fila, la columna y el tipo de dato —nunca
+el valor— porque se corre en una terminal cuyo historial queda guardado.
 
 Las identidades **no se implementan aquí**: viven en `app/informes/identidades_b00.py` y
 `tests/test_identidades_b00.py` las corre en cada pasada de la suite sobre XML sintéticos.
@@ -52,6 +57,7 @@ import re
 import sys
 from datetime import date, datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import openpyxl
@@ -60,6 +66,8 @@ from app.db.session import SessionLocal
 from app.informes import b02_conceptos_patron as b02
 from app.informes import excel, identidades_b00, registro, validadores
 from app.informes.base import ContextoInforme
+from app.models.comprobante import Comprobante
+from app.models.nomina import NominaReceptor
 from app.services import normalizacion
 
 EMPRESA_ID = 11
@@ -72,6 +80,40 @@ _MASCARA_RE = re.compile(r"^\*{4}([^*]{4})?$")  # `enmascarar()`: "****" o "****
 # (B-07). B-10 tiene grano de *hallazgo*: cero filas ahí significa "sin hallazgos", un
 # resultado legítimo que no debe tratarse como falla — solo se avisa.
 _CLAVES_CON_FILAS_GARANTIZADAS = {"B-01", "B-02", "B-04", "B-05", "B-07"}
+
+
+_MAX_FUGAS_REPORTADAS = 10
+"""Cuántas fugas se detallan por informe antes de resumir el resto. Una fuga real suele afectar a
+todas las filas de una columna; con cientos de empleados la lista completa sepultaría las demás
+fallas del script — el mismo razonamiento que el colapso de `ESTATUS_NO_VERIFICADO`."""
+
+
+async def _valores_personales_del_universo(db: AsyncSession) -> dict[str, list[str]]:
+    """CURP y NSS de **todos** los receptores de nómina de la empresa, para la comprobación por
+    valor de `validadores.fugas_de_datos_personales_en_libro`.
+
+    **Se leen a propósito, y no se imprimen nunca.** Es el único modo de atrapar una CURP mal
+    formada interpolada en un mensaje: por definición no coincide con el patrón de una CURP, así
+    que el detector estructural no puede verla. Y se recogen de **todo** el universo, no de la fila
+    que se está auditando, porque una CURP de otro empleado en la celda de un tercero se escapaba
+    de las dos redes a la vez. Solo viven en memoria y solo se usan como aguja de una búsqueda de
+    subcadena; lo que sale a la consola es el conteo, nunca un valor.
+    """
+    consulta = (
+        select(NominaReceptor.curp, NominaReceptor.nss)
+        .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+        .where(Comprobante.empresa_id == EMPRESA_ID)
+        .distinct()
+    )
+    curps: set[str] = set()
+    nss: set[str] = set()
+    for curp, numero_seguridad in (await db.execute(consulta)).all():
+        if curp:
+            curps.add(str(curp))
+        if numero_seguridad:
+            nss.add(str(numero_seguridad))
+    print(f"Datos personales del universo para la comprobación por valor: {len(curps)} CURP y {len(nss)} NSS (no se imprimen)")
+    return {"CURP": sorted(curps), "NSS": sorted(nss)}
 
 
 async def _verificar_identidades_b00(db: AsyncSession) -> tuple[int, list[str]]:
@@ -155,10 +197,13 @@ def _parametros_minimos(clave: str) -> dict[str, object]:
     return {"fecha_desde": date(2026, 1, 1), "fecha_hasta": date(2026, 12, 31)}
 
 
-async def _verificar_informe_del_catalogo(db: AsyncSession, clave: str, comprobantes_normalizados: int) -> list[str]:
+async def _verificar_informe_del_catalogo(
+    db: AsyncSession, clave: str, comprobantes_normalizados: int, valores_personales: dict[str, list[str]]
+) -> list[str]:
     """Corre un informe del catálogo end-to-end (consulta + libro de Excel) y comprueba
-    que no lance, que su grano no salga vacío por error, y que ninguna columna declarada
-    `sensible=True` se cuele sin enmascarar al archivo que circula por correo."""
+    que no lance, que su grano no salga vacío por error, que ninguna columna declarada
+    `sensible=True` se cuele sin enmascarar al archivo que circula por correo, y que ninguna de las
+    cuatro hojas lleve la CURP o el NSS de ningún empleado del universo."""
     definicion = registro.obtener(clave)
 
     try:
@@ -213,36 +258,27 @@ async def _verificar_informe_del_catalogo(db: AsyncSession, clave: str, comproba
     # La comprobación de arriba verifica el **mecanismo** (que las columnas declaradas sensibles
     # salgan enmascaradas); esta verifica el **resultado**, que es lo que nadie comprobaba y por lo
     # que B-10 emitía CURP y NSS completos con el enmascaramiento activado: los interpolaba en el
-    # texto de su columna "Descripción del hallazgo", que no es sensible ni puede serlo. Se recorren
-    # TODAS las celdas de texto de la hoja `Datos`, no solo las sensibles, buscando la estructura de
-    # una CURP o de un NSS completos. No se imprime el valor encontrado —solo el tipo y la columna—
-    # porque este script se corre en una terminal cuyo historial queda guardado.
-    for numero_fila, fila in enumerate(filas_datos, start=2):
-        for idx, valor in enumerate(fila):
-            tipo_dato = validadores.dato_personal_en_texto(valor)
-            if tipo_dato is None:
-                continue
-            titulo = resultado.columnas[idx].titulo if idx < len(resultado.columnas) else f"columna {idx}"
-            sensible = idx < len(resultado.columnas) and resultado.columnas[idx].sensible
-            fallas.append(
-                f"{clave}: la celda de la columna '{titulo}' (fila {numero_fila} de Datos) contiene un "
-                f"{tipo_dato} completo con enmascarar_datos_personales=True"
-                + (" (la columna SÍ es sensible: el motor no la enmascaró)" if sensible else " (la columna no es sensible: el dato viene interpolado en el texto)")
-            )
-            break
-        if fallas:
-            break
+    # texto de su columna "Descripción del hallazgo", que no es sensible ni puede serlo. Se auditan
+    # las CUATRO hojas (viajan en el mismo archivo) y por las dos vías (patrón y valor); ver el
+    # docstring del módulo y `validadores.fugas_de_datos_personales_en_libro`. Nunca se imprime el
+    # valor encontrado —solo hoja, fila, columna y tipo— porque este script se corre en una terminal
+    # cuyo historial queda guardado.
+    fugas = validadores.fugas_de_datos_personales_en_libro(libro, valores_personales)
+    for fuga in fugas[:_MAX_FUGAS_REPORTADAS]:
+        fallas.append(f"{clave}: dato personal en el libro con enmascarar_datos_personales=True — {fuga.descripcion}")
+    if len(fugas) > _MAX_FUGAS_REPORTADAS:
+        fallas.append(f"{clave}: y {len(fugas) - _MAX_FUGAS_REPORTADAS} fuga(s) más de datos personales en el mismo libro")
 
     return fallas
 
 
-async def _verificar_catalogo(db: AsyncSession, comprobantes_normalizados: int) -> list[str]:
+async def _verificar_catalogo(db: AsyncSession, comprobantes_normalizados: int, valores_personales: dict[str, list[str]]) -> list[str]:
     """Recorre los seis informes del catálogo (Task 8, fase 2): el registro es la fuente
     de verdad de lo que existe, así que un informe nuevo entra a esta comprobación en
     cuanto se registra en `app.informes.registro`, sin tocar este script."""
     fallas: list[str] = []
     for clave in sorted(registro.REGISTRO):
-        fallas.extend(await _verificar_informe_del_catalogo(db, clave, comprobantes_normalizados))
+        fallas.extend(await _verificar_informe_del_catalogo(db, clave, comprobantes_normalizados, valores_personales))
     return fallas
 
 
@@ -252,7 +288,8 @@ async def main() -> int:
         print(f"Identidades de B-00 por CFDI: {identidades_b00.IDENTIDADES_POR_COMPROBANTE}")
 
         fallas_b02 = await _verificar_b02(db, comprobantes_normalizados)
-        fallas_catalogo = await _verificar_catalogo(db, comprobantes_normalizados)
+        valores_personales = await _valores_personales_del_universo(db)
+        fallas_catalogo = await _verificar_catalogo(db, comprobantes_normalizados, valores_personales)
 
     fallas = fallas_b00 + fallas_b02 + fallas_catalogo
     if fallas:
