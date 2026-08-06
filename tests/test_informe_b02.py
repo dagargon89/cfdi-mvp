@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.informes import b02_conceptos_patron as b02
 from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.enums import EstatusCfdi
-from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
+from app.models.nomina import Nomina
 from tests import factories
+from tests.helpers_nomina import insertar_nomina
 
 # Rango de pruebas: todas las nóminas normalizadas de este archivo pagan el 2026-06-30.
 _DESDE = date(2026, 6, 1)
@@ -29,92 +30,6 @@ _HASTA = date(2026, 7, 31)
 # Fecha de emisión dentro de ese mismo rango, para los comprobantes que NO tienen fila en
 # `nomina` y por tanto se acotan por `Comprobante.fecha_emision` (ver `_rango_de_emision`).
 _EMITIDO_EN_RANGO = datetime(2026, 6, 30, 9, 30)
-
-
-async def _nomina(
-    db: AsyncSession,
-    *,
-    empresa_id: int,
-    uuid: str,
-    num_empleado: str = "039",
-    rfc_receptor: str = "XAXX010101000",
-    fecha_pago: date = date(2026, 6, 30),
-    percepciones: list[tuple[str, str, str, str, str]] | None = None,
-    deducciones: list[tuple[str, str, str, str]] | None = None,
-    otros_pagos: list[tuple[str, str, str, str]] | None = None,
-    total_percepciones: str = "8759.70",
-    total_deducciones: str = "591.10",
-    total_otros_pagos: str = "0.00",
-    total: str = "8168.60",
-    estatus: EstatusCfdi = EstatusCfdi.VIGENTE,
-    dias: str = "15.000",
-) -> int:
-    """Inserta un CFDI de nómina normalizado. Las tuplas son
-    (tipo, clave, concepto, gravado, exento) para percepciones y (tipo, clave, concepto,
-    importe) para deducciones y otros pagos."""
-    comprobante = await factories.crear_comprobante(
-        db,
-        empresa_id=empresa_id,
-        uuid=uuid,
-        rfc_emisor="CHL960913IX9",
-        rfc_receptor=rfc_receptor,
-        tipo_comprobante="N",
-        estatus=estatus,
-        total=Decimal(total),
-        fecha_emision=None,
-    )
-    cid = comprobante.comprobante_id
-    db.add(
-        Nomina(
-            comprobante_id=cid,
-            version_nomina="1.2",
-            tipo_nomina="O",
-            fecha_pago=fecha_pago,
-            fecha_inicial_pago=date(fecha_pago.year, fecha_pago.month, 16),
-            fecha_final_pago=fecha_pago,
-            num_dias_pagados=Decimal(dias),
-            total_percepciones=Decimal(total_percepciones),
-            total_deducciones=Decimal(total_deducciones),
-            total_otros_pagos=Decimal(total_otros_pagos),
-            registro_patronal="B5510768108",
-        )
-    )
-    db.add(
-        NominaReceptor(
-            comprobante_id=cid,
-            curp="XXXX800101HCHXXX01",
-            nss="12345678901",
-            num_empleado=num_empleado,
-            departamento="Direccion",
-            puesto="Director",
-            periodicidad_pago="04",
-            tipo_regimen="02",
-            salario_base_cot_apor=Decimal("583.98"),
-            salario_diario_integrado=Decimal("607.34"),
-        )
-    )
-    db.add(NominaTotales(comprobante_id=cid, total_gravado=Decimal(total_percepciones), total_exento=Decimal("0")))
-    if percepciones is None:
-        percepciones = [("001", "001", "Sueldo", total_percepciones, "0.00")]
-    for tipo, clave, concepto, gravado, exento in percepciones:
-        db.add(
-            NominaPercepcion(
-                comprobante_id=cid,
-                tipo_percepcion=tipo,
-                clave=clave,
-                concepto=concepto,
-                importe_gravado=Decimal(gravado),
-                importe_exento=Decimal(exento),
-            )
-        )
-    if deducciones is None:
-        deducciones = [("002", "045", "I.S.R. mes", total_deducciones)]
-    for tipo, clave, concepto, importe in deducciones:
-        db.add(NominaDeduccion(comprobante_id=cid, tipo_deduccion=tipo, clave=clave, concepto=concepto, importe=Decimal(importe)))
-    for tipo, clave, concepto, importe in otros_pagos or []:
-        db.add(NominaOtroPago(comprobante_id=cid, tipo_otro_pago=tipo, clave=clave, concepto=concepto, importe=Decimal(importe)))
-    await db.commit()
-    return cid
 
 
 def _columna(resultado, titulo: str) -> int:  # type: ignore[no-untyped-def]
@@ -125,7 +40,7 @@ def _columna(resultado, titulo: str) -> int:  # type: ignore[no-untyped-def]
 
 async def test_una_fila_por_comprobante_con_columnas_dinamicas(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-1111-1111-1111-111111111111")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-1111-1111-1111-111111111111")
 
     p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
     resultado = await b02.consultar(db, empresa.empresa_id, p)
@@ -138,7 +53,7 @@ async def test_una_fila_por_comprobante_con_columnas_dinamicas(db: AsyncSession)
 async def test_concepto_repetido_se_suma(db: AsyncSession) -> None:
     """B-02.R1. Sobrescribir en vez de sumar subvalúa la nómina en silencio."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="22222222-2222-2222-2222-222222222222",
@@ -153,12 +68,12 @@ async def test_concepto_repetido_se_suma(db: AsyncSession) -> None:
 async def test_colision_de_clave_entre_naturalezas_no_colapsa(db: AsyncSession) -> None:
     """B-02.R3, con el caso real de la empresa 11: 'Ajuste al neto' es D/004/099 y O/999/099."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="33333333-3333-3333-3333-333333333333",
         deducciones=[("004", "099", "Ajuste al neto", "0.04")],
-        otros_pagos=[("999", "099", "Ajuste al neto", "0.05")],
+        otros_pagos=[("999", "099", "Ajuste al neto", "0.05", "0.00")],
     )
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
@@ -174,14 +89,14 @@ async def test_celda_sin_dato_es_cero_no_vacio(db: AsyncSession) -> None:
     """R-T7: un nulo en columna de importe es indistinguible de 'no aplica' y rompe
     cualquier suma en hoja de cálculo."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="44444444-4444-4444-4444-444444444444",
         rfc_receptor="XEXX010101000",
         percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
     )
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="55555555-5555-5555-5555-555555555555",
@@ -201,13 +116,13 @@ async def test_orden_de_columnas_es_determinista(db: AsyncSession) -> None:
     """B-02.R5: percepciones, luego otros pagos, luego deducciones; dentro de cada
     naturaleza por tipo y clave como texto."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="66666666-6666-6666-6666-666666666666",
         percepciones=[("005", "031", "Fondo ahorro empresa", "0.00", "500.00"), ("001", "001", "Sueldo", "8000.00", "0.00")],
         deducciones=[("002", "045", "I.S.R. mes", "391.10"), ("001", "052", "I.M.S.S.", "200.00")],
-        otros_pagos=[("002", "035", "Subs al Empleo mes", "0.00")],
+        otros_pagos=[("002", "035", "Subs al Empleo mes", "0.00", "0.00")],
     )
 
     p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
@@ -226,7 +141,7 @@ async def test_concepto_inconsistente_usa_la_descripcion_mas_frecuente(db: Async
     bandera. Agrupar por descripción produciría columnas duplicadas del mismo concepto."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     for indice, concepto in enumerate(("Sueldo", "Sueldo", "Sueldos")):
-        await _nomina(
+        await insertar_nomina(
             db,
             empresa_id=empresa.empresa_id,
             uuid=f"7777777{indice}-7777-7777-7777-777777777777",
@@ -249,7 +164,7 @@ async def test_concepto_inconsistente_usa_la_descripcion_mas_frecuente(db: Async
 async def test_cancelados_se_excluyen_por_defecto(db: AsyncSession) -> None:
     """R-T1."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-8888-8888-8888-888888888888", estatus=EstatusCfdi.CANCELADO)
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-8888-8888-8888-888888888888", estatus=EstatusCfdi.CANCELADO)
 
     p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
     assert (await b02.consultar(db, empresa.empresa_id, p)).filas == []
@@ -265,7 +180,7 @@ async def test_columnas_personales_declaran_sensible_y_entregan_el_dato_en_claro
     sigue viajando en `Parametros` porque de ahí lo toma `ContextoInforme.parametros` cuando el
     endpoint arma el contexto para `escribir_libro`."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="99999999-9999-9999-9999-999999999999")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="99999999-9999-9999-9999-999999999999")
 
     p = b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31))
     resultado = await b02.consultar(db, empresa.empresa_id, p)
@@ -281,7 +196,7 @@ async def test_columnas_personales_declaran_sensible_y_entregan_el_dato_en_claro
 async def test_banderas_de_descuadre_y_neto(db: AsyncSession) -> None:
     """Identidades de B-00 fuera de tolerancia y `NETO_NEGATIVO`."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -298,7 +213,7 @@ async def test_banderas_de_descuadre_y_neto(db: AsyncSession) -> None:
 
 async def test_dias_pagados_atipico_para_quincenal(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", dias="20.000")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", dias="20.000")
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     assert any(b.clave == "DIAS_PAGADOS_ATIPICO" for b in resultado.banderas)
@@ -323,7 +238,7 @@ async def test_concepto_repetido_con_descripciones_distintas_se_suma(db: AsyncSe
     `importes[...] += importe` por `= importe`, esta prueba fallaría aunque las otras 10
     sigan verdes."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="cccccccc-cccc-cccc-cccc-cccccccccccc",
@@ -355,7 +270,7 @@ async def test_desempate_de_concepto_canonico_es_deterministico(db: AsyncSession
     protege nada, aunque pase."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     for indice, concepto in enumerate(("Sueldos", "Sueldo", "Sueldos", "Sueldo")):
-        await _nomina(
+        await insertar_nomina(
             db,
             empresa_id=empresa.empresa_id,
             uuid=f"dddddddd-dddd-dddd-dddd-ddddddddddd{indice}",
@@ -378,7 +293,7 @@ async def test_bandera_clave_vacia(db: AsyncSession) -> None:
     """Un concepto sin clave del patrón no se puede identificar de forma estable entre
     periodos: se marca con `CLAVE_VACIA` en vez de descartarse en silencio."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
@@ -393,7 +308,7 @@ async def test_bandera_deduccion_mayor_percepcion(db: AsyncSession) -> None:
     """Las deducciones no pueden exceder lo que hay para deducir (percepciones + otros
     pagos): si lo hacen, el neto no cuadra y algo está mal capturado."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="ffffffff-ffff-ffff-ffff-ffffffffffff",
@@ -412,7 +327,7 @@ async def test_bandera_deduccion_mayor_percepcion(db: AsyncSession) -> None:
 
 async def test_diccionario_trae_la_descripcion_del_catalogo_sat(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="cccccccc-cccc-cccc-cccc-cccccccccccc")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="cccccccc-cccc-cccc-cccc-cccccccccccc")
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     entrada = next(e for e in resultado.diccionario if e.naturaleza == "P" and e.tipo == "001")
@@ -423,7 +338,7 @@ async def test_serie_sale_del_detalle_del_comprobante(db: AsyncSession) -> None:
     from app.models.cfdi_detalle import ComprobanteDetalle
 
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    cid = await _nomina(db, empresa_id=empresa.empresa_id, uuid="dddddddd-dddd-dddd-dddd-dddddddddddd")
+    cid = await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="dddddddd-dddd-dddd-dddd-dddddddddddd")
     db.add(ComprobanteDetalle(comprobante_id=cid, version="4.0", serie="N", xml_hash="e" * 64, etl_version=1))
     await db.commit()
 
@@ -476,7 +391,7 @@ async def test_nomina_que_fallo_el_etl_no_desaparece_del_informe_sin_bandera(db:
     declara "Filas: 1" y la hoja `Banderas` está vacía: el patrón concilia un recibo creyendo
     que son todos. Un recibo que desaparece en silencio es un error fiscal, no un bug."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-0000-0000-0000-111111111111")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-0000-0000-0000-111111111111")
     await _n_sin_nomina(
         db,
         empresa_id=empresa.empresa_id,
@@ -543,7 +458,7 @@ async def test_bandera_de_datos_de_corrida_anterior_cuando_el_reproceso_fallo(db
     falló. La fila entra con los importes viejos —perderla sería peor— y la bandera avisa de que
     no son los del XML que hay hoy en disco."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    cid = await _nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-0000-0000-0000-666666666666")
+    cid = await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-0000-0000-0000-666666666666")
     db.add(
         ComprobanteDetalle(
             comprobante_id=cid,
@@ -570,7 +485,7 @@ async def test_no_verificado_entra_con_bandera_media(db: AsyncSession) -> None:
     informe toda nómina cuyo estatus aún no se ha consultado al SAT), pero nunca sin
     distinguirse de los vigentes."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="77777777-0000-0000-0000-777777777777", estatus=EstatusCfdi.NO_VERIFICADO)
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="77777777-0000-0000-0000-777777777777", estatus=EstatusCfdi.NO_VERIFICADO)
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA))
 
@@ -584,7 +499,7 @@ async def test_cancelado_incluido_a_proposito_lleva_bandera_alta(db: AsyncSessio
     """Con `incluir_cancelados=True` los importes del cancelado suman en el `importe_total` del
     Diccionario. Antes entraban sin distinguirse de los vigentes."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-888888888888", estatus=EstatusCfdi.CANCELADO)
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-888888888888", estatus=EstatusCfdi.CANCELADO)
 
     p = b02.Parametros(fecha_desde=_DESDE, fecha_hasta=_HASTA, incluir_cancelados=True)
     resultado = await b02.consultar(db, empresa.empresa_id, p)
@@ -594,7 +509,7 @@ async def test_cancelado_incluido_a_proposito_lleva_bandera_alta(db: AsyncSessio
     assert bandera.ambito == "uuid:88888888-0000-0000-0000-888888888888"
     assert bandera.severidad == "alta"
     # Un vigente no lleva ninguna de las dos banderas de estatus.
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-999999999999", rfc_receptor="XEXX010101000")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="88888888-0000-0000-0000-999999999999", rfc_receptor="XEXX010101000")
     resultado = await b02.consultar(db, empresa.empresa_id, p)
     ambitos = {b.ambito for b in resultado.banderas if b.clave in {"COMPROBANTE_CANCELADO", "ESTATUS_NO_VERIFICADO"}}
     assert ambitos == {"uuid:88888888-0000-0000-0000-888888888888"}
@@ -649,7 +564,7 @@ async def test_bandera_aunque_el_timbrado_caiga_despues_del_rango_de_pago(db: As
     solicitado" — el fallo que esta consulta existe para evitar, reproducido contra datos
     reales por la re-revisión."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="cafe0001-0000-0000-0000-000000000001", fecha_pago=date(2026, 6, 30))
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="cafe0001-0000-0000-0000-000000000001", fecha_pago=date(2026, 6, 30))
     await _n_sin_nomina(
         db,
         empresa_id=empresa.empresa_id,
@@ -702,7 +617,7 @@ async def test_descripciones_que_solo_difieren_en_mayusculas_se_detectan(db: Asy
     identidad de columna es `(naturaleza, tipo, clave)` y se arma en Python (R-T9), así que las
     dos filas caen en la misma celda y su importe se suma."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
-    await _nomina(
+    await insertar_nomina(
         db,
         empresa_id=empresa.empresa_id,
         uuid="c011a710-0000-0000-0000-000000000001",
@@ -730,8 +645,8 @@ async def test_bandera_periodo_traslapado(db: AsyncSession) -> None:
     siempre un timbrado doble."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     rfc_receptor = "XAXX010101099"
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-2222-3333-4444-555555555555", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 30))
-    await _nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-7777-8888-9999-000000000000", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 20))
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-2222-3333-4444-555555555555", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 30))
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-7777-8888-9999-000000000000", rfc_receptor=rfc_receptor, fecha_pago=date(2026, 6, 20))
 
     resultado = await b02.consultar(db, empresa.empresa_id, b02.Parametros(fecha_desde=date(2026, 6, 1), fecha_hasta=date(2026, 7, 31)))
     assert any(b.clave == "PERIODO_TRASLAPADO" for b in resultado.banderas)
