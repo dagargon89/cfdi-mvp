@@ -6,9 +6,15 @@ el mismo universo de datos y repetirlo en cada archivo de pruebas es la misma du
 que la revisión final de la fase 1 señaló como riesgo principal, pero en las pruebas en vez
 de en el código de producción.
 
-Se declaran los 31 parámetros desde el principio, aunque cada tarea use solo un subconjunto:
+Se declaran los parámetros desde el principio, aunque cada tarea use solo un subconjunto:
 agregarlos a mitad del plan dejaría pruebas ya escritas contra una firma que todavía no
 existe (las tareas 4 a 7 de esta fase los usan todos).
+
+`total_impuestos_retenidos` y `total_otras_deducciones` (ronda de corrección 1 de la tarea 3)
+se agregaron después de que la primera versión de este helper no pudiera fijar
+`total_impuestos_retenidos`, lo que dejaba sin ejercitar la novena identidad de B-00 (ISR
+retenido, spec `app.informes.identidades_b00`) en la única rama donde B-01 la comprueba
+(`declarado is not None`): la comparación nunca corría en ninguna prueba del proyecto.
 
 Dos trampas de este helper, ambas defectos reales de la fase 1:
 
@@ -65,6 +71,8 @@ async def insertar_nomina(
     total_otros_pagos: str = "0.00",
     total_separacion: str | None = None,
     total_jubilacion: str | None = None,
+    total_impuestos_retenidos: str | None = None,
+    total_otras_deducciones: str | None = None,
     total: str = "8168.60",
     estatus: EstatusCfdi = EstatusCfdi.VIGENTE,
     tipo_regimen: str = "02",
@@ -141,6 +149,8 @@ async def insertar_nomina(
             total_exento=Decimal("0"),
             total_separacion_indemnizacion=Decimal(total_separacion) if total_separacion is not None else None,
             total_jubilacion_pension_retiro=Decimal(total_jubilacion) if total_jubilacion is not None else None,
+            total_impuestos_retenidos=Decimal(total_impuestos_retenidos) if total_impuestos_retenidos is not None else None,
+            total_otras_deducciones=Decimal(total_otras_deducciones) if total_otras_deducciones is not None else None,
         )
     )
     if percepciones is None:

@@ -127,3 +127,49 @@ async def test_orden_de_columnas_es_determinista(db: AsyncSession) -> None:
     primera = await b01.consultar(db, empresa.empresa_id, _p())
     segunda = await b01.consultar(db, empresa.empresa_id, _p())
     assert _titulos(primera) == _titulos(segunda)
+
+
+async def test_isr_retenido_descuadrado_dispara_bandera(db: AsyncSession) -> None:
+    """Novena identidad de B-00: `nomina_totales.total_impuestos_retenidos` declarado
+    contra la suma de las deducciones tipo `002` (ISR) — la que `b02_conceptos_patron`
+    documenta explícitamente como "pertenece a B-01, que agrupa por tipo del catálogo".
+
+    Ronda de corrección 1 (revisión): antes de esta prueba, `total_impuestos_retenidos`
+    nunca se fijaba a un valor no nulo en ninguna prueba del proyecto (el helper no tenía
+    el parámetro), así que la rama `declarado is not None` de esa identidad no se ejecutaba
+    nunca. Invertir la comparación, cambiar `CLAVE_TIPO_DEDUCCION_ISR` o romper el acceso a
+    la tupla `(D, "002")` habría dejado la suite verde de todas formas.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="88888888-1111-1111-1111-888888888888",
+        deducciones=[("002", "045", "ISR", "500.00")],
+        total_deducciones="500.00",
+        total_impuestos_retenidos="999.99",  # no coincide con la suma real de ISR (500.00)
+    )
+
+    resultado = await b01.consultar(db, empresa.empresa_id, _p())
+    descuadres_isr = [b for b in resultado.banderas if b.clave == "TOTALES_DESCUADRADOS" and "total_impuestos_retenidos" in b.mensaje]
+    assert len(descuadres_isr) == 1, resultado.banderas
+    assert descuadres_isr[0].severidad == "alta"
+
+
+async def test_isr_retenido_cuadrado_no_dispara_bandera(db: AsyncSession) -> None:
+    """La mitad de la prueba anterior que importa igual: sin ella, una bandera que se
+    disparara siempre (p. ej. por una comparación invertida) pasaría la prueba de arriba
+    igual, sin proteger nada."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="88888888-2222-2222-2222-888888888888",
+        deducciones=[("002", "045", "ISR", "500.00")],
+        total_deducciones="500.00",
+        total_impuestos_retenidos="500.00",  # coincide con la suma real de ISR
+    )
+
+    resultado = await b01.consultar(db, empresa.empresa_id, _p())
+    descuadres_isr = [b for b in resultado.banderas if b.clave == "TOTALES_DESCUADRADOS" and "total_impuestos_retenidos" in b.mensaje]
+    assert descuadres_isr == [], resultado.banderas

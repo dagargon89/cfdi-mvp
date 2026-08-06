@@ -254,6 +254,12 @@ def banderas_de_estatus(comprobante: Comprobante, detalle: ComprobanteDetalle | 
                 clave="COMPROBANTE_CANCELADO",
                 severidad="alta",
                 ambito=ambito,
+                # Antes de la extracción (en B-02) este mensaje decía "sus importes suman en
+                # el `importe_total` del Diccionario" — correcto ahí, pero esta función la
+                # llaman ahora varios informes y no todos tienen una hoja Diccionario con esa
+                # columna (B-01, por ejemplo, sí; otro informe futuro sobre este mismo
+                # universo podría no tenerla). Se generalizó a propósito (ronda de
+                # corrección 1 de la tarea 3): no es una transcripción literal de B-02.
                 mensaje=(
                     "El CFDI está cancelado ante el SAT y se incluyó porque `incluir_cancelados=True`; "
                     "sus importes suman en el informe."
