@@ -493,6 +493,18 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # mismo periodo sin aviso. Ver `universo_nomina.banderas_de_gravado_y_exento_descuadrados`.
     banderas.extend(await universo_nomina.banderas_de_gravado_y_exento_descuadrados(db, ids_resueltos))
 
+    # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR` sobre lo
+    # que SÍ entra al acumulado: es la condición con la que el §11 del diseño acepta la
+    # divergencia de R-T1 ("todo comprobante incluido que no sea vigente lleva bandera"), y
+    # este informe no la cumplía. Sin ella, un cancelado con `incluir_cancelados=True` inflaba
+    # el ingreso anual del empleado en su constancia de percepciones sin una sola advertencia,
+    # y el acumulado mezclaba `vigente` con `no_verificado` sin distinguirlos. Recibe el
+    # universo resuelto completo, no un comprobante: el colapso por umbral de
+    # `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring), y en este
+    # informe es donde más pesaba —4 filas de datos contra ~96 banderas de un ejercicio recién
+    # descargado—.
+    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_resueltas]))
+
     acumuladores: dict[str, _Acumulador] = {}
     identidad: dict[str, tuple[str | None, str | None, str | None, str | None, str | None]] = {}
 
@@ -500,14 +512,6 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         rfc = comprobante.rfc_receptor
         acc = acumuladores.setdefault(rfc, _Acumulador(uuids=set()))
         sumas = sumas_por_cid.get(comprobante.comprobante_id, {})
-
-        # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR` sobre lo
-        # que SÍ entra al acumulado: es la condición con la que el §11 del diseño acepta la
-        # divergencia de R-T1 ("todo comprobante incluido que no sea vigente lleva bandera"), y
-        # este informe no la cumplía. Sin ella, un cancelado con `incluir_cancelados=True` inflaba
-        # el ingreso anual del empleado en su constancia de percepciones sin una sola advertencia,
-        # y el acumulado mezclaba `vigente` con `no_verificado` sin distinguirlos.
-        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
 
         acc.uuids.add(comprobante.uuid)
         acc.rfc_emisores.add(comprobante.rfc_emisor)

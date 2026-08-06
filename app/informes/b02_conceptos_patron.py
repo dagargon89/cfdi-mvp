@@ -242,7 +242,6 @@ def _banderas_del_comprobante(
     nomina: Nomina,
     receptor: NominaReceptor | None,
     totales: NominaTotales | None,
-    detalle: ComprobanteDetalle | None,
     suma_percepciones: Decimal,
     suma_deducciones: Decimal,
     suma_otros: Decimal,
@@ -251,12 +250,16 @@ def _banderas_del_comprobante(
 
     No valida `total_impuestos_retenidos` contra el ISR retenido: esa identidad pertenece a
     B-01, que agrupa por tipo del catálogo. Aquí bastan los tres totales del complemento.
+
+    `DATOS_DE_CORRIDA_ANTERIOR`, `COMPROBANTE_CANCELADO` y `ESTATUS_NO_VERIFICADO` (con la
+    divergencia declarada de R-T1: ver docstring del módulo) son del mismo universo que B-01 y
+    viven en `universo_nomina` desde la tarea 3 para no duplicar la lógica. **No se emiten
+    aquí**: `universo_nomina.banderas_de_estatus` recibe el universo completo porque el colapso
+    por umbral de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto, así que la llama
+    `consultar` una sola vez.
     """
-    # `DATOS_DE_CORRIDA_ANTERIOR`, `COMPROBANTE_CANCELADO` y `ESTATUS_NO_VERIFICADO` (con la
-    # divergencia declarada de R-T1: ver docstring del módulo) son del mismo universo que
-    # B-01 y viven en `universo_nomina` desde la tarea 3 para no duplicar la lógica.
     ambito = f"uuid:{comprobante.uuid}"
-    banderas: list[Bandera] = list(universo_nomina.banderas_de_estatus(comprobante, detalle))
+    banderas: list[Bandera] = []
 
     identidades = (
         ("total_percepciones", nomina.total_percepciones, suma_percepciones),
@@ -392,6 +395,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     )
 
     banderas: list[Bandera] = list(banderas_fuera) + banderas_gravado_exento
+    # `banderas_de_estatus` recibe el universo completo, no un comprobante: el colapso por umbral
+    # de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring).
+    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
     diccionario: list[EntradaDiccionario] = []
     etiquetas: dict[tuple[str, str, str], str] = {}
     for concepto in conceptos:
@@ -448,7 +454,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     for comprobante, nomina, receptor, totales, detalle in filas_universo:
         cid = comprobante.comprobante_id
         suma = suma_por_comprobante.get(cid, {"P": _CERO, "O": _CERO, "D": _CERO})
-        banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, detalle, suma["P"], suma["D"], suma["O"]))
+        banderas.extend(_banderas_del_comprobante(comprobante, nomina, receptor, totales, suma["P"], suma["D"], suma["O"]))
 
         # CURP y NSS salen en claro: `Columna(sensible=True)` ya lo declaró arriba, y es
         # el motor (`app.informes.excel.escribir_libro`) quien enmascara, no esta consulta

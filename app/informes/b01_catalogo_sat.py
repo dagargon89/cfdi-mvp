@@ -269,6 +269,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     observados: set[tuple[str, str]] = {clave for por_tipo in importes.values() for clave in por_tipo}
 
     banderas: list[Bandera] = list(banderas_fuera) + banderas_gravado_exento
+    # `banderas_de_estatus` recibe el universo completo, no un comprobante: el colapso por umbral
+    # de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring).
+    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
     if p.solo_tipos_con_movimiento:
         banderas.append(
             Bandera(
@@ -342,7 +345,6 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         suma_otros = sum((importe for (naturaleza, _tipo), importe in por_tipo.items() if naturaleza == "O"), _CERO)
 
         ambito = f"uuid:{comprobante.uuid}"
-        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
 
         fuera_de_catalogo = sorted((naturaleza, tipo) for naturaleza, tipo in por_tipo if (naturaleza, tipo) not in claves_del_catalogo)
         if fuera_de_catalogo:

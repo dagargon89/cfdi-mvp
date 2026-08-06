@@ -282,6 +282,16 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     isr_por_cid = await _isr_por_comprobante(db, ids)
 
     banderas: list[Bandera] = list(banderas_fuera)
+    # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR`: la
+    # condición con la que el §11 del diseño acepta la divergencia de R-T1 ("todo comprobante
+    # incluido que no sea vigente lleva bandera"). Este informe no la cumplía y no tiene columna
+    # de estatus en `Datos` (a diferencia de B-01/B-02, que sí traen "Estado SAT"), así que una
+    # celda de la matriz llena por un CFDI cancelado ante el SAT decía "esa quincena está
+    # cubierta" sin ninguna marca — y como la verificación contra el SAT es asíncrona por diseño,
+    # `no_verificado` es el estado normal de un rango recién descargado. Recibe el universo
+    # completo, no un comprobante: el colapso por umbral de `ESTATUS_NO_VERIFICADO` es una
+    # decisión sobre el conjunto (ver su docstring).
+    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
     # celdas[rfc][indice] = CFDI asignados a esa celda de la matriz.
     celdas: dict[str, dict[int, list[_DatoCfdi]]] = {}
     # Última fotografía del receptor observada por empleado (filas_universo viene ordenado
@@ -289,16 +299,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # sobrescribir en el orden de iteración deja la más reciente).
     identidad: dict[str, tuple[str | None, str | None, str | None, str | None, str | None]] = {}
 
-    for comprobante, nomina, receptor, totales, detalle in filas_universo:
+    for comprobante, nomina, receptor, totales, _detalle in filas_universo:
         rfc = comprobante.rfc_receptor
-        # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR`: la
-        # condición con la que el §11 del diseño acepta la divergencia de R-T1 ("todo comprobante
-        # incluido que no sea vigente lleva bandera"). Este informe no la cumplía y no tiene
-        # columna de estatus en `Datos` (a diferencia de B-01/B-02, que sí traen "Estado SAT"), así
-        # que una celda de la matriz llena por un CFDI cancelado ante el SAT decía "esa quincena
-        # está cubierta" sin ninguna marca — y como la verificación contra el SAT es asíncrona por
-        # diseño, `no_verificado` es el estado normal de un rango recién descargado.
-        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
         identidad[rfc] = (
             receptor.num_empleado if receptor else None,
             receptor.curp if receptor else None,

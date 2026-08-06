@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b05_acumulado_anual as b05
+from app.informes import universo_nomina
 from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
 from app.models.enums import EstatusCfdi
 from tests import factories
@@ -334,6 +335,110 @@ async def test_no_verificado_entra_al_acumulado_con_bandera(db: AsyncSession) ->
     # Solo el no verificado: un vigente no lleva bandera de estatus.
     assert ambitos == {"uuid:bb000007-0000-0000-0000-000000000007"}
     assert next(b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO").severidad == "media"
+
+
+async def _insertar_no_verificados(db: AsyncSession, eid: int, cuantos: int) -> list[str]:
+    """`cuantos` CFDI de nómina `no_verificado` del mismo empleado, uno por quincena de 2026.
+
+    Reproduce en pequeño la forma real del problema: la verificación de estatus contra el SAT es
+    asíncrona, así que un ejercicio recién descargado deja **todos** sus comprobantes en
+    `no_verificado` — y B-05, que agrupa por empleado, los condensa en una sola fila de datos.
+    Devuelve los UUID en el mismo orden en que `universo_nomina.universo` los ordena
+    (`fecha_pago` ascendente), que es el orden del que sale la muestra de la bandera colapsada.
+    """
+    uuids: list[str] = []
+    for indice in range(cuantos):
+        # Una quincena por comprobante desde el 15 de enero: 24 cortes disponibles en el año,
+        # de sobra para cualquier umbral entre 10 y 25.
+        mes, quincena = divmod(indice, 2)
+        fecha = date(2026, mes + 1, 15 if quincena == 0 else 28)
+        uuid_cfdi = f"be0000{indice:02d}-0000-0000-0000-0000000000{indice:02d}"
+        await insertar_nomina(db, empresa_id=eid, uuid=uuid_cfdi,
+                              fecha_pago=fecha, fecha_final_pago=fecha,
+                              estatus=EstatusCfdi.NO_VERIFICADO)
+        uuids.append(uuid_cfdi)
+    return uuids
+
+
+async def test_no_verificado_por_debajo_del_umbral_sigue_siendo_una_bandera_por_uuid(db: AsyncSession) -> None:
+    """La mitad **retrocompatible** del colapso por umbral: mientras los comprobantes sin verificar
+    sean menos de `UMBRAL_COLAPSO_NO_VERIFICADO`, cada uno conserva su bandera con `ambito` por
+    UUID — que es la columna por la que se filtra la hoja `Banderas`.
+
+    Sin esta prueba, subir el colapso a "siempre" pasaría inadvertido y sería un cambio del
+    contrato de salida: se perdería la trazabilidad por comprobante del caso normal.
+    """
+    eid = await _empresa(db)
+    uuids = await _insertar_no_verificados(db, eid, universo_nomina.UMBRAL_COLAPSO_NO_VERIFICADO - 1)
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    banderas = [b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO"]
+    assert len(banderas) == len(uuids)
+    assert {b.ambito for b in banderas} == {f"uuid:{u}" for u in uuids}
+    assert all(b.severidad == "media" for b in banderas)
+
+
+async def test_no_verificado_a_partir_del_umbral_colapsa_en_una_sola_bandera(db: AsyncSession) -> None:
+    """A partir del umbral, una sola bandera con `ambito="informe"` y **ninguna** por UUID.
+
+    Es la mitad que resuelve el problema. Con la nómina real de la empresa (4 empleados × 24
+    quincenas) un ejercicio recién descargado producía ~96 banderas `ESTATUS_NO_VERIFICADO`
+    idénticas para **4 filas** de datos en este informe, y esas 96 filas **entierran** las
+    banderas de severidad alta de la misma hoja (`SIN_NORMALIZAR`, `TOTALES_DESCUADRADOS`,
+    `MULTI_PATRON`), que son los hallazgos accionables. Se comprobó por mutación: devolviendo
+    `banderas_de_estatus` a una bandera por UUID sin umbral, esta prueba falla.
+
+    La bandera colapsada no pierde información: lleva el conteo, la razón por la que importa (la
+    verificación es asíncrona y conviene correrla antes de usar el informe) y una muestra de UUID
+    declarada como tal, con el total.
+    """
+    eid = await _empresa(db)
+    uuids = await _insertar_no_verificados(db, eid, universo_nomina.UMBRAL_COLAPSO_NO_VERIFICADO)
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    banderas = [b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO"]
+    assert len(banderas) == 1, [b.ambito for b in banderas]
+    bandera = banderas[0]
+    assert bandera.ambito == "informe"
+    assert bandera.severidad == "media"
+    # Ninguna bandera de esta clave conserva el grano por UUID.
+    assert not [b for b in banderas if b.ambito.startswith("uuid:")]
+    # El conteo real de comprobantes afectados, no el de filas del informe (que es 1: un empleado).
+    assert f"{len(uuids)} comprobantes" in bandera.mensaje, bandera.mensaje
+    assert len(resultado.filas) == 1
+    # Por qué importa: la verificación es asíncrona y conviene correrla antes de usar el informe.
+    assert "asíncrona" in bandera.mensaje and "volver a generar el informe" in bandera.mensaje
+    # Muestra explícita —con su total— para que quien la lea pueda empezar por algún lado.
+    assert f"Muestra de {universo_nomina.MUESTRA_UUID_COLAPSO} de los {len(uuids)} UUID" in bandera.mensaje, bandera.mensaje
+    for uuid_citado in uuids[: universo_nomina.MUESTRA_UUID_COLAPSO]:
+        assert uuid_citado in bandera.mensaje
+    assert uuids[-1] not in bandera.mensaje, "es una muestra, no la lista completa"
+
+
+async def test_cancelado_y_corrida_anterior_no_se_colapsan(db: AsyncSession) -> None:
+    """El colapso es **solo** de `ESTATUS_NO_VERIFICADO`, y esta prueba lo fija.
+
+    `COMPROBANTE_CANCELADO` exige que el usuario pida `incluir_cancelados=True` explícitamente,
+    así que su volumen es una decisión suya y no una consecuencia del calendario de la
+    verificación asíncrona. `DATOS_DE_CORRIDA_ANTERIOR` exige un fallo del ETL sobre ese CFDI
+    concreto: es raro, y cada caso importa individualmente porque su mensaje trae el
+    `error_normalizacion` propio — colapsarlos perdería información, no ruido.
+    """
+    eid = await _empresa(db)
+    cuantos = universo_nomina.UMBRAL_COLAPSO_NO_VERIFICADO + 2
+    for indice in range(cuantos):
+        mes, quincena = divmod(indice, 2)
+        fecha = date(2026, mes + 1, 15 if quincena == 0 else 28)
+        await insertar_nomina(db, empresa_id=eid, uuid=f"bf0000{indice:02d}-0000-0000-0000-0000000000{indice:02d}",
+                              fecha_pago=fecha, fecha_final_pago=fecha,
+                              estatus=EstatusCfdi.CANCELADO,
+                              error_normalizacion="XML no encontrado en disco")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026, incluir_cancelados=True))
+    for clave in ("COMPROBANTE_CANCELADO", "DATOS_DE_CORRIDA_ANTERIOR"):
+        banderas = [b for b in resultado.banderas if b.clave == clave]
+        assert len(banderas) == cuantos, f"{clave} no se colapsa: {len(banderas)} de {cuantos}"
+        assert all(b.ambito.startswith("uuid:") for b in banderas)
 
 
 async def test_gravado_y_exento_descuadrados_emiten_bandera(db: AsyncSession) -> None:

@@ -36,6 +36,11 @@ y el acumulado anual de B-05 mezclaba `vigente` con `no_verificado` sin distingu
 la verificación contra el SAT es asíncrona por diseño, `no_verificado` es el estado **normal** de
 un ejercicio recién descargado, no un caso de borde. B-10 sí la omite y lo argumenta en su propio
 docstring (su grano es el hallazgo, no el comprobante).
+
+Precisamente porque `no_verificado` es el estado normal, `banderas_de_estatus()` **colapsa** esa
+clave por umbral: recibe el universo completo (no un comprobante, como hasta el cierre de la fase 2)
+y a partir de `UMBRAL_COLAPSO_NO_VERIFICADO` comprobantes afectados emite una sola bandera con
+`ambito="informe"` en lugar de una por UUID. Ver `_banderas_de_no_verificado`.
 """
 
 from __future__ import annotations
@@ -236,10 +241,110 @@ async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_em
     return banderas
 
 
-def banderas_de_estatus(comprobante: Comprobante, detalle: ComprobanteDetalle | None) -> list[Bandera]:
+UMBRAL_COLAPSO_NO_VERIFICADO = 15
+"""A partir de cuántos comprobantes sin verificar `banderas_de_estatus` deja de emitir una
+bandera `ESTATUS_NO_VERIFICADO` por UUID y emite una sola con `ambito="informe"`.
+
+**Por qué hace falta un umbral.** La verificación de estatus contra el SAT es asíncrona por
+diseño, así que `no_verificado` es el estado **normal** de un ejercicio recién descargado, no
+un caso de borde: la nómina real de la empresa (4 empleados × 24 quincenas) deja ~96
+comprobantes sin verificar, y una bandera por cada uno son ~96 filas idénticas en la hoja
+`Banderas` — en B-05 serían 96 banderas para 4 filas de datos. El daño no es cosmético:
+**entierra** las banderas de severidad alta de la misma hoja (`SIN_NORMALIZAR`,
+`TOTALES_DESCUADRADOS`, `MULTI_PATRON`, `TIPO_FUERA_DE_CATALOGO`), que son los hallazgos
+accionables. Es el mismo razonamiento que ya aplica `MARGEN_TIMBRADO_DIAS`: "una hoja
+`Banderas` con decenas de entradas irrelevantes es una hoja que nadie lee, que es otra forma
+de perder el aviso."
+
+**Por qué 15.** El piso lo fija el caso cotidiano: la consulta más frecuente es un mes del
+histórico real (4 empleados × 2 quincenas = 8 comprobantes), y ese caso debe seguir siendo
+trazable **por UUID**, con margen para una empresa que crezca a 7 empleados por mes. El techo
+lo fija la legibilidad: con ~15 filas de la misma clave media, una `SIN_NORMALIZAR` todavía
+se ve en la primera pantalla de la hoja; a partir de ahí, no. Y 15 está muy por debajo de los
+96 del ejercicio completo, así que el colapso ocurre mucho antes de que la hoja se vuelva
+ilegible. El criterio es el inverso al de `MARGEN_TIMBRADO_DIAS` a propósito: allá se elige
+holgado porque el riesgo es perder un aviso; aquí se elige bajo porque el riesgo es
+**sepultar** los avisos que sí importan, y el colapso no pierde ninguna información (el
+conteo y la muestra van en el mensaje)."""
+
+MUESTRA_UUID_COLAPSO = 3
+"""Cuántos UUID se citan en el mensaje de la bandera colapsada. No es cero —quien la lee
+necesita por dónde empezar a revisar— y no son todos: un mensaje con 96 UUID sería la misma
+hoja ilegible por otra vía, solo que en una celda. El mensaje dice explícitamente que es una
+muestra y cuántos comprobantes hay en total."""
+
+_MENSAJE_NO_VERIFICADO_POR_UUID = (
+    "Su estatus todavía no se le ha consultado al SAT, así que podría estar cancelado. "
+    "Se incluye a propósito para no perder filas (divergencia declarada de R-T1)."
+)
+
+
+def _banderas_de_no_verificado(uuids: Sequence[str]) -> list[Bandera]:
+    """`ESTATUS_NO_VERIFICADO` con colapso por umbral: una bandera por UUID mientras los
+    comprobantes afectados sean menos de `UMBRAL_COLAPSO_NO_VERIFICADO`, una sola con
+    `ambito="informe"` a partir de ahí.
+
+    **Por qué el umbral y no una de las dos alternativas simples.** Añadir una bandera de
+    resumen *conservando* las 96 no resuelve nada (serían 97 filas). Reemplazar *siempre* la
+    por-UUID por una de resumen pierde el `ambito` por UUID, que es la columna por la que se
+    filtra la hoja `Banderas` y que las pruebas de B-02, B-04, B-05 y B-07 aseveran
+    literalmente (`ambito == "uuid:..."`): sería un cambio del contrato de salida, no una
+    mejora. Con el umbral, el caso normal sigue trazable por UUID —retrocompatible— y el caso
+    masivo deja de sepultar los hallazgos accionables.
+
+    **Solo se colapsa esta clave.** `COMPROBANTE_CANCELADO` exige que el usuario pida
+    `incluir_cancelados=True` explícitamente, así que su volumen es una decisión suya y no una
+    consecuencia del calendario de la verificación asíncrona. `DATOS_DE_CORRIDA_ANTERIOR`
+    exige un fallo del ETL sobre ese CFDI concreto: es raro, y cada caso importa
+    individualmente porque el mensaje trae el error de normalización propio de cada uno
+    —colapsarlos perdería información, no ruido—.
+    """
+    if not uuids:
+        return []
+    if len(uuids) < UMBRAL_COLAPSO_NO_VERIFICADO:
+        return [
+            Bandera(
+                clave="ESTATUS_NO_VERIFICADO",
+                severidad="media",
+                ambito=f"uuid:{uuid_cfdi}",
+                mensaje=_MENSAJE_NO_VERIFICADO_POR_UUID,
+            )
+            for uuid_cfdi in uuids
+        ]
+
+    muestra = list(uuids[:MUESTRA_UUID_COLAPSO])
+    return [
+        Bandera(
+            clave="ESTATUS_NO_VERIFICADO",
+            severidad="media",
+            ambito="informe",
+            mensaje=(
+                f"{len(uuids)} comprobantes del informe tienen un estatus que todavía no se le ha consultado al "
+                "SAT, así que cualquiera de ellos podría estar cancelado; se incluyen a propósito para no perder "
+                "filas (divergencia declarada de R-T1). La verificación de estatus contra el SAT es asíncrona por "
+                "diseño, así que este es el estado normal de un ejercicio recién descargado: conviene correrla y "
+                "volver a generar el informe antes de usarlo para conciliar. Se colapsaron en una sola bandera "
+                f"(el umbral son {UMBRAL_COLAPSO_NO_VERIFICADO} comprobantes afectados) para no enterrar las "
+                f"banderas de severidad alta de esta hoja. Muestra de {len(muestra)} de los {len(uuids)} UUID "
+                f"afectados: {', '.join(muestra)}."
+            ),
+        )
+    ]
+
+
+def banderas_de_estatus(comprobantes: Sequence[tuple[Comprobante, ComprobanteDetalle | None]]) -> list[Bandera]:
     """`DATOS_DE_CORRIDA_ANTERIOR`, `COMPROBANTE_CANCELADO` y `ESTATUS_NO_VERIFICADO`: no
     dependen de cómo cada informe agrupe sus columnas dinámicas, solo del estatus del
     comprobante ante el SAT y de si la última corrida del ETL falló sobre él.
+
+    **Recibe el universo completo, no un comprobante.** Hasta el cierre de la fase 2 la firma
+    era `(comprobante, detalle)` y los cinco informes la llamaban dentro de su propio bucle.
+    El colapso por umbral de `ESTATUS_NO_VERIFICADO` (ver `_banderas_de_no_verificado`) es una
+    decisión sobre el **conjunto** —cuántos comprobantes están sin verificar—, y una función
+    que solo ve uno no puede tomarla. Se cambió la firma en vez de añadir un post-proceso que
+    cada informe tuviera que recordar llamar: al no existir ya un punto de entrada por
+    comprobante, ningún informe puede emitir esta clave con un grano distinto al de los otros
+    cuatro. El colapso aplica a los cinco por construcción.
 
     **Contrato de `repositories.normalizacion.registrar_error`:** ante un fallo del ETL los
     hijos de la última corrida buena se conservan a propósito (es el mejor estado conocido)
@@ -257,51 +362,48 @@ def banderas_de_estatus(comprobante: Comprobante, detalle: ComprobanteDetalle | 
     `COMPROBANTE_CANCELADO` (alta, que solo puede aparecer con `incluir_cancelados=True`).
     """
     banderas: list[Bandera] = []
-    ambito = f"uuid:{comprobante.uuid}"
+    # Los `no_verificado` se acumulan y se emiten al final, ya con el conteo del conjunto
+    # completo: es el único momento en que se sabe si toca colapsar.
+    uuids_no_verificados: list[str] = []
 
-    if detalle is not None and detalle.error_normalizacion:
-        banderas.append(
-            Bandera(
-                clave="DATOS_DE_CORRIDA_ANTERIOR",
-                severidad="alta",
-                ambito=ambito,
-                mensaje=(
-                    "La última normalización de este CFDI falló; la fila se construyó con los datos de la corrida "
-                    f"anterior del ETL y pueden estar desactualizados: {detalle.error_normalizacion}"
-                ),
-            )
-        )
+    for comprobante, detalle in comprobantes:
+        ambito = f"uuid:{comprobante.uuid}"
 
-    if comprobante.estatus == EstatusCfdi.CANCELADO:
-        banderas.append(
-            Bandera(
-                clave="COMPROBANTE_CANCELADO",
-                severidad="alta",
-                ambito=ambito,
-                # Antes de la extracción (en B-02) este mensaje decía "sus importes suman en
-                # el `importe_total` del Diccionario" — correcto ahí, pero esta función la
-                # llaman ahora varios informes y no todos tienen una hoja Diccionario con esa
-                # columna (B-01, por ejemplo, sí; otro informe futuro sobre este mismo
-                # universo podría no tenerla). Se generalizó a propósito (ronda de
-                # corrección 1 de la tarea 3): no es una transcripción literal de B-02.
-                mensaje=(
-                    "El CFDI está cancelado ante el SAT y se incluyó porque `incluir_cancelados=True`; "
-                    "sus importes suman en el informe."
-                ),
+        if detalle is not None and detalle.error_normalizacion:
+            banderas.append(
+                Bandera(
+                    clave="DATOS_DE_CORRIDA_ANTERIOR",
+                    severidad="alta",
+                    ambito=ambito,
+                    mensaje=(
+                        "La última normalización de este CFDI falló; la fila se construyó con los datos de la corrida "
+                        f"anterior del ETL y pueden estar desactualizados: {detalle.error_normalizacion}"
+                    ),
+                )
             )
-        )
-    elif comprobante.estatus == EstatusCfdi.NO_VERIFICADO:
-        banderas.append(
-            Bandera(
-                clave="ESTATUS_NO_VERIFICADO",
-                severidad="media",
-                ambito=ambito,
-                mensaje=(
-                    "Su estatus todavía no se le ha consultado al SAT, así que podría estar cancelado. "
-                    "Se incluye a propósito para no perder filas (divergencia declarada de R-T1)."
-                ),
+
+        if comprobante.estatus == EstatusCfdi.CANCELADO:
+            banderas.append(
+                Bandera(
+                    clave="COMPROBANTE_CANCELADO",
+                    severidad="alta",
+                    ambito=ambito,
+                    # Antes de la extracción (en B-02) este mensaje decía "sus importes suman en
+                    # el `importe_total` del Diccionario" — correcto ahí, pero esta función la
+                    # llaman ahora varios informes y no todos tienen una hoja Diccionario con esa
+                    # columna (B-01, por ejemplo, sí; otro informe futuro sobre este mismo
+                    # universo podría no tenerla). Se generalizó a propósito (ronda de
+                    # corrección 1 de la tarea 3): no es una transcripción literal de B-02.
+                    mensaje=(
+                        "El CFDI está cancelado ante el SAT y se incluyó porque `incluir_cancelados=True`; "
+                        "sus importes suman en el informe."
+                    ),
+                )
             )
-        )
+        elif comprobante.estatus == EstatusCfdi.NO_VERIFICADO:
+            uuids_no_verificados.append(str(comprobante.uuid))
+
+    banderas.extend(_banderas_de_no_verificado(uuids_no_verificados))
     return banderas
 
 

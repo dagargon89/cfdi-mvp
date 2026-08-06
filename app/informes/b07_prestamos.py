@@ -287,9 +287,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # un hueco de continuidad podía quedar **tapado** por un CFDI que el SAT ya no reconoce:
     # `DESCUENTO_INTERRUMPIDO` no se disparaba y el préstamo se veía al día. Va en su propio recorrido
     # y antes del retorno por "sin descuentos": el estatus del comprobante no depende de que haya
-    # deducciones que reportar.
-    for comprobante, _nomina, _receptor, _totales, detalle in filas_universo:
-        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
+    # deducciones que reportar. Recibe el universo completo, no un comprobante: el colapso por
+    # umbral de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring).
+    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
 
     if not importes_por_concepto:
         return ResultadoInforme(
