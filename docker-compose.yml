@@ -71,6 +71,12 @@ services:
     dns:
       - 8.8.8.8
       - 1.1.1.1
+    # OJO: a diferencia de `api` (que corre uvicorn con `--reload`), el worker NO recarga código.
+    # Celery registra las tareas al arrancar, así que después de **agregar una tarea nueva** hay que
+    # `docker compose restart worker` o el envío falla con `Received unregistered task of type ...`
+    # y un `KeyError` con el nombre de la tarea. El síntoma en la interfaz es un genérico "no se pudo":
+    # el POST devuelve 202 y es el worker el que no sabe ejecutarla. Editar el cuerpo de una tarea ya
+    # registrada sí requiere reinicio también, pero al menos falla de forma visible.
     command: celery -A app.worker.celery_app worker -l info --concurrency=4 --prefetch-multiplier=1
     volumes:
       - ./app:/srv/app
