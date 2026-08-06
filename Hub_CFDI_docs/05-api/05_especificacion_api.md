@@ -173,6 +173,72 @@ Claves JSON versionadas por ejercicio (`max_meses_ventana`, `hora_sync`, `umbral
 ### GET /v1/bitacora — Consulta *(admin)* (RF-BIT-01)
 Query: `actor?, accion?, entidad?, desde?, hasta?, page`. Solo lectura.
 
+## 8bis. Recurso: Configuración fiscal — añadido post-freeze (2026-08-06, informes CFDI fase 3)
+
+Valores fiscales con **vigencia por fecha** y **procedencia**: UMA, salarios mínimos, tipo de cambio
+(`param_fiscal`), las marcas de exención por tipo de percepción del §3.1 (`catalogo_percepcion_marca`)
+y la política laboral de cada organización (`configuracion_empresa`, `map_departamento`,
+`map_concepto_provision`). Es un recurso distinto del `/v1/configuracion` operativo de arriba (que
+versiona reglas del SAT por ejercicio en JSON) y **no deben fusionarse**: ese no puede expresar la
+vigencia de la UMA, que cambia el 1 de febrero, a mitad de ejercicio, ni lleva procedencia.
+
+**Invariante que gobierna todo el recurso: un valor sin confirmar no calcula.** Sembrar, cargar o
+sincronizar *proponen*; solo una persona confirma. Los informes leen **solo** lo confirmado.
+
+**Capturar y confirmar son dos llamadas.** Un `PUT` guarda con `origen: MANUAL` y **sin** confirmación.
+
+**Los importes viajan como cadena JSON** (`"117.310000"`), en las dos direcciones. Un número JSON se
+rechaza con `422`: se convierte pasando por `float` y pierde precisión antes de que el servidor pueda
+revisarlo (verificado: `12345678901.123456` llega ya redondeado). Misma regla que el YAML de semillas.
+
+### GET /v1/configuracion/fiscal — Parámetros con procedencia y confirmación *(admin)*
+**200:** `{ "parametros": [ {clave, ejercicio, valor, vigencia_desde, vigencia_hasta, origen, fuente, sincronizado_en, confirmado, confirmado_por, confirmado_en} ], "claves_sin_valor": ["UMA_MENSUAL", …] }`.
+`origen` ∈ `SEMILLA|MANUAL|SINCRONIZADO`. `claves_sin_valor` son las claves conocidas de las que no hay
+**ni propuesta**: es el tercer estado (ausente) que la pantalla tiene que poder mostrar.
+
+### PUT /v1/configuracion/fiscal/{clave} — Captura o corrección manual *(admin)*
+Body: `{ "valor": "117.31", "vigencia_desde": "2026-02-01", "vigencia_hasta": null, "fuente": "…", "ejercicio": null }`.
+**200** con el parámetro resultante: `origen: MANUAL` y `confirmado: false` — capturar no confirma.
+**409 `VIGENCIA_SOLAPADA`** si el tramo se pisa con otro de la misma clave (no se cierra el anterior por
+cuenta propia: cerrarlo haría indistinguible el error de teclear mal el año). **422
+`CONFIGURACION_INVALIDA`** si la clave no está en la lista blanca, el valor no es positivo, la fuente va
+vacía o las vigencias son incoherentes. Corregir la **cifra** de un tramo ya confirmado limpia su
+confirmación. Bitácora con el valor anterior y el nuevo.
+
+### POST /v1/configuracion/fiscal/{clave}/confirmar — Activar un valor propuesto *(admin)*
+Body: `{ "vigencia_desde": "2026-02-01", "valor": "117.31" }`. El cliente manda **el valor que está
+confirmando**. **200** con el parámetro confirmado (idempotente: reconfirmar no reescribe quién revisó).
+**409 `VALOR_CAMBIO`** si no coincide con el almacenado — la propuesta cambió entre que la pantalla se
+pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe para evitar. **404** si no
+hay tramo con esa `vigencia_desde`. Bitácora.
+
+### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
+`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, confirmado, confirmado_por, confirmado_en}`.
+`PUT /{tipo}` body: los cinco campos de marca. `base_exencion: NINGUNA` exige `factor_exencion: null` y
+cualquier otra base lo exige presente y positivo (**422** si no). `tipo` son 3 posiciones, texto ('001'
+nunca 1). Igual que los importes: **capturar no confirma**, y cambiar una marca limpia la confirmación.
+
+### POST /v1/configuracion/percepciones/{tipo}/confirmar — Activar las marcas de un tipo *(admin)*
+Body: el juego completo de marcas que se está confirmando. **409 `MARCAS_CAMBIARON`** si difiere de lo
+almacenado. Sin este método la puerta de confirmación de esta tabla sería una puerta tapiada: la captura
+nunca confirma, así que ninguna marca podría llegar a calcular. Bitácora.
+
+### GET·PUT /v1/empresas/{empresa_id}/configuracion — Política laboral *(operador+)*
+Body/respuesta: `{ "zona_salarial": "GENERAL"|"ZLFN"|null, "dias_aguinaldo": int|null, "factor_prima_vacacional": "0.2500"|null }`.
+Los tres campos **viajan siempre, incluso nulos**: "no configurado" es un estado que degrada B-10 (sin
+zona salarial no se evalúa el salario mínimo) y un campo omitido no lo comunica. El `PUT` reemplaza los
+tres. `empresa_id` sale del path y lo valida `require_empresa`; el cuerpo no lo lleva. Bitácora.
+
+### GET·PUT /v1/empresas/{empresa_id}/configuracion/mapeos — Centros de costo y provisiones *(operador+)*
+Body/respuesta: `{ "departamentos": [{departamento_texto, centro_costo}], "conceptos_provision": [{naturaleza, tipo, clave, categoria}] }`
+(`categoria` ∈ `AGUINALDO|VACACIONES|PRIMA_VACACIONAL`). El `PUT` **reemplaza las dos listas completas**:
+lo que no venga deja de existir. **422 `MAPEO_DUPLICADO`** si un cuerpo trae dos renglones con la misma
+clave natural. Bitácora con las dos listas enteras, antes y después.
+
+> **No existe un endpoint de "recargar semillas desde YAML"**, a propósito: `cargar_desde_yaml` hace
+> `commit`/`rollback` sobre la sesión de quien la llama, y ese `rollback` descartaría la fila de bitácora
+> que la regla 8 exige escribir en la misma transacción. El cargador es del script de línea de comandos.
+
 ---
 
 ## 9. Interfaz `ApiClient` (congelada — freeze de Fase 1, 2026-07-27)

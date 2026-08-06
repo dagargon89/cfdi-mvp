@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import automatizaciones, auth_bootstrap, bitacora, comprobantes, config_smtp, descargas, efirma, empresas, eventos, informes, notificaciones, sesion, tareas, usuarios
+from app.api.v1 import automatizaciones, auth_bootstrap, bitacora, comprobantes, config_smtp, configuracion, descargas, efirma, empresas, eventos, informes, notificaciones, sesion, tareas, usuarios
 
 router = APIRouter(prefix="/v1")
 router.include_router(auth_bootstrap.router)
@@ -20,3 +20,5 @@ router.include_router(eventos.router)
 router.include_router(notificaciones.router)
 router.include_router(config_smtp.router)
 router.include_router(automatizaciones.router)
+router.include_router(configuracion.router)
+router.include_router(configuracion.router_empresa)

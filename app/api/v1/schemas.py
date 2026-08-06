@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, BeforeValidator, EmailStr, Field, model_validator
 
-from app.models.enums import RolEmpresa, RolGlobal, SolicitudTipo, TipoEvento, TipoJob
+from app.models.enums import (
+    BaseExencion,
+    CategoriaProvision,
+    RolEmpresa,
+    RolGlobal,
+    SolicitudTipo,
+    TipoEvento,
+    TipoJob,
+    ZonaSalarial,
+)
 
 
 class EfirmaResumenOut(BaseModel):
@@ -299,3 +309,180 @@ class BitacoraPageOut(BaseModel):
     page: int
     per_page: int
     total: int
+
+
+# --------------------------------------------------------------------------------------
+# Configuración fiscal (§12 del diseño, §2.12 y §3.1 del documento fuente)
+# --------------------------------------------------------------------------------------
+
+
+def _sin_float(bruto: Any) -> Any:
+    """Rechaza un importe que llegó como **número** JSON, porque ya perdió precisión.
+
+    Pydantic construye el `Decimal` de un número JSON pasando por `float`: verificado, un
+    cuerpo con `{"valor": 12345678901.123456}` llega al validador como el `float`
+    `12345678901.123455` y el `Decimal` resultante **ya trae el error**; no hay nada que
+    corregir después. Un número entrecomillado (`"12345678901.123456"`) llega como texto y
+    se convierte exacto. Es la misma regla —y por la misma razón— que el cargador de
+    semillas aplica al YAML (`_decimal` en `app/services/configuracion_fiscal.py`).
+
+    Los enteros JSON sí se aceptan: no pasan por `float` y son exactos.
+    """
+    if isinstance(bruto, float):
+        raise ValueError(
+            "manda el importe entre comillas (\"117.31\"), no como número JSON: un número se convierte "
+            "pasando por float y pierde precisión antes de que el servidor pueda revisarlo."
+        )
+    return bruto
+
+
+# Importe fiscal de entrada. La salida es un `Decimal` normal: Pydantic lo serializa a JSON
+# como **cadena** conservando la escala exacta que trae la columna `Numeric` ("117.310000"),
+# así que el valor sobrevive el viaje de ida y vuelta sin tocar un `float` en ningún punto.
+ImporteExacto = Annotated[Decimal, BeforeValidator(_sin_float)]
+
+
+class ParamFiscalOut(BaseModel):
+    """Un tramo de `param_fiscal` con su procedencia y su estado de confirmación.
+
+    `confirmado` es redundante con `confirmado_en` a propósito: es el dato que decide si el
+    valor calcula, y la pantalla no debería tener que deducirlo de la nulidad de una fecha.
+    """
+
+    clave: str
+    ejercicio: int
+    valor: Decimal
+    vigencia_desde: date
+    vigencia_hasta: date | None
+    origen: str
+    fuente: str
+    sincronizado_en: str | None
+    confirmado: bool
+    confirmado_por: str | None
+    confirmado_en: str | None
+
+
+class ConfiguracionFiscalOut(BaseModel):
+    """`claves_sin_valor` hace visible el tercer estado del cuadro de degradación: una clave
+    conocida de la que no hay **ni siquiera** una propuesta. Sin ella la pantalla solo podría
+    distinguir "confirmado" de "propuesto", y la ausencia —el caso que hay que ir a
+    capturar— sería un renglón que simplemente no aparece."""
+
+    parametros: list[ParamFiscalOut]
+    claves_sin_valor: list[str]
+
+
+class ParamFiscalGuardarIn(BaseModel):
+    """Captura o corrección manual de un tramo. **No confirma**: confirmar es otra llamada."""
+
+    valor: ImporteExacto
+    vigencia_desde: date
+    vigencia_hasta: date | None = None
+    fuente: str = Field(min_length=1, max_length=500)
+    # Nulo = el año de `vigencia_desde`, que es lo correcto salvo para un tramo que arranca
+    # a mitad de un ejercicio distinto del suyo.
+    ejercicio: int | None = None
+
+
+class ParamFiscalConfirmarIn(BaseModel):
+    """El cliente manda **el valor que está confirmando**. Si no coincide con el almacenado
+    el servidor responde 409: entre que la pantalla se pintó y que se hizo clic, la propuesta
+    pudo cambiar (una recarga de semillas, otro administrador), y confirmar a ciegas es
+    exactamente lo que el invariante de confirmación existe para evitar."""
+
+    vigencia_desde: date
+    valor: ImporteExacto
+
+
+class MarcaPercepcionIn(BaseModel):
+    """Las marcas del §3.1 de un tipo de percepción. Mismas reglas que el cargador de
+    semillas (`_leer_marca`): sin base de exención no hay factor, y con base sí lo hay."""
+
+    es_ingreso_ordinario: bool
+    base_exencion: BaseExencion
+    factor_exencion: ImporteExacto | None = None
+    integra_sbc: bool
+    es_provisionable: bool
+
+    @model_validator(mode="after")
+    def _coherencia_de_exencion(self) -> MarcaPercepcionIn:
+        if self.base_exencion is BaseExencion.NINGUNA and self.factor_exencion is not None:
+            raise ValueError("con `base_exencion: NINGUNA` no puede haber `factor_exencion`.")
+        if self.base_exencion is not BaseExencion.NINGUNA and self.factor_exencion is None:
+            raise ValueError(f"`base_exencion: {self.base_exencion.value}` exige un `factor_exencion`.")
+        if self.factor_exencion is not None and self.factor_exencion <= 0:
+            raise ValueError(f"`factor_exencion` debe ser positivo (llegó {self.factor_exencion}).")
+        return self
+
+
+class MarcaPercepcionOut(BaseModel):
+    tipo_percepcion: str
+    es_ingreso_ordinario: bool
+    base_exencion: str
+    factor_exencion: Decimal | None
+    integra_sbc: bool
+    es_provisionable: bool
+    confirmado: bool
+    confirmado_por: str | None
+    confirmado_en: str | None
+
+
+class ConfiguracionEmpresaIn(BaseModel):
+    """Política laboral de una organización. Los tres campos admiten nulo **a propósito**:
+    ver el docstring de `app/models/configuracion_fiscal.py`. Un PUT reemplaza los tres, así
+    que mandar `null` es la forma de borrar un valor mal capturado."""
+
+    zona_salarial: ZonaSalarial | None = None
+    # Mínimo legal 15 días (art. 87 LFT); el tope solo evita un dedazo absurdo, no es política.
+    dias_aguinaldo: int | None = Field(default=None, ge=1, le=365)
+    # `Numeric(5,4)` en la columna: 9.9999 es el máximo representable. El mínimo legal es
+    # 0.25 (art. 80 LFT) y cada patrón puede dar más, así que aquí solo se exige positivo.
+    factor_prima_vacacional: ImporteExacto | None = Field(default=None, gt=0, le=Decimal("9.9999"))
+
+
+class ConfiguracionEmpresaOut(BaseModel):
+    """Los tres campos viajan siempre, incluso nulos: "no configurado" es un estado que la
+    pantalla tiene que poder mostrar (y que degrada B-10), no una ausencia que se omite."""
+
+    empresa_id: int
+    zona_salarial: str | None
+    dias_aguinaldo: int | None
+    factor_prima_vacacional: Decimal | None
+
+
+class MapDepartamentoIn(BaseModel):
+    departamento_texto: str = Field(min_length=1, max_length=100)
+    centro_costo: str = Field(min_length=1, max_length=100)
+
+
+class MapConceptoProvisionIn(BaseModel):
+    # Claves de catálogo del SAT como texto: '001' nunca 1, los ceros a la izquierda cuentan.
+    naturaleza: str = Field(min_length=1, max_length=1)
+    tipo: str = Field(min_length=3, max_length=3)
+    clave: str = Field(min_length=1, max_length=15)
+    categoria: CategoriaProvision
+
+
+class MapeosEmpresaIn(BaseModel):
+    """Reemplazo completo de los dos mapeos de una empresa: lo que no venga en las listas
+    deja de existir. Es un PUT, no un PATCH, para que borrar un renglón sea expresable."""
+
+    departamentos: list[MapDepartamentoIn]
+    conceptos_provision: list[MapConceptoProvisionIn]
+
+
+class MapDepartamentoOut(BaseModel):
+    departamento_texto: str
+    centro_costo: str
+
+
+class MapConceptoProvisionOut(BaseModel):
+    naturaleza: str
+    tipo: str
+    clave: str
+    categoria: str
+
+
+class MapeosEmpresaOut(BaseModel):
+    departamentos: list[MapDepartamentoOut]
+    conceptos_provision: list[MapConceptoProvisionOut]
