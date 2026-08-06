@@ -156,6 +156,88 @@ async def test_isr_retenido_descuadrado_dispara_bandera(db: AsyncSession) -> Non
     assert descuadres_isr[0].severidad == "alta"
 
 
+async def test_nombre_empleado_es_del_trabajador_no_del_patron(db: AsyncSession) -> None:
+    """**Hallazgo Important de la revisión final.** La columna "Nombre empleado" traía
+    `comprobante.razon_social_emisor` —el nombre de la EMPRESA— repetido en todas las filas de un
+    papel de trabajo fiscal. La justificación que arrastraba ("no hay campo de razón social del
+    receptor en el modelo") es falsa desde la fase 2: `ComprobanteDetalle.nombre_receptor` existe y
+    B-05/B-07/B-10 ya lo usaban.
+
+    Ninguna prueba lo detectaba porque **ninguna prueba miraba esa columna**, y la causa de fondo
+    era que `tests/helpers_nomina.py` nunca insertaba una fila de `ComprobanteDetalle`: con
+    `detalle is None`, el campo correcto y el equivocado habrían dado los dos `None`."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="99999999-1111-1111-1111-999999999999",
+                          nombre_receptor="JUANA INVENTADA DE PRUEBA")
+
+    resultado = await b01.consultar(db, empresa.empresa_id, _p())
+    titulos = _titulos(resultado)
+    fila = resultado.filas[0]
+    assert fila[titulos.index("Nombre empleado")] == "JUANA INVENTADA DE PRUEBA"
+    # Y no es el nombre del patrón, que sigue estando disponible en la columna del RFC del patrón.
+    assert fila[titulos.index("Nombre empleado")] != "EMISOR DE PRUEBA SA DE CV"
+
+
+async def test_tipo_fuera_de_catalogo_no_desaparece_sin_bandera(db: AsyncSession) -> None:
+    """**Hallazgo Important de la revisión final.** Las columnas dinámicas se generan iterando el
+    catálogo y filtrando por lo observado, nunca iterando lo observado: un tipo que el catálogo de
+    `satcfdi` no trae (el SAT publica uno nuevo, un PAC timbra con uno que la librería no conoce)
+    **no tiene columna** y su importe desaparece de la hoja. `TOTALES_DESCUADRADOS` no lo atrapa,
+    porque la suma de la fila recorre todos los nodos —incluido el invisible— y cuadra contra el
+    encabezado. Basta 1 CFDI, y las columnas de la fila dejan de sumar su propio total en el
+    informe cuyo propósito es alimentar pólizas contables."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="aaaaaaa1-1111-1111-1111-aaaaaaaaaaaa",
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("054", "054", "Tipo que el catalogo no trae", "1000.00", "0.00")],
+                          total_percepciones="9000.00")
+
+    resultado = await b01.consultar(db, empresa.empresa_id, _p())
+    titulos = _titulos(resultado)
+    # Premisa de la prueba: el tipo de verdad no tiene columna. Si algún día el catálogo lo trae,
+    # esta aserción falla y avisa de que hay que cambiar el tipo del fixture, no de que el código
+    # esté mal.
+    assert not any(t.startswith("P 054") for t in titulos), "el fixture necesita un tipo AUSENTE del catálogo"
+
+    banderas = [b for b in resultado.banderas if b.clave == "TIPO_FUERA_DE_CATALOGO"]
+    assert len(banderas) == 1, [b.clave for b in resultado.banderas]
+    assert banderas[0].severidad == "alta"
+    assert banderas[0].ambito == "uuid:aaaaaaa1-1111-1111-1111-aaaaaaaaaaaa"
+    assert "054" in banderas[0].mensaje and "1000.00" in banderas[0].mensaje
+
+
+async def test_tipos_del_catalogo_no_disparan_la_bandera(db: AsyncSession) -> None:
+    """La otra mitad: una bandera que se disparara siempre pasaría la prueba de arriba igual. Y
+    `solo_tipos_con_movimiento` no cambia nada aquí: el punto ciego no era el filtro, era la fuente
+    de la iteración."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="aaaaaaa2-2222-2222-2222-aaaaaaaaaaaa",
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                          deducciones=[("002", "045", "ISR", "500.00")],
+                          total_percepciones="8000.00", total_deducciones="500.00")
+
+    for parametros in (_p(), _p(solo_tipos_con_movimiento=True)):
+        resultado = await b01.consultar(db, empresa.empresa_id, parametros)
+        assert [b for b in resultado.banderas if b.clave == "TIPO_FUERA_DE_CATALOGO"] == []
+
+
+async def test_gravado_descuadrado_emite_bandera(db: AsyncSession) -> None:
+    """Identidades #4 y #5 de B-00 (gravado y exento del encabezado contra la suma de sus nodos)
+    cotejadas **al generar el informe**. Antes solo corrían en `tests/test_identidades_b00.py` y en
+    el script de verificación, así que B-01 (encabezado) y B-05 (nodos) podían dar cifras distintas
+    del mismo concepto para el mismo periodo sin que ninguno emitiera bandera."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="aaaaaaa3-3333-3333-3333-aaaaaaaaaaaa",
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "500.00")],
+                          total_percepciones="8500.00",
+                          total_gravado="7000.00", total_exento="0.00")
+
+    resultado = await b01.consultar(db, empresa.empresa_id, _p())
+    mensajes = [b.mensaje for b in resultado.banderas if b.clave == "TOTALES_DESCUADRADOS"]
+    assert any("total_gravado" in m for m in mensajes), resultado.banderas
+    assert any("total_exento" in m for m in mensajes), resultado.banderas
+
+
 async def test_isr_retenido_cuadrado_no_dispara_bandera(db: AsyncSession) -> None:
     """La mitad de la prueba anterior que importa igual: sin ella, una bandera que se
     disparara siempre (p. ej. por una comparación invertida) pasaría la prueba de arriba

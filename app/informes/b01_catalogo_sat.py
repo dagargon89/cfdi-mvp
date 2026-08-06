@@ -24,12 +24,32 @@ periodos, y por eso emite `CONJUNTO_REDUCIDO` —una bandera informativa, no un 
 que quien reciba el Excel no lo compare contra otro mes creyendo que las columnas
 coinciden.
 
+**El punto ciego de B-01.R1: un tipo fuera del catálogo (`TIPO_FUERA_DE_CATALOGO`).** Las
+columnas dinámicas se generan iterando **el catálogo** y filtrando por lo observado, nunca
+iterando lo observado — es lo que hace comparable al informe, y también su riesgo. Un
+`tipo_percepcion` que el catálogo de la versión pinada de `satcfdi` no trae (el SAT publica uno
+nuevo, un PAC timbra con uno que la librería no conoce todavía) **no tiene columna**, ni siquiera
+con `solo_tipos_con_movimiento=True`, porque el filtro no cambia la fuente de la iteración: su
+importe desaparece de la hoja. `TOTALES_DESCUADRADOS` tampoco lo atrapa, porque las sumas de la
+fila recorren todos los nodos observados —incluido el invisible— y cuadran contra el encabezado.
+El único síntoma sería que las más de 150 columnas no suman el "Total percepciones" de su propia
+fila, en el informe cuyo propósito es alimentar pólizas contables, donde las columnas **son** la
+póliza. Basta 1 CFDI para que pase, así que se emite una bandera de severidad alta con el UUID,
+los tipos afectados y su importe (revisión final de la fase 2).
+
 **Universo y banderas de estatus compartidos con B-02** (`app.informes.universo_nomina`):
 mismo `join`, mismo margen de timbrado para no perder recibos rotos de la hoja `Datos`,
 mismas banderas `SIN_NORMALIZAR` / `COMPLEMENTO_AUSENTE` / `DATOS_DE_CORRIDA_ANTERIOR` /
 `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO`. Ver ese módulo para el razonamiento
 completo — no se repite aquí a propósito: si dos informes del mismo periodo lo calculan
 cada uno por su cuenta, en cuanto diverjan un carácter darán totales distintos entre sí.
+
+**Gravado y exento (B-00 #4 y #5) se cotejan al generar el informe**, no solo en las pruebas
+(`universo_nomina.banderas_de_gravado_y_exento_descuadrados`, revisión final de la fase 2). Las
+columnas "Total gravado"/"Total exento" de este informe son las que **declara el encabezado**
+(`nomina_totales`), mientras que B-05 las recalcula de los nodos para la constancia de
+percepciones: las dos lecturas son correctas para su propósito, pero con un CFDI descuadrado daban
+cifras distintas del mismo concepto para el mismo periodo sin que ningún informe avisara.
 
 **La identidad del ISR (B-00 #9) sí se comprueba aquí y no en B-02.** B-02 agrupa por
 concepto del patrón y no tiene una noción estable de "el tipo 002 de deducción"; B-01 sí,
@@ -236,12 +256,19 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     ids = [fila[0].comprobante_id for fila in filas_universo]
     importes = await _importes_por_comprobante_y_tipo(db, ids)
     subsidio_causado_por_cid = await _subsidio_causado_por_comprobante(db, ids)
+    # Identidades #4 y #5 de B-00 (gravado y exento del encabezado contra la suma de sus nodos).
+    # Este informe reporta "Total gravado"/"Total exento" tal como los declara `nomina_totales`,
+    # mientras que B-05 los recalcula de los nodos para la constancia de percepciones: con un CFDI
+    # descuadrado los dos daban cifras distintas del mismo concepto para el mismo periodo y ninguno
+    # emitía bandera, porque estas dos identidades solo corrían en las pruebas y en el script de
+    # verificación. Ver `universo_nomina.banderas_de_gravado_y_exento_descuadrados`.
+    banderas_gravado_exento = await universo_nomina.banderas_de_gravado_y_exento_descuadrados(db, ids)
 
     # B-01.R2: el conjunto de tipos con al menos un nodo en el periodo, cuando
     # `solo_tipos_con_movimiento` reduce el catálogo completo a lo observado.
     observados: set[tuple[str, str]] = {clave for por_tipo in importes.values() for clave in por_tipo}
 
-    banderas: list[Bandera] = list(banderas_fuera)
+    banderas: list[Bandera] = list(banderas_fuera) + banderas_gravado_exento
     if p.solo_tipos_con_movimiento:
         banderas.append(
             Bandera(
@@ -264,6 +291,19 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         for tipo, descripcion_sat in catalogos.tipos_de(naturaleza)
         if not p.solo_tipos_con_movimiento or (naturaleza, tipo) in observados
     ]
+    # B-01.R1 tiene un punto ciego que hay que cerrar aquí: las columnas se generan iterando **el
+    # catálogo** y filtrando por lo observado, nunca iterando lo observado. Un tipo que el catálogo
+    # de la versión pinada de `satcfdi` no trae —el SAT publica uno nuevo, o un PAC timbra con uno
+    # que la librería todavía no conoce— no tiene columna, ni siquiera con
+    # `solo_tipos_con_movimiento=True` (el filtro no cambia la fuente de la iteración), así que su
+    # importe **desaparece de la hoja**. Y `TOTALES_DESCUADRADOS` no lo atrapa, porque
+    # `suma_percepciones` suma todos los nodos observados, incluido el invisible, y cuadra contra el
+    # encabezado: el único síntoma sería que las 161 columnas no suman el "Total percepciones" de su
+    # propia fila, en el informe cuyo propósito es alimentar pólizas contables. Basta 1 CFDI para que
+    # ocurra, así que se reporta con bandera de severidad alta.
+    claves_del_catalogo: set[tuple[str, str]] = {
+        (naturaleza, tipo) for naturaleza in _ORDEN_NATURALEZA for tipo, _descripcion in catalogos.tipos_de(naturaleza)
+    }
 
     columnas = [Columna(titulo=titulo, tipo=tipo, sensible=sensible) for titulo, tipo, sensible in _COLUMNAS_FIJAS]  # type: ignore[arg-type]
     columnas += [Columna(titulo=_titulo(naturaleza, tipo, descripcion_sat), tipo="monto") for naturaleza, tipo, descripcion_sat in columnas_dinamicas]
@@ -303,6 +343,22 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
         ambito = f"uuid:{comprobante.uuid}"
         banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
+
+        fuera_de_catalogo = sorted((naturaleza, tipo) for naturaleza, tipo in por_tipo if (naturaleza, tipo) not in claves_del_catalogo)
+        if fuera_de_catalogo:
+            detalle_tipos = ", ".join(f"{naturaleza} {tipo} ({por_tipo[(naturaleza, tipo)]})" for naturaleza, tipo in fuera_de_catalogo)
+            banderas.append(
+                Bandera(
+                    clave="TIPO_FUERA_DE_CATALOGO",
+                    severidad="alta",
+                    ambito=ambito,
+                    mensaje=(
+                        f"El CFDI trae {len(fuera_de_catalogo)} tipo(s) que no están en el catálogo del SAT de la "
+                        f"versión instalada de `satcfdi`, así que NO tienen columna en este informe y su importe no "
+                        f"aparece en la hoja Datos: {detalle_tipos}. Las columnas de la fila no suman su propio total."
+                    ),
+                )
+            )
         identidades = (
             ("total_percepciones", nomina.total_percepciones, suma_percepciones),
             ("total_deducciones", nomina.total_deducciones, suma_deducciones),
@@ -338,7 +394,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             comprobante.rfc_emisor,
             nomina.registro_patronal,
             comprobante.rfc_receptor,
-            comprobante.razon_social_emisor,
+            # "Nombre empleado" es `comprobante_detalle.nombre_receptor`, el nombre del
+            # **trabajador**. Hasta la revisión final aquí iba `comprobante.razon_social_emisor` —el
+            # nombre de la EMPRESA— con la justificación de que "no hay campo de razón social del
+            # receptor en el modelo": es falsa desde esta fase (`ComprobanteDetalle.nombre_receptor`
+            # existe y B-05/B-07/B-10 ya lo usan), y el resultado era un papel de trabajo fiscal con
+            # el nombre del patrón repetido en todas las filas de la columna "Nombre empleado".
+            detalle.nombre_receptor if detalle else None,
             curp,
             nss,
             receptor.num_empleado if receptor else None,

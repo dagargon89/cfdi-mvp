@@ -377,6 +377,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     ids = [fila[0].comprobante_id for fila in filas_universo]
     importes, descripciones = await _conceptos_por_comprobante(db, ids)
     suma_por_comprobante, conteo_por_concepto, total_por_concepto = _agregados_de_una_pasada(importes)
+    # Identidades #4 y #5 de B-00 (gravado y exento del encabezado contra la suma de sus nodos).
+    # Este informe reporta "Total gravado"/"Total exento" tal como los declara `nomina_totales`,
+    # mientras que B-05 los recalcula de los nodos para la constancia de percepciones: con un CFDI
+    # descuadrado los dos daban cifras distintas del mismo concepto para el mismo periodo y ninguno
+    # emitía bandera, porque estas dos identidades solo corrían en las pruebas y en el script de
+    # verificación. Ver `universo_nomina.banderas_de_gravado_y_exento_descuadrados`.
+    banderas_gravado_exento = await universo_nomina.banderas_de_gravado_y_exento_descuadrados(db, ids)
 
     # Fase 2 y 3: conjunto de columnas dinámicas, con orden determinista (B-02.R5).
     conceptos = sorted(
@@ -384,7 +391,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         key=lambda c: (_ORDEN_NATURALEZA.get(c[0], 9), c[1], c[2]),
     )
 
-    banderas: list[Bandera] = list(banderas_fuera)
+    banderas: list[Bandera] = list(banderas_fuera) + banderas_gravado_exento
     diccionario: list[EntradaDiccionario] = []
     etiquetas: dict[tuple[str, str, str], str] = {}
     for concepto in conceptos:
@@ -465,7 +472,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             comprobante.rfc_emisor,
             nomina.registro_patronal,
             comprobante.rfc_receptor,
-            comprobante.razon_social_emisor,
+            # "Nombre empleado" es `comprobante_detalle.nombre_receptor`, el nombre del
+            # **trabajador**. Hasta la revisión final aquí iba `comprobante.razon_social_emisor` —el
+            # nombre de la EMPRESA— con la justificación de que "no hay campo de razón social del
+            # receptor en el modelo": es falsa desde la fase 2 (`ComprobanteDetalle.nombre_receptor`
+            # existe y B-05/B-07/B-10 ya lo usan), y el resultado era un papel de trabajo fiscal con
+            # el nombre del patrón repetido en todas las filas de la columna "Nombre empleado".
+            detalle.nombre_receptor if detalle else None,
             curp,
             nss,
             receptor.num_empleado if receptor else None,
