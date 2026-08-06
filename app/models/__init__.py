@@ -8,6 +8,14 @@ from app.models.bitacora import Bitacora
 from app.models.cfdi_detalle import CfdiConcepto, CfdiConceptoImpuesto, CfdiRelacionado, ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.configuracion import Configuracion
+from app.models.configuracion_fiscal import (
+    CatalogoPercepcionMarca,
+    ConfiguracionEmpresa,
+    MapConceptoProvision,
+    MapDepartamento,
+    ParamFiscal,
+    TablaVacaciones,
+)
 from app.models.configuracion_smtp import ConfiguracionSmtp
 from app.models.efirma import Efirma
 from app.models.empresa import Empresa
@@ -43,6 +51,12 @@ __all__ = [
     "Bitacora",
     "Configuracion",
     "ConfiguracionSmtp",
+    "ParamFiscal",
+    "CatalogoPercepcionMarca",
+    "MapDepartamento",
+    "MapConceptoProvision",
+    "TablaVacaciones",
+    "ConfiguracionEmpresa",
     "ComprobanteDetalle",
     "CfdiConcepto",
     "CfdiConceptoImpuesto",

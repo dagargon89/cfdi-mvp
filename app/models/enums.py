@@ -74,3 +74,36 @@ class TipoEvento(str, Enum):
 class ResultadoNotificacion(str, Enum):
     ENVIADO = "enviado"
     FALLIDO = "fallido"
+
+
+class OrigenValor(str, Enum):
+    """Procedencia de un valor de `param_fiscal`: quién lo puso ahí."""
+
+    SEMILLA = "SEMILLA"
+    MANUAL = "MANUAL"
+    SINCRONIZADO = "SINCRONIZADO"
+
+
+class BaseExencion(str, Enum):
+    """Sobre qué se calcula el tramo exento de una percepción (§3.1 del documento fuente)."""
+
+    UMA_DIAS = "UMA_DIAS"
+    SM_DIAS = "SM_DIAS"
+    PORCENTAJE = "PORCENTAJE"
+    NINGUNA = "NINGUNA"
+
+
+class CategoriaProvision(str, Enum):
+    """A qué provisión contable corresponde un concepto de nómina de la organización."""
+
+    AGUINALDO = "AGUINALDO"
+    VACACIONES = "VACACIONES"
+    PRIMA_VACACIONAL = "PRIMA_VACACIONAL"
+
+
+class ZonaSalarial(str, Enum):
+    """Régimen de salario mínimo aplicable (art. 94 LFT). Sin este dato no se puede saber
+    si un salario está por debajo del mínimo — ver `app/models/configuracion_fiscal.py`."""
+
+    GENERAL = "GENERAL"
+    ZLFN = "ZLFN"
