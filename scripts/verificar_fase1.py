@@ -5,6 +5,12 @@ informes-cfdi.md`, sección "B-00 · Definiciones comunes al grupo") sobre los C
 nómina ya normalizados, y que B-02 produce filas y columnas dinámicas consistentes con
 esos mismos datos.
 
+Las identidades **no se implementan aquí**: viven en `app/informes/identidades_b00.py` y
+`tests/test_identidades_b00.py` las corre en cada pasada de la suite sobre XML sintéticos.
+Este script es el otro llamador de esa misma implementación, el que la ejerce contra los
+CFDI reales. Antes las identidades vivían solo en este archivo, fuera de `testpaths`, así
+que nada las mantenía verdes.
+
 Deliberadamente **no hardcodea** cuántas nóminas, filas o columnas dinámicas esperar: eso
 quedaría obsoleto en cuanto se descargue más historia del SAT. Lo que sí es fijo son las
 identidades contables — un XML timbrado por el SAT las cumple por construcción, así que
@@ -21,152 +27,27 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import SessionLocal
 from app.informes import b02_conceptos_patron as b02
-from app.models.cfdi_detalle import ComprobanteDetalle
-from app.models.comprobante import Comprobante
-from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaTotales
+from app.informes import identidades_b00
 
 EMPRESA_ID = 11
-TOLERANCIA = Decimal("0.01")
-CLAVE_TIPO_DEDUCCION_ISR = "002"
-
-
-def _dec(valor: object) -> Decimal:
-    """`func.sum` puede devolver `float`/`None` según el dialecto; siempre se compara
-    como `Decimal` para no arrastrar imprecisión binaria a una tolerancia de centavos."""
-    if valor is None:
-        return Decimal("0")
-    return valor if isinstance(valor, Decimal) else Decimal(str(valor))
-
-
-@dataclass(slots=True)
-class SumasNodos:
-    percepciones: Decimal
-    gravado: Decimal
-    exento: Decimal
-    deducciones: Decimal
-    isr_retenido: Decimal
-    otros_pagos: Decimal
-
-
-async def _sumas_nodos(db: AsyncSession, comprobante_id: int) -> SumasNodos:
-    """Recalcula, desde los nodos hijos, cada agregado que el complemento de Nómina
-    también declara en su encabezado — la base de las identidades de B-00."""
-    percepciones = await db.scalar(
-        select(func.sum(NominaPercepcion.importe_gravado + NominaPercepcion.importe_exento)).where(
-            NominaPercepcion.comprobante_id == comprobante_id
-        )
-    )
-    gravado = await db.scalar(
-        select(func.sum(NominaPercepcion.importe_gravado)).where(NominaPercepcion.comprobante_id == comprobante_id)
-    )
-    exento = await db.scalar(
-        select(func.sum(NominaPercepcion.importe_exento)).where(NominaPercepcion.comprobante_id == comprobante_id)
-    )
-    deducciones = await db.scalar(
-        select(func.sum(NominaDeduccion.importe)).where(NominaDeduccion.comprobante_id == comprobante_id)
-    )
-    isr_retenido = await db.scalar(
-        select(func.sum(NominaDeduccion.importe)).where(
-            NominaDeduccion.comprobante_id == comprobante_id,
-            NominaDeduccion.tipo_deduccion == CLAVE_TIPO_DEDUCCION_ISR,
-        )
-    )
-    otros_pagos = await db.scalar(
-        select(func.sum(NominaOtroPago.importe)).where(NominaOtroPago.comprobante_id == comprobante_id)
-    )
-    return SumasNodos(
-        percepciones=_dec(percepciones),
-        gravado=_dec(gravado),
-        exento=_dec(exento),
-        deducciones=_dec(deducciones),
-        isr_retenido=_dec(isr_retenido),
-        otros_pagos=_dec(otros_pagos),
-    )
-
-
-def _checar(fallas: list[str], uuid_cfdi: str, nombre: str, declarado: Decimal | None, calculado: Decimal) -> None:
-    if declarado is None:
-        # El campo del complemento no vino en el XML (p. ej. `TotalImpuestosRetenidos`
-        # cuando no hubo ISR retenido). No es una falla: no hay nada que comparar.
-        return
-    if abs(declarado - calculado) > TOLERANCIA:
-        fallas.append(f"{uuid_cfdi}: {nombre} declarado {declarado} ≠ calculado {calculado} (diff {abs(declarado - calculado)})")
 
 
 async def _verificar_identidades_b00(db: AsyncSession) -> tuple[int, list[str]]:
-    """Evalúa las 9 identidades del spec B-00 sobre cada CFDI de nómina normalizado.
-    Devuelve `(comprobantes_evaluados, fallas)`."""
-    fallas: list[str] = []
+    """Corre las identidades del módulo compartido y las reporta por consola."""
+    evaluados, fallas = await identidades_b00.verificar(db, EMPRESA_ID)
 
-    filas = (
-        await db.execute(
-            select(Comprobante, Nomina, NominaTotales, ComprobanteDetalle)
-            .join(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
-            .outerjoin(NominaTotales, NominaTotales.comprobante_id == Comprobante.comprobante_id)
-            .outerjoin(ComprobanteDetalle, ComprobanteDetalle.comprobante_id == Comprobante.comprobante_id)
-            .where(Comprobante.empresa_id == EMPRESA_ID)
-            .order_by(Comprobante.comprobante_id)
-        )
-    ).all()
-
-    print(f"CFDI de nómina normalizados: {len(filas)}")
-    if not filas:
+    print(f"CFDI de nómina normalizados: {evaluados}")
+    if not evaluados:
         print("FALLA: no hay nóminas normalizadas; ¿corrió el reproceso (normalizacion_lote.normalizar_lote)?")
         return 0, ["no hay CFDI de nómina normalizados"]
 
-    for comprobante, nomina, totales, detalle in filas:
-        cid = comprobante.comprobante_id
-        uuid_cfdi = comprobante.uuid
-        sumas = await _sumas_nodos(db, cid)
-
-        # 1-3: los tres totales del encabezado de Nómina contra la suma de sus nodos.
-        _checar(fallas, uuid_cfdi, "total_percepciones", nomina.total_percepciones, sumas.percepciones)
-        _checar(fallas, uuid_cfdi, "total_deducciones", nomina.total_deducciones, sumas.deducciones)
-        _checar(fallas, uuid_cfdi, "total_otros_pagos", nomina.total_otros_pagos, sumas.otros_pagos)
-
-        # 4-5: el desglose gravado/exento de `nomina_totales` (fusión de
-        # `nomina_percepciones_tot` del documento fuente) contra la suma por percepción.
-        if totales is not None:
-            _checar(fallas, uuid_cfdi, "total_gravado", totales.total_gravado, sumas.gravado)
-            _checar(fallas, uuid_cfdi, "total_exento", totales.total_exento, sumas.exento)
-            # 9: ISR retenido (`nomina_deducciones_tot` del documento fuente).
-            _checar(fallas, uuid_cfdi, "total_impuestos_retenidos", totales.total_impuestos_retenidos, sumas.isr_retenido)
-        else:
-            fallas.append(f"{uuid_cfdi}: no tiene fila en nomina_totales")
-
-        # 6-8: el encabezado extendido (`comprobante_detalle`) y el total del CFDI
-        # (`comprobantes.total`, tabla que ya existía y no se toca en este reproceso).
-        if detalle is not None:
-            _checar(fallas, uuid_cfdi, "subtotal (= percepciones + otros pagos)", detalle.subtotal, sumas.percepciones + sumas.otros_pagos)
-            _checar(fallas, uuid_cfdi, "descuento (= deducciones)", detalle.descuento, sumas.deducciones)
-            if detalle.subtotal is not None and detalle.descuento is not None and comprobante.total is not None:
-                _checar(
-                    fallas,
-                    uuid_cfdi,
-                    "total del CFDI (= subtotal − descuento)",
-                    Decimal(str(comprobante.total)),
-                    detalle.subtotal - detalle.descuento,
-                )
-        else:
-            fallas.append(f"{uuid_cfdi}: no tiene fila en comprobante_detalle")
-
-        # Identidad compuesta que exige el brief de la tarea 15, además de las 9 de arriba:
-        # el total del CFDI contra percepciones + otros pagos − deducciones calculado
-        # directamente de los nodos (sin pasar por subtotal/descuento del encabezado).
-        if comprobante.total is not None:
-            neto = sumas.percepciones + sumas.otros_pagos - sumas.deducciones
-            _checar(fallas, uuid_cfdi, "total del CFDI (= percepciones + otros − deducciones, de nodos)", Decimal(str(comprobante.total)), neto)
-
-    return len(filas), fallas
+    return evaluados, fallas
 
 
 async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> list[str]:
@@ -222,7 +103,8 @@ async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> li
 async def main() -> int:
     async with SessionLocal() as db:
         comprobantes_normalizados, fallas_b00 = await _verificar_identidades_b00(db)
-        print(f"Identidades de B-00 evaluadas: {comprobantes_normalizados * 9} (9 por CFDI)")
+        evaluadas = comprobantes_normalizados * identidades_b00.IDENTIDADES_POR_COMPROBANTE
+        print(f"Identidades de B-00 evaluadas: {evaluadas} ({identidades_b00.IDENTIDADES_POR_COMPROBANTE} por CFDI)")
 
         fallas_b02 = await _verificar_b02(db, comprobantes_normalizados)
 

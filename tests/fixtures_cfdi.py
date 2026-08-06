@@ -176,6 +176,13 @@ def cfdi_nomina(
     incapacidades_xml: str = "",
     total_gravado: str = "8759.70",
     total_exento: str = "500.00",
+    total_sueldos: str | None = None,
+    total_separacion_indemnizacion: str | None = None,
+    total_jubilacion_pension_retiro: str | None = None,
+    total_otras_deducciones: str | None = "700.00",
+    total_impuestos_retenidos: str | None = "391.10",
+    sin_deducciones: bool = False,
+    sin_otros_pagos: bool = False,
 ) -> bytes:
     """CFDI 4.0 tipo N con complemento de Nómina 1.2. Todos los datos personales son
     inventados: la CURP y el NSS no corresponden a ninguna persona real."""
@@ -194,15 +201,34 @@ def cfdi_nomina(
         '<nomina12:OtroPago TipoOtroPago="002" Clave="035" Concepto="Subs al Empleo mes" Importe="0.00">'
         '<nomina12:SubsidioAlEmpleo SubsidioCausado="0.00" /></nomina12:OtroPago>'
     )
+    # `TotalSeparacionIndemnizacion` y `TotalJubilacionPensionRetiro` son opcionales en
+    # Nómina 1.2 y solo se emiten cuando se piden: son las dos columnas de dinero de B-02
+    # que un recibo ordinario deja vacías, y sin poderlas poblar no había forma de aseverar
+    # sobre su celda del Excel en toda la cadena ETL → escritor → informe.
+    atributos_totales = f' TotalSueldos="{total_sueldos if total_sueldos is not None else total_gravado}"'
+    if total_separacion_indemnizacion is not None:
+        atributos_totales += f' TotalSeparacionIndemnizacion="{total_separacion_indemnizacion}"'
+    if total_jubilacion_pension_retiro is not None:
+        atributos_totales += f' TotalJubilacionPensionRetiro="{total_jubilacion_pension_retiro}"'
     percepciones_nodo = (
-        f'<nomina12:Percepciones TotalSueldos="{total_gravado}" TotalGravado="{total_gravado}" '
-        f'TotalExento="{total_exento}">{percepciones_xml or percepciones_default}</nomina12:Percepciones>'
+        f"<nomina12:Percepciones{atributos_totales} "
+        f'TotalGravado="{total_gravado}" TotalExento="{total_exento}">'
+        f"{percepciones_xml or percepciones_default}</nomina12:Percepciones>"
     )
-    deducciones_nodo = (
-        '<nomina12:Deducciones TotalOtrasDeducciones="700.00" TotalImpuestosRetenidos="391.10">'
-        f"{deducciones_xml or deducciones_default}</nomina12:Deducciones>"
-    )
-    otros_nodo = f"<nomina12:OtrosPagos>{otros_pagos_xml or otros_default}</nomina12:OtrosPagos>"
+    # `sin_deducciones` / `sin_otros_pagos` omiten el nodo COMPLETO, no lo dejan vacío: así es
+    # como se ve un recibo real que no trae esa naturaleza, y es el caso que ejercita la rama
+    # `nodo.get(...) or {}` del ETL. Un nodo presente y vacío no existe en Nómina 1.2.
+    deducciones_nodo = ""
+    if not sin_deducciones:
+        atributos_deducciones = ""
+        if total_otras_deducciones is not None:
+            atributos_deducciones += f' TotalOtrasDeducciones="{total_otras_deducciones}"'
+        if total_impuestos_retenidos is not None:
+            atributos_deducciones += f' TotalImpuestosRetenidos="{total_impuestos_retenidos}"'
+        deducciones_nodo = (
+            f"<nomina12:Deducciones{atributos_deducciones}>{deducciones_xml or deducciones_default}</nomina12:Deducciones>"
+        )
+    otros_nodo = "" if sin_otros_pagos else f"<nomina12:OtrosPagos>{otros_pagos_xml or otros_default}</nomina12:OtrosPagos>"
     complemento_nomina = (
         '<nomina12:Nomina xmlns:nomina12="http://www.sat.gob.mx/nomina12" Version="1.2" '
         f'TipoNomina="{tipo_nomina}" FechaPago="{fecha_pago}" FechaInicialPago="{fecha_inicial}" '
