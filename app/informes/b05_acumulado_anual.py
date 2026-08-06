@@ -26,6 +26,23 @@ cualquier filtro basado solo en `estatus`, y las dos versiones —la buena y la 
 sumarían las dos. La única señal confiable de que un comprobante fue reemplazado es la
 relación `tipo_relacion='04'` que el sustituto declara, no el estatus del sustituido.
 
+**Por qué `no_verificado` es el caso que importa de verdad, no un caso de borde.** La
+verificación de estatus contra el SAT en este sistema es asíncrona (la misma divergencia que
+`universo_nomina` documenta para R-T1): descargar un CFDI y confirmar ante el SAT si sigue
+vigente son dos pasos separados en el tiempo, no uno. Un timbrado corregido casi siempre se
+sustituye ANTES de que la siguiente corrida de verificación alcance al sustituido — así que,
+en la práctica, el sustituido suele estar todavía `no_verificado` en el momento en que este
+informe se corre, no `cancelado`. Para ese estatus, ningún filtro basado en "estatus ==
+cancelado" hace nada: no hay nada cancelado que filtrar. R1 (la relación, no el estatus) es
+la única defensa que existe contra la duplicación en ese momento — y por eso
+`tests/test_informe_b05.py::test_sustituido_no_verificado_cuenta_una_vez` prueba justo ese
+estatus, aislada de `test_cancelado_sustituido_cuenta_una_vez` (que cubre la segunda defensa:
+un sustituido que sí llegó a marcarse `cancelado`, y a la que también protege el filtro de
+huérfanos cancelados de más abajo). La verificación por mutación de la ronda de corrección 1
+de esta tarea lo confirmó de forma empírica: desactivar R1 hace fallar la prueba de
+`no_verificado` (importe duplicado) pero NO la de `cancelado` (la salva el otro filtro) — el
+contraste es la evidencia de que cada prueba aísla la defensa que dice proteger.
+
 **B-05.R3 — Multipatrón.** Si el mismo `rfc_receptor` aparece con dos `rfc_emisor` distintos
 en el ejercicio (después de resolver R1), el cálculo anual es incompleto por construcción:
 el patrón que genera este informe solo ve una parte de los ingresos del empleado. Se emite

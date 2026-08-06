@@ -53,22 +53,59 @@ async def test_otro_ejercicio_no_entra(db: AsyncSession) -> None:
     assert resultado.filas == []
 
 
-async def test_cancelado_sustituido_cuenta_una_vez(db: AsyncSession) -> None:
-    """B-05.R1. Sin esto, un timbrado corregido duplica los ingresos anuales del empleado
-    — un error grave en una constancia de percepciones."""
+async def test_sustituido_no_verificado_cuenta_una_vez(db: AsyncSession) -> None:
+    """B-05.R1, aislada de la red de seguridad del filtro de cancelados.
+
+    La verificación de estatus contra el SAT es asíncrona (spec §11, divergencia de R-T1
+    documentada en `universo_nomina`): un CFDI recién descargado y luego sustituido por un
+    timbrado corregido queda en `no_verificado` durante un tiempo — no es un caso de borde,
+    es el caso común, porque la sustitución casi siempre ocurre antes de que la siguiente
+    corrida de verificación alcance al sustituido. En ese estatus, el filtro de cancelados
+    (`incluir_cancelados`) no protege nada: no ve nada cancelado. La única defensa contra
+    duplicar el ingreso anual del empleado es B-05.R1 (la relación `tipo_relacion='04'`).
+    Ver también `test_cancelado_sustituido_cuenta_una_vez`, que cubre la otra defensa."""
     eid = await _empresa(db)
     cid_malo = await insertar_nomina(db, empresa_id=eid, uuid="33333333-3333-3333-3333-333333333331",
                                      fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
-                                     estatus=EstatusCfdi.CANCELADO,
+                                     estatus=EstatusCfdi.NO_VERIFICADO,
                                      percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
                                      total_percepciones="8000.00", total="8000.00")
     cid_bueno = await insertar_nomina(db, empresa_id=eid, uuid="33333333-3333-3333-3333-333333333332",
                                       fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
                                       percepciones=[("001", "001", "Sueldo", "8500.00", "0.00")],
                                       total_percepciones="8500.00", total="8500.00")
-    # El sustituto declara la relación 04 hacia el cancelado.
+    # El sustituto declara la relación 04 hacia el sustituido, todavía no_verificado.
     db.add(CfdiRelacionado(comprobante_id=cid_bueno, tipo_relacion="04",
                            uuid_relacionado="33333333-3333-3333-3333-333333333331"))
+    await db.commit()
+    assert cid_malo != cid_bueno
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert len(resultado.filas) == 1
+    assert _fila(resultado, "Total percepciones") == Decimal("8500.00")
+    assert _fila(resultado, "Núm. de CFDI") == 1
+
+
+async def test_cancelado_sustituido_cuenta_una_vez(db: AsyncSession) -> None:
+    """La segunda defensa, para no perder cobertura: un sustituido que sí llegó a marcarse
+    `CANCELADO` también debe contar una vez. Aquí ambos filtros del módulo lo excluirían
+    por su cuenta (R1 y el filtro de cancelados huérfanos) — es exactamente lo que la
+    verificación por mutación de esta tarea confirmó: esta prueba sigue pasando aunque se
+    desactive R1, porque la salva el filtro de cancelados. Ver
+    `test_sustituido_no_verificado_cuenta_una_vez` para la prueba que sí aísla R1."""
+    eid = await _empresa(db)
+    cid_malo = await insertar_nomina(db, empresa_id=eid, uuid="33333333-3333-3333-3333-333333333333",
+                                     fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                                     estatus=EstatusCfdi.CANCELADO,
+                                     percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                                     total_percepciones="8000.00", total="8000.00")
+    cid_bueno = await insertar_nomina(db, empresa_id=eid, uuid="33333333-3333-3333-3333-333333333334",
+                                      fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                                      percepciones=[("001", "001", "Sueldo", "8500.00", "0.00")],
+                                      total_percepciones="8500.00", total="8500.00")
+    # El sustituto declara la relación 04 hacia el cancelado.
+    db.add(CfdiRelacionado(comprobante_id=cid_bueno, tipo_relacion="04",
+                           uuid_relacionado="33333333-3333-3333-3333-333333333333"))
     await db.commit()
     assert cid_malo != cid_bueno
 
