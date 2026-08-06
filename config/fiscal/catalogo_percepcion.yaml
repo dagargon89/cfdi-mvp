@@ -25,5 +25,14 @@
 #   integra_sbc           Si integra al salario base de cotización (art. 27 LSS).
 #   es_provisionable      Si entra al pasivo laboral (aguinaldo, vacaciones, prima
 #                         vacacional) que calcula B-06.
+#
+# Como `param_fiscal`, estas marcas quedan PENDIENTES DE CONFIRMACIÓN al cargarse: una marca
+# sin confirmar no participa en ningún cálculo de exención, y si al recargar cambia
+# cualquiera de sus campos, la confirmación anterior se limpia. La razón por la que la puerta
+# pesa más aquí que en la UMA: la UMA se verifica contra un único boletín oficial, y estos
+# son ~46 factores derivados a mano del art. 93 de la LISR.
+#
+# Dos renglones con el mismo `tipo_percepcion` son un error: el cargador los rechaza diciendo
+# en qué renglón venía el primero.
 
 catalogo_percepcion_marca: []

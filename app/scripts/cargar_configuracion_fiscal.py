@@ -5,8 +5,9 @@ confirmar no calcula nada, por diseño (ver `app/services/configuracion_fiscal.p
 script propone; confirmar es un acto humano y se hace desde la pantalla de configuración.
 
 Es idempotente: volver a correrlo actualiza los renglones, no los duplica. Si al recargar
-cambia la cifra de un parámetro, su confirmación previa se limpia — un valor distinto es
-un valor nuevo y necesita que alguien lo mire otra vez.
+cambia el contenido de un renglón, su confirmación previa se limpia — un valor distinto es
+un valor nuevo y necesita que alguien lo mire otra vez. Y no pisa una corrección hecha a
+mano: la reporta y la deja como está, salvo que se pase `--forzar`.
 
 Uso:
     python -m app.scripts.cargar_configuracion_fiscal config/fiscal/param_fiscal.yaml
@@ -24,16 +25,17 @@ import sys
 from pathlib import Path
 
 from app.db.session import SessionLocal
-from app.services.configuracion_fiscal import cargar_desde_yaml
+from app.services.configuracion_fiscal import ResultadoCarga, cargar_desde_yaml_detallado
 
 # Las tablas cuyos renglones exigen confirmación humana antes de usarse en un cálculo.
-# `tabla_vacaciones` no está: es el art. 76 de la LFT, se aplica tal cual.
-_EXIGEN_CONFIRMACION = ("param_fiscal",)
+# `tabla_vacaciones` no está: es el art. 76 de la LFT, dos columnas de enteros que se
+# verifican de un vistazo contra la ley y no cambian desde la reforma de 2023.
+_EXIGEN_CONFIRMACION = ("param_fiscal", "catalogo_percepcion_marca")
 
 
-async def _cargar(ruta: Path, empresa_id: int | None) -> dict[str, int]:
+async def _cargar(ruta: Path, empresa_id: int | None, forzar: bool) -> ResultadoCarga:
     async with SessionLocal() as db:
-        return await cargar_desde_yaml(db, ruta, empresa_id=empresa_id)
+        return await cargar_desde_yaml_detallado(db, ruta, empresa_id=empresa_id, forzar=forzar)
 
 
 def main() -> None:
@@ -45,16 +47,23 @@ def main() -> None:
         default=None,
         help="Obligatorio para las secciones por empresa (map_departamento, map_concepto_provision, configuracion_empresa).",
     )
+    parser.add_argument(
+        "--forzar",
+        action="store_true",
+        help="Pisa los renglones que fueron corregidos a mano (origen MANUAL). Sin esta bandera se omiten y se reportan.",
+    )
     args = parser.parse_args()
     ruta = Path(args.ruta)
     empresa_id: int | None = args.empresa_id
+    forzar: bool = args.forzar
 
     try:
-        resumen = asyncio.run(_cargar(ruta, empresa_id))
+        resultado = asyncio.run(_cargar(ruta, empresa_id, forzar))
     except ValueError as exc:
         print(f"No se cargó nada — la validación falló:\n  {exc}", file=sys.stderr)
         raise SystemExit(1) from None
 
+    resumen = resultado.filas
     if not resumen:
         print(f"{ruta}: el archivo no trae ninguna sección con datos. No se cargó nada.")
         return
@@ -62,11 +71,15 @@ def main() -> None:
     print(f"Cargado {ruta}:")
     for tabla in sorted(resumen):
         print(f"  {tabla}: {resumen[tabla]} renglón(es)")
+    if resultado.omitidos:
+        print(f"\n{len(resultado.omitidos)} renglón(es) NO se cargaron para no pisar una corrección manual:")
+        for aviso in resultado.omitidos:
+            print(f"  - {aviso}")
     if any(resumen.get(tabla) for tabla in _EXIGEN_CONFIRMACION):
         print(
-            "\nPENDIENTE DE CONFIRMACIÓN: los parámetros cargados NO se usan en ningún cálculo\n"
-            "hasta que una persona los confirme desde la pantalla de configuración. Hasta\n"
-            "entonces los informes los reportan como faltantes, con su propuesta y su fuente."
+            "\nPENDIENTE DE CONFIRMACIÓN: lo cargado NO se usa en ningún cálculo hasta que una\n"
+            "persona lo confirme desde la pantalla de configuración. Hasta entonces los informes\n"
+            "lo reportan como faltante, con su propuesta y su fuente."
         )
 
 

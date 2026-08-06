@@ -13,7 +13,9 @@
 #       vigencia_hasta: null       # null = vigente hasta nuevo aviso
 #       fuente: 'INEGI, boletín UMA 2026 — https://...'
 #
-# Claves esperadas y de dónde sale cada una:
+# Claves esperadas y de dónde sale cada una. La lista es cerrada: el cargador rechaza
+# cualquier otra (`CLAVES_PARAM_FISCAL` en app/services/configuracion_fiscal.py), porque
+# `UMA_DIARA` se cargaría y se confirmaría sin ruido y después no la leería nadie nunca.
 #
 #   UMA_DIARIA              INEGI, boletín anual de la UMA. Cambia el 1 de febrero.
 #   UMA_MENSUAL             idem (UMA diaria x 30.4).

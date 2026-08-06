@@ -44,6 +44,11 @@ services:
       # desincroniza del host: `alembic current` falla por revisiones que el contenedor no
       # conoce, y los archivos de `revision --autogenerate` quedan dentro del contenedor.
       - ./alembic:/srv/alembic
+      # Las semillas fiscales (`app/scripts/cargar_configuracion_fiscal.py` las lee de aquí).
+      # El Dockerfile no copia `config/`, así que sin este montaje el reflejo natural
+      # —`docker compose exec api python -m app.scripts.cargar_configuracion_fiscal ...`—
+      # falla con "no existe el archivo".
+      - ./config:/srv/config
       - ./secrets:/srv/secrets
       - ./storage:/srv/storage
     ports:
@@ -80,6 +85,8 @@ services:
     command: celery -A app.worker.celery_app worker -l info --concurrency=4 --prefetch-multiplier=1
     volumes:
       - ./app:/srv/app
+      # Igual que en `api`: la sincronización de valores fiscales (tarea 6) corre aquí.
+      - ./config:/srv/config
       - ./secrets:/srv/secrets
       - ./storage:/srv/storage
     environment:

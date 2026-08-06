@@ -7,15 +7,16 @@ nunca es `Decimal("0")`, porque un cero en un tope de exención produce exencion
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.models.configuracion_fiscal import ConfiguracionEmpresa, ParamFiscal
+from app.models.configuracion_fiscal import CatalogoPercepcionMarca, ConfiguracionEmpresa, ParamFiscal
 from app.models.enums import OrigenValor, ZonaSalarial
 from app.services import configuracion_fiscal as cfg
 from tests import factories
@@ -276,3 +277,185 @@ async def test_dos_tramos_abiertos_para_la_misma_clave_se_rechazan(db: AsyncSess
     propuesto = await cfg.valor_propuesto(db, "SALARIO_MINIMO_GENERAL", date(2027, 6, 1))
     assert propuesto is not None
     assert propuesto.valor == Decimal("340.20")
+
+
+async def test_dos_escrituras_concurrentes_no_dejan_dos_tramos_abiertos(db: AsyncSession, engine: AsyncEngine) -> None:
+    """El mismo escenario, pero por la puerta de la tarea 4 en vez del YAML: dos `PUT`
+    simultáneos (un doble clic, o el reintento de un cliente). Sin candado, InnoDB con
+    REPEATABLE READ le da a cada transacción una lectura consistente por MVCC: ninguna ve
+    el tramo de la otra, las dos pasan el chequeo y la PK no las detiene porque los
+    `vigencia_desde` diferen. Quedarían dos propuestas abiertas y legítimas en pantalla, y
+    el invariante de confirmación no lo contiene: pide que alguien confirme, no que haya un
+    solo candidato.
+    """
+    db.add(_param("SALARIO_MINIMO_GENERAL", "315.040000", date(2026, 1, 1), hasta=date(2026, 5, 31), confirmado=True))
+    await db.commit()
+
+    sesiones = async_sessionmaker(engine, expire_on_commit=False)
+    resultados: list[str] = []
+
+    async def escribir(desde: date, valor: str, retraso: float) -> None:
+        await asyncio.sleep(retraso)
+        async with sesiones() as sesion:
+            try:
+                await cfg.guardar_param_fiscal(
+                    sesion,
+                    clave="SALARIO_MINIMO_GENERAL",
+                    valor=Decimal(valor),
+                    vigencia_desde=desde,
+                    origen=OrigenValor.MANUAL,
+                    fuente="captura concurrente de prueba",
+                )
+                await asyncio.sleep(0.5)  # mantiene abierta la transacción del primero
+                await sesion.commit()
+                resultados.append("escrito")
+            except ValueError:
+                await sesion.rollback()
+                resultados.append("rechazado")
+
+    await asyncio.gather(
+        escribir(date(2026, 6, 15), "340.20", 0.0),
+        escribir(date(2026, 9, 1), "350.00", 0.15),
+    )
+
+    assert sorted(resultados) == ["escrito", "rechazado"]
+    abiertos = (
+        await db.scalars(
+            select(ParamFiscal).where(
+                ParamFiscal.clave == "SALARIO_MINIMO_GENERAL", ParamFiscal.vigencia_hasta.is_(None)
+            )
+        )
+    ).all()
+    assert len(abiertos) == 1
+
+
+async def test_renglones_duplicados_en_el_mismo_archivo_se_rechazan(db: AsyncSession, tmp_path: Path) -> None:
+    """Pegar dos veces el mismo `tipo_percepcion` es el error de captura más probable de la
+    semilla de percepciones. Antes reventaba como `IntegrityError` de asyncmy (que no es
+    `ValueError`, así que el script escupía un traceback), y en `param_fiscal` ni siquiera
+    reventaba: el segundo renglón pisaba al primero y el resumen informaba dos cargados."""
+    marcas = tmp_path / "marcas.yaml"
+    marcas.write_text(
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '022'\n    es_ingreso_ordinario: false\n    base_exencion: NINGUNA\n"
+        "    integra_sbc: false\n    es_provisionable: false\n"
+        "  - tipo_percepcion: '022'\n    es_ingreso_ordinario: true\n    base_exencion: NINGUNA\n"
+        "    integra_sbc: true\n    es_provisionable: false\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="ya venía"):
+        await cfg.cargar_desde_yaml(db, marcas)
+
+    params = tmp_path / "params.yaml"
+    params.write_text(
+        "param_fiscal:\n  - clave: UMA_DIARIA\n    valor: '117.31'\n    vigencia_desde: 2026-02-01\n"
+        "    fuente: 'INEGI 2026'\n"
+        "  - clave: UMA_DIARIA\n    valor: '9.99'\n    vigencia_desde: 2026-02-01\n    fuente: 'dedazo'\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="ya venía"):
+        await cfg.cargar_desde_yaml(db, params)
+
+    # Ninguno de los dos archivos dejó nada escrito.
+    assert await db.scalar(select(func.count()).select_from(ParamFiscal)) == 0
+    assert await db.scalar(select(func.count()).select_from(CatalogoPercepcionMarca)) == 0
+
+
+async def test_el_cargador_atrapa_lo_que_la_columna_rechazaria(db: AsyncSession, tmp_path: Path) -> None:
+    """Un texto más largo que su columna salía como `DataError` 1406 de MySQL a media
+    escritura, no como el `ValueError` con renglón y campo que promete el cargador."""
+    larga = tmp_path / "larga.yaml"
+    larga.write_text(
+        f"param_fiscal:\n  - clave: {'U' * 41}\n    valor: '117.31'\n    vigencia_desde: 2026-02-01\n"
+        "    fuente: 'x'\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="40 caracteres"):
+        await cfg.cargar_desde_yaml(db, larga)
+
+    fuente_larga = tmp_path / "fuente.yaml"
+    fuente_larga.write_text(
+        f"param_fiscal:\n  - clave: UMA_DIARIA\n    valor: '117.31'\n    vigencia_desde: 2026-02-01\n"
+        f"    fuente: '{'x' * 501}'\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="500 caracteres"):
+        await cfg.cargar_desde_yaml(db, fuente_larga)
+
+
+async def test_una_clave_desconocida_se_rechaza(db: AsyncSession, tmp_path: Path) -> None:
+    """`UMA_DIARA` carga limpio, alguien la confirma de buena fe, y `valor_vigente` con la
+    clave buena devuelve `None` para siempre: el informe dice "falta la UMA" mientras el
+    valor está capturado y confirmado dos letras más allá."""
+    ruta = tmp_path / "typo.yaml"
+    ruta.write_text(
+        "param_fiscal:\n  - clave: UMA_DIARA\n    valor: '117.31'\n    vigencia_desde: 2026-02-01\n"
+        "    fuente: 'INEGI 2026'\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="no es una clave conocida"):
+        await cfg.cargar_desde_yaml(db, ruta)
+
+
+def _yaml_marca(factor: str) -> str:
+    return (
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '002'\n    es_ingreso_ordinario: true\n    base_exencion: UMA_DIAS\n"
+        f"    factor_exencion: '{factor}'\n    integra_sbc: true\n    es_provisionable: true\n"
+    )
+
+
+async def test_una_marca_sin_confirmar_no_calcula(db: AsyncSession, tmp_path: Path) -> None:
+    """El invariante extendido al §3.1: `factor_exencion` alimenta el cálculo de exenciones
+    igual que la UMA, y a diferencia de la UMA no sale de un boletín oficial sino de una
+    derivación a mano del art. 93 de la LISR."""
+    ruta = tmp_path / "marcas.yaml"
+    ruta.write_text(_yaml_marca("30"), encoding="utf-8")
+    await cfg.cargar_desde_yaml(db, ruta)
+
+    assert await cfg.marcas_de_percepcion(db) == {}
+    propuestas = await cfg.marcas_propuestas(db)
+    assert set(propuestas) == {"002"}
+    assert propuestas["002"].factor_exencion == Decimal("30")
+
+    propuestas["002"].confirmado_por = "uid-prueba"
+    propuestas["002"].confirmado_en = datetime(2026, 8, 6, 12, 0, 0)
+    await db.commit()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"002"}
+
+    # Cambiar el factor es cambiar la exención: vuelve a la cola de revisión.
+    ruta.write_text(_yaml_marca("90"), encoding="utf-8")
+    await cfg.cargar_desde_yaml(db, ruta)
+    assert await cfg.marcas_de_percepcion(db) == {}
+    assert (await cfg.marcas_propuestas(db))["002"].factor_exencion == Decimal("90")
+
+
+async def test_el_cargador_no_pisa_una_correccion_manual(db: AsyncSession, tmp_path: Path) -> None:
+    """Sale una fe de erratas, un admin corrige la fuente por el endpoint (que sí deja
+    bitácora) y tres semanas después alguien recarga las semillas. Como la cifra coincide,
+    la confirmación no se limpiaba y la corrección desaparecía sin síntoma — y sin rastro,
+    porque el cargador no escribe bitácora."""
+    ruta = tmp_path / "param.yaml"
+    ruta.write_text(
+        "param_fiscal:\n  - clave: UMA_DIARIA\n    valor: '117.31'\n    vigencia_desde: 2026-02-01\n"
+        "    fuente: 'INEGI 2026'\n",
+        encoding="utf-8")
+    await cfg.cargar_desde_yaml(db, ruta)
+
+    await cfg.guardar_param_fiscal(
+        db, clave="UMA_DIARIA", valor=Decimal("117.31"), vigencia_desde=date(2026, 2, 1),
+        origen=OrigenValor.MANUAL, fuente="INEGI 2026, fe de erratas del 20-02-2026")
+    await db.commit()
+
+    detalle = await cfg.cargar_desde_yaml_detallado(db, ruta)
+    assert detalle.filas["param_fiscal"] == 0
+    assert len(detalle.omitidos) == 1
+    assert "UMA_DIARIA" in detalle.omitidos[0] and "--forzar" in detalle.omitidos[0]
+    fila = await db.scalar(select(ParamFiscal).where(ParamFiscal.clave == "UMA_DIARIA"))
+    assert fila is not None
+    assert fila.origen is OrigenValor.MANUAL
+    assert "fe de erratas" in fila.fuente
+
+    # `--forzar` es la salida explícita: la semilla gana y se dice que ganó.
+    detalle = await cfg.cargar_desde_yaml_detallado(db, ruta, forzar=True)
+    assert detalle.filas["param_fiscal"] == 1
+    assert detalle.omitidos == []
+    fila = await db.scalar(select(ParamFiscal).where(ParamFiscal.clave == "UMA_DIARIA"))
+    assert fila is not None
+    assert fila.origen is OrigenValor.SEMILLA
+    assert fila.fuente == "INEGI 2026"

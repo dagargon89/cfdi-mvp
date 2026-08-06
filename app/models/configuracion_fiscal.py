@@ -92,7 +92,15 @@ class ParamFiscal(Base):
 class CatalogoPercepcionMarca(Base):
     """Marcas por tipo de percepción de nómina (§3.1 del documento fuente) que el catálogo
     `c_TipoPercepcion` del SAT no trae: si es ingreso ordinario, sobre qué base se calcula
-    su tramo exento, si integra al SBC y si es provisionable (aguinaldo/vacaciones/etc.)."""
+    su tramo exento, si integra al SBC y si es provisionable (aguinaldo/vacaciones/etc.).
+
+    Lleva confirmación como `param_fiscal`, y por la misma razón, solo que aquí pesa más:
+    `factor_exencion` alimenta el cálculo de exenciones igual que la UMA, los factores del
+    art. 93 de la LISR también cambian por reforma, y —a diferencia de la UMA, que se
+    verifica contra un único boletín oficial— son ~46 derivaciones hechas a mano, el dato
+    más propenso a error de toda la fase. Sin esta puerta, la UMA exigiría un clic y los 46
+    factores se aplicarían solos en cuanto alguien los cargara.
+    """
 
     __tablename__ = "catalogo_percepcion_marca"
     __table_args__ = (_TABLA_ARGS,)
@@ -105,6 +113,9 @@ class CatalogoPercepcionMarca(Base):
     factor_exencion: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
     integra_sbc: Mapped[bool] = mapped_column(Boolean, nullable=False)
     es_provisionable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Mismo invariante que `param_fiscal`: sembrar propone, solo una persona activa.
+    confirmado_por: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confirmado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class MapDepartamento(Base):
@@ -137,7 +148,18 @@ class MapConceptoProvision(Base):
 
 class TablaVacaciones(Base):
     """Días de vacaciones por año de antigüedad, art. 76 de la LFT. Es ley federal, no una
-    regla de cada patrón: por eso es una tabla global, sin `empresa_id`."""
+    regla de cada patrón: por eso es una tabla global, sin `empresa_id`.
+
+    **No lleva confirmación**, a diferencia de `param_fiscal` y `catalogo_percepcion_marca`
+    — decisión explícita, no olvido. Los otros dos exigen confirmación porque son valores
+    que cambian por decreto (la UMA, cada febrero) o derivaciones con criterio (los ~46
+    factores del art. 93). Esta tabla es la transcripción literal de un solo artículo, con
+    dos columnas de enteros, estable desde la reforma de 2023 y verificable de un vistazo
+    contra la ley; un error de captura aquí lo atrapa la prueba de monotonía de la semilla,
+    no una revisión humana renglón por renglón. Poner una puerta de confirmación donde el
+    dato no puede sorprender solo enseña a la gente a confirmar sin mirar, y eso desgasta
+    la puerta donde sí importa.
+    """
 
     __tablename__ = "tabla_vacaciones"
     __table_args__ = (_TABLA_ARGS,)
