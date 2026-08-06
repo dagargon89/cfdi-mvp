@@ -6106,6 +6106,14 @@ Donde contradicen lo escrito en las tareas de arriba, **esto es lo vigente**:
    `COMPLEMENTO_AUSENTE` con el UUID de cada uno, acotada por `Comprobante.fecha_emision`
    porque estos comprobantes no tienen `nomina.fecha_pago`. Se resuelve antes del retorno por
    informe vacío. Las dos banderas venían exigidas por §9 del diseño y nunca se implementaron.
+
+   **Segunda ronda:** la primera versión pegaba esa ventana a `[desde, hasta + 1 día)` y
+   perdía el caso más común. En la BD real de la empresa 11 los 8 CFDI de nómina están
+   timbrados **al día siguiente** del pago, así que un informe de junio con una nómina pagada
+   el 30 de junio, timbrada el 1 de julio y con el ETL fallido salía con 0 filas y 0 banderas.
+   La ventana lleva ahora `_MARGEN_TIMBRADO_DIAS = 31` a **cada** lado (la RMF 2.7.5.3 permite
+   hasta 11 días hábiles de desfase, y el timbrado anticipado también es legal). El criterio es
+   asimétrico a propósito: una bandera de más se ve y se descarta; una de menos no se ve nunca.
 2. **El enmascaramiento falla cerrado.** La tarea pasa `p.model_dump(mode="json")` al
    `ContextoInforme` (parámetros validados, no el dict crudo del cliente) y
    `excel.escribir_libro` lee `get("enmascarar_datos_personales", True)`. Antes, un llamador
@@ -6127,10 +6135,18 @@ Donde contradicen lo escrito en las tareas de arriba, **esto es lo vigente**:
    con código 1213/1205) del fallo de datos: re-verifica `necesita_normalizar` y, si otro
    proceso ya lo normalizó, cuenta como omitido. Antes la marca de error quedaba **permanente**,
    porque el hash y la `ETL_VERSION` ya coincidían.
+
+   **Residual documentado (deuda):** la re-consulta solo ve al ganador si este ya commiteó.
+   Eso es forzoso con el 1062, pero no con el 1213, donde InnoDB aborta a la víctima mientras
+   el ganador sigue abierto. Lo robusto sería **reintentar** la normalización una vez en lugar
+   de consultar el estado de inmediato. Se acepta porque, gracias al punto 5, el residual
+   produce un aviso visible y no un dato falso silencioso.
 7. **Las 9 identidades de B-00 viven en la suite.** `app/informes/identidades_b00.py` es la
    única implementación; `tests/test_identidades_b00.py` la corre sobre XML sintéticos y
    `scripts/verificar_fase1.py` sobre los datos reales. Antes solo existían en el script, fuera
-   de `testpaths`.
+   de `testpaths`. `verificar()` devuelve además **cuántos cotejos ejecutó** y las pruebas lo
+   aseveran: sin ese conteo, borrar ocho de las nueve identidades dejaba la suite verde, porque
+   un cotejo que no corre no puede fallar.
 8. **El pre-vuelo se acota por tipo.** Cada informe declara `TIPOS_COMPROBANTE` (todo el grupo
    B: `("N",)`) y la tarea lo pasa a `ids_pendientes`. Sin eso, la primera generación posterior
    a subir `ETL_VERSION` reprocesaba el histórico completo dentro de la tarea del informe.
@@ -6138,10 +6154,24 @@ Donde contradicen lo escrito en las tareas de arriba, **esto es lo vigente**:
    `datetime.max.time()` anterior incluía el día siguiente en una columna `DATETIME(0)`), y el
    pre-vuelo sin pendientes cierra su transacción de lectura.
 9. **Menores:** `generado_en` en UTC naive como el resto del proyecto; log en el `except` de
-   `catalogos.py`; advertencia sobre la colación `utf8mb4_unicode_ci` del `GROUP BY` por
-   descripción; `rfc_emisor == empresa.rfc` en el universo (§11: los `N` **emitidos** por la
+   `catalogos.py`; `rfc_emisor == empresa.rfc` en el universo (§11: los `N` **emitidos** por la
    empresa); aserción de celda sobre `Total sueldos`, `Total separación indemnización` y
    `Total jubilación pensión retiro`.
+
+   **Colación del `GROUP BY` por descripción (segunda ronda):** se aplica
+   `COLLATE utf8mb4_bin` a la descripción, en el `SELECT` y en el `GROUP BY`. Con la colación
+   de la tabla (`utf8mb4_unicode_ci`, insensible a mayúsculas y acentos), "SUELDO" y "Sueldo"
+   en el mismo comprobante colapsaban en un grupo con representante arbitrario: título no
+   determinista y `CONCEPTO_INCONSISTENTE` ciega a justo el caso para el que existe. Forzar la
+   colación binaria **no parte la columna en dos**: la identidad de columna es
+   `(naturaleza, tipo, clave)` y se arma en Python (R-T9), así que las dos filas caen en la
+   misma celda y suman. `clave` se deja con la colación insensible a propósito, porque ahí sí
+   forma parte de la identidad y separarla crearía dos columnas donde el patrón capturó una.
+
+**Deuda anotada, no arreglada:** `fecha_pago`/`fecha_emision` nulas (hoy inalcanzables: 0 nulos
+en 351 comprobantes y `FechaPago` es obligatoria en el XSD); falta de prueba sobre el
+`detalle["parametros"]` de la bitácora; representante arbitrario de `clave` bajo colación
+insensible; y el reintento ante deadlock del punto 6.
 
 **Lo que sigue (fases 2 y 3 del spec §14),** cada una con su propio plan:
 

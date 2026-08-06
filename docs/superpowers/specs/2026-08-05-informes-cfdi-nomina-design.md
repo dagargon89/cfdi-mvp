@@ -261,7 +261,7 @@ Ningún fallo individual aborta una corrida.
 | Comprobante sin `xml_path` (nunca se descargó) | **Se omite**: no hay nada que normalizar y eso no es un error |
 | CFDI tipo `N` sin complemento de nómina | Bandera `COMPLEMENTO_AUSENTE` |
 | CFDI ya normalizado cuyo reproceso falló | Se conservan los hijos de la última corrida buena y la fila entra al informe con bandera `DATOS_DE_CORRIDA_ANTERIOR` |
-| Dos normalizaciones concurrentes del mismo comprobante | El perdedor (deadlock 1213 / `IntegrityError`) re-verifica `necesita_normalizar` y cuenta como omitido: nunca se marca error sobre un comprobante sano |
+| Dos normalizaciones concurrentes del mismo comprobante | El perdedor (deadlock 1213 / `IntegrityError`) re-verifica `necesita_normalizar` y cuenta como omitido: nunca se marca error sobre un comprobante sano. **Residual conocido**, ver abajo |
 | Informe sin filas | Libro con hoja de Parámetros y aviso, no un `500` |
 | Volumen grande | Consulta por lotes, como el export actual; el pre-vuelo se acota con los `TIPOS_COMPROBANTE` que declara el informe |
 
@@ -272,6 +272,29 @@ aparecer en la hoja `Datos` — no hay datos que poner. Cada informe emite estas
 `Comprobante.fecha_emision` (los comprobantes sin normalizar no tienen `nomina.fecha_pago` con
 la que acotarlos). Las banderas se resuelven **antes** del retorno por informe vacío: un libro
 sin filas y sin banderas es indistinguible de un periodo en el que no hubo nómina.
+
+**La ventana de esas banderas lleva 31 días de margen a cada lado, y no es opcional.** La fecha
+de timbrado no coincide con la de pago: en la BD real de la empresa 11 los 8 CFDI de nómina
+están timbrados **al día siguiente** del pago (pago 2026-06-30 → emisión 2026-07-01), y la RMF
+(regla 2.7.5.3) admite hasta 11 días hábiles de desfase, además del timbrado anticipado. Sin
+margen, un informe de `[2026-06-01, 2026-06-30]` con una nómina pagada el 30 de junio, timbrada
+el 1 de julio y con el ETL fallido salía con 0 filas y 0 banderas. El criterio para dimensionar
+el margen es asimétrico a propósito: **una bandera de más se ve y se descarta; una de menos no
+se ve nunca.** Lo único que la ventana debe seguir acotando es que un `N` roto de un ejercicio
+ajeno no aparezca en el informe de este mes, porque una hoja `Banderas` con decenas de entradas
+irrelevantes deja de leerse.
+
+**Residual conocido de la protección contra carreras (deuda anotada).** La protección consiste
+en re-consultar `necesita_normalizar` al detectar un fallo de concurrencia, y eso solo funciona
+si el proceso ganador ya commiteó. Con `IntegrityError` (1062) el orden es forzoso — la clave
+duplicada solo existe si commiteó — así que la protección es completa. Con un deadlock (1213)
+no: InnoDB aborta a la víctima **mientras** el ganador sigue con su transacción abierta, y en
+ese orden la re-consulta no ve nada y sí se marca el error sobre un comprobante sano. **Lo
+robusto sería reintentar la normalización una vez** en lugar de consultar el estado de
+inmediato: el reintento espera de forma natural a que el ganador termine. Se acepta dejarlo
+documentado porque el residual ya no produce un dato falso silencioso: con
+`DATOS_DE_CORRIDA_ANTERIOR`, el comprobante marcado por error sigue entrando al informe con sus
+importes y llega al patrón como un aviso visible.
 
 ## 10. Estructura del libro de Excel
 
@@ -368,8 +391,11 @@ llamadores:
 
 - `tests/test_identidades_b00.py`, sobre XML sintéticos que pasan por el ETL completo. Está dentro de
   `testpaths`, así que cada corrida de la suite las mantiene verdes. Incluye un caso negativo que altera un
-  total ya normalizado y exige que la verificación lo señale: sin él, "cero fallas" podría significar tanto
-  "todo cuadra" como "no se comprobó nada".
+  total ya normalizado y exige que la verificación lo señale.
+  **`verificar()` devuelve además cuántos cotejos ejecutó**, y las pruebas lo aseveran. Sin ese conteo,
+  "cero fallas" no distingue "todo cuadra" de "no se comprobó nada": un cotejo que no corre no puede
+  fallar, así que borrar ocho de las nueve identidades dejaría la suite verde. Un atributo que el XML no
+  trae no se compara y no cuenta — la prueba de ese caso asevera su número exacto, uno menos.
 - `scripts/verificar_fase1.py`, **en vivo contra los datos reales, sin que nada entre a git**: los mismos
   cotejos sobre los CFDI de la empresa 11 tras el reproceso.
 
