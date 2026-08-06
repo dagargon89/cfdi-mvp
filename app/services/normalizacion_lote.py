@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -18,11 +19,38 @@ from app.services import normalizacion, representaciones
 
 logger = logging.getLogger(__name__)
 
+# Códigos de error de MySQL que significan "otra transacción se te adelantó", no "el dato
+# está mal". `asyncmy` los entrega como `asyncmy.errors.OperationalError(codigo, mensaje)`
+# —1213 está mapeado explícitamente a `OperationalError` en `asyncmy/errors.pyx`, y 1205 cae
+# ahí por el default de códigos ≥ 1000— y SQLAlchemy los reenvuelve en
+# `sqlalchemy.exc.OperationalError` conservando el original en `.orig.args[0]`.
+_CODIGOS_CONCURRENCIA = frozenset({1213, 1205})  # ER_LOCK_DEADLOCK, ER_LOCK_WAIT_TIMEOUT
+
+
+def _es_fallo_de_concurrencia(exc: BaseException) -> bool:
+    """`True` si el fallo es de dos transacciones peleándose, no del contenido del XML.
+
+    Dos pre-vuelos simultáneos sobre el mismo comprobante (basta un doble clic en "Generar":
+    el endpoint responde `202` de inmediato y cada generación arranca su propio pre-vuelo) se
+    pisan en `_upsert_detalle`, que hace SELECT-luego-INSERT sin protección, y en
+    `_limpiar_hijos`, que borra 14 tablas por `comprobante_id`. El resultado es un
+    `IntegrityError` por PK duplicada o —lo más probable— un deadlock de InnoDB.
+    """
+    if isinstance(exc, IntegrityError):
+        return True
+    if isinstance(exc, OperationalError):
+        argumentos: tuple[object, ...] = getattr(exc.orig, "args", ())
+        return bool(argumentos) and argumentos[0] in _CODIGOS_CONCURRENCIA
+    return False
+
 
 async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: list[int]) -> dict[str, int]:
     """Devuelve `{"normalizados": n, "con_error": n, "omitidos": n}`.
 
-    `omitidos` son los que ya estaban al día (mismo hash, misma `ETL_VERSION`). Commitea
+    `omitidos` son los que no había nada que hacerles: los que ya estaban al día (mismo hash,
+    misma `ETL_VERSION`), los que **no tienen XML en disco** (sin XML no hay nada que
+    normalizar, y eso no es un error) y los que otro proceso normalizó mientras este los
+    procesaba. Commitea
     por comprobante: un lote largo que se interrumpa deja avanzado lo que ya procesó.
 
     **Contrato para quien reusa `db` después de llamar esta función (pre-vuelo de la
@@ -45,9 +73,24 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
         if comprobante is None:
             continue  # id de otra empresa: se ignora, igual que en `validar_lote`
 
+        # Sin `xml_path` el comprobante nunca se descargó: es metadata del SAT y no hay nada
+        # que normalizar. Se OMITE, no se marca con error. `ids_pendientes` ya lo excluye,
+        # pero `ids_todos` (la vía documentada para forzar el reproceso tras subir
+        # `ETL_VERSION`, alcance="todos") no filtra nada y los trae todos. Registrarlo como
+        # error dejaría una fila con hash falso (`"0"*64`) y el mensaje "el XML no está en
+        # disco" sobre un comprobante que simplemente todavía no se ha descargado, recontado
+        # como `con_error` en cada corrida.
+        if not comprobante.xml_path:
+            resumen["omitidos"] += 1
+            continue
+
         xml_bytes = representaciones.leer_xml_de_disco(storage_root, comprobante)
         if xml_bytes is None:
-            await repo_normalizacion.registrar_error(db, comprobante_id, "0" * 64, "El XML no está en disco.")
+            # Aquí sí es un error, y grave: `xml_path` dice que el XML se resguardó y el
+            # archivo ya no está. Eso es pérdida de datos, no un comprobante pendiente.
+            await repo_normalizacion.registrar_error(
+                db, comprobante_id, "0" * 64, f"El XML resguardado ya no está en disco: {comprobante.xml_path}"
+            )
             await db.commit()
             resumen["con_error"] += 1
             continue
@@ -63,6 +106,19 @@ async def normalizar_lote(db: AsyncSession, empresa_id: int, comprobante_ids: li
             resumen["normalizados"] += 1
         except Exception as exc:  # noqa: BLE001 — un XML corrupto no aborta el lote
             await db.rollback()
+            # Un fallo de concurrencia NO es un fallo del dato. Si otro proceso ya normalizó
+            # este comprobante mientras nosotros lo intentábamos, marcar el error sería
+            # calumniar a un comprobante sano — y de forma PERMANENTE: `xml_hash` y
+            # `etl_version` ya coinciden con los del ganador, así que `necesita_normalizar`
+            # devolvería `False` en toda corrida posterior y nadie limpiaría la marca.
+            if _es_fallo_de_concurrencia(exc) and not await repo_normalizacion.necesita_normalizar(db, comprobante_id, xml_hash):
+                logger.info(
+                    "normalizar_lote: comprobante %s lo normalizó otro proceso en paralelo (%s); se omite sin marcar error.",
+                    comprobante_id,
+                    exc.__class__.__name__,
+                )
+                resumen["omitidos"] += 1
+                continue
             logger.warning("normalizar_lote: comprobante %s no se pudo normalizar: %s", comprobante_id, exc)
             await repo_normalizacion.registrar_error(db, comprobante_id, xml_hash, str(exc))
             await db.commit()

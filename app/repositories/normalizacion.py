@@ -7,7 +7,7 @@ del caller — este módulo no hace `commit`.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -373,7 +373,11 @@ async def ids_pendientes(
     if solo_tipo is not None:
         consulta = consulta.where(Comprobante.tipo_comprobante == solo_tipo)
     if desde is not None:
-        consulta = consulta.where(Comprobante.fecha_emision >= datetime.combine(desde, datetime.min.time()))
+        consulta = consulta.where(Comprobante.fecha_emision >= datetime.combine(desde, time.min))
     if hasta is not None:
-        consulta = consulta.where(Comprobante.fecha_emision <= datetime.combine(hasta, datetime.max.time()))
+        # Intervalo semiabierto, NO `<= combine(hasta, datetime.max.time())`: esa constante es
+        # 23:59:59.999999 y `comprobantes.fecha_emision` es `DATETIME` sin fracción de
+        # segundo, así que MySQL redondea los microsegundos hacia arriba al comparar y el
+        # filtro incluiría el día siguiente completo.
+        consulta = consulta.where(Comprobante.fecha_emision < datetime.combine(hasta + timedelta(days=1), time.min))
     return list((await db.execute(consulta)).scalars().all())

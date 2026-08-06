@@ -7,6 +7,8 @@ sí fuerza el reproceso.
 
 from __future__ import annotations
 
+from datetime import date, datetime
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,6 +145,34 @@ async def test_comprobante_sin_xml_no_es_pendiente(db: AsyncSession) -> None:
     assert sin_xml.xml_path is None
 
     assert await repo.ids_pendientes(db, empresa.empresa_id) == []
+
+
+async def test_ids_pendientes_no_se_pasa_al_dia_siguiente_en_el_limite_superior(db: AsyncSession) -> None:
+    """`hasta` es inclusivo por día, y **solo** por ese día.
+
+    El filtro se escribía como `fecha_emision <= combine(hasta, datetime.max.time())`, es decir
+    `23:59:59.999999`. `comprobantes.fecha_emision` es `DATETIME` sin fracción de segundo y MySQL
+    redondea los microsegundos de la constante hacia arriba al comparar, así que el filtro
+    incluía el día siguiente completo. La forma correcta es el intervalo semiabierto
+    `< hasta + 1 día`."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    dentro = await factories.crear_comprobante(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="99999999-9999-9999-9999-999999999999",
+        xml_path="11/comprobantes/dentro.xml",
+        fecha_emision=datetime(2026, 7, 31, 23, 59, 59),
+    )
+    await factories.crear_comprobante(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="aaaaaaaa-9999-9999-9999-aaaaaaaaaaaa",
+        xml_path="11/comprobantes/fuera.xml",
+        fecha_emision=datetime(2026, 8, 1, 0, 0, 0),
+    )
+
+    pendientes = await repo.ids_pendientes(db, empresa.empresa_id, desde=date(2026, 7, 1), hasta=date(2026, 7, 31))
+    assert pendientes == [dentro.comprobante_id]
 
 
 async def test_registrar_error_conserva_hijos_de_una_corrida_buena_anterior(db: AsyncSession) -> None:

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.models.cfdi_detalle import CfdiConcepto, ComprobanteDetalle
 from app.models.nomina import NominaPercepcion
 from app.services import normalizacion_lote
-from app.services.normalizacion import DatosComprobante
+from app.services.normalizacion import ETL_VERSION, DatosComprobante, hash_xml
 from tests import factories, fixtures_cfdi
 
 
@@ -133,6 +136,142 @@ async def test_fallo_a_mitad_de_flush_no_envenena_el_resto_del_lote(db: AsyncSes
     assert detalle_bueno.error_normalizacion is None
     conceptos = (await db.scalars(select(CfdiConcepto).where(CfdiConcepto.comprobante_id == bueno))).all()
     assert len(conceptos) > 0  # normalizado de verdad, con hijos en las tablas
+
+
+async def test_comprobante_sin_xml_en_disco_se_omite_y_no_se_marca_con_error(db: AsyncSession) -> None:
+    """Sin `xml_path` el comprobante nunca se descargó: es metadata del SAT y **no hay nada que
+    normalizar**, lo que no es un error.
+
+    Importa porque `ids_pendientes` filtra `xml_path IS NOT NULL` pero `ids_todos` no filtra
+    nada, y `alcance="todos"` es la vía documentada para forzar el reproceso tras subir
+    `ETL_VERSION`: las dos alimentan `normalizar_lote`. Antes, cada comprobante sin XML
+    recibía una fila de `comprobante_detalle` con hash falso (`"0"*64`) y el mensaje "el XML no
+    está en disco" —que suena a corrupción— y se recontaba como `con_error` en cada corrida."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    comprobante = await factories.crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", xml_path=None
+    )
+    # Se guarda el id ANTES: el `rollback()` final de `normalizar_lote` expira los objetos de
+    # la sesión, y leer un atributo expirado desde un contexto síncrono dispara `MissingGreenlet`.
+    cid = comprobante.comprobante_id
+
+    resumen = await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    assert resumen == {"normalizados": 0, "con_error": 0, "omitidos": 1}
+
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is None, "un comprobante sin XML no debe dejar fila de detalle ni marca de error"
+
+
+async def _ganador_escribe_el_detalle(engine: AsyncEngine, comprobante_id: int, xml_hash: str) -> None:
+    """Simula el otro proceso de la carrera: normaliza el comprobante y commitea en su propia
+    sesión, como haría un segundo pre-vuelo concurrente."""
+    async with async_sessionmaker(engine, expire_on_commit=False)() as otra:
+        otra.add(
+            ComprobanteDetalle(
+                comprobante_id=comprobante_id,
+                version="4.0",
+                xml_hash=xml_hash,
+                etl_version=ETL_VERSION,
+                normalizado_at=datetime(2026, 8, 5, 12, 0),
+            )
+        )
+        await otra.commit()
+
+
+async def test_carrera_con_integrity_error_no_marca_un_comprobante_sano(db: AsyncSession, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dos pre-vuelos concurrentes sobre el mismo comprobante —basta un doble clic en "Generar",
+    porque el endpoint responde `202` de inmediato y cada generación arranca su propio
+    pre-vuelo— se pisan en `_upsert_detalle`, que hace SELECT-luego-INSERT sin protección.
+
+    El perdedor caía en el `except`, hacía `rollback()` y registraba el error sobre un
+    comprobante **perfectamente sano**. Y como `xml_hash` y `etl_version` ya coincidían con los
+    del ganador, `necesita_normalizar` devolvía `False` para siempre: la marca de error quedaba
+    permanente y ninguna corrida posterior la limpiaba.
+
+    Aquí el `IntegrityError` es real —PK duplicada de MySQL, no una excepción de mentiras—: el
+    ganador escribe la fila en otra sesión y el perdedor intenta insertar la misma."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    xml = fixtures_cfdi.cfdi_nomina(uuid="10101010-1010-1010-1010-101010101010")
+    cid = await _comprobante_con_xml(db, empresa.empresa_id, "10101010-1010-1010-1010-101010101010", xml, "N")
+    xml_hash = hash_xml(xml)
+
+    async def _pierde_la_carrera(db_: AsyncSession, comprobante_id: int, datos: DatosComprobante, hash_: str) -> None:
+        await _ganador_escribe_el_detalle(engine, comprobante_id, hash_)
+        db_.add(ComprobanteDetalle(comprobante_id=comprobante_id, version="4.0", xml_hash=hash_, etl_version=ETL_VERSION))
+        await db_.flush()  # PK duplicada → IntegrityError real de MySQL (1062)
+
+    monkeypatch.setattr(normalizacion_lote.repo_normalizacion, "escribir", _pierde_la_carrera)
+
+    resumen = await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    assert resumen == {"normalizados": 0, "con_error": 0, "omitidos": 1}
+
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is not None
+    assert detalle.error_normalizacion is None, "el comprobante lo normalizó el otro proceso: no está corrupto"
+    assert detalle.xml_hash == xml_hash
+
+
+async def test_carrera_con_deadlock_de_innodb_no_marca_un_comprobante_sano(db: AsyncSession, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """El desenlace más probable de la carrera no es la PK duplicada sino el deadlock:
+    `_limpiar_hijos` borra 14 tablas por `comprobante_id` mientras la otra transacción inserta.
+
+    Un deadlock de InnoDB no se puede provocar de forma determinista desde una prueba (depende
+    del orden en que el motor elija la víctima), así que se inyecta la excepción exactamente
+    como llega en producción: `asyncmy` mapea 1213 a su `OperationalError(1213, mensaje)`
+    —está en la lista explícita de `asyncmy/errors.pyx`— y SQLAlchemy lo reenvuelve en
+    `sqlalchemy.exc.OperationalError` conservando el original en `.orig`. Lo que se comprueba es
+    la condición que lee `.orig.args[0]`."""
+    from asyncmy.errors import OperationalError as OperationalErrorAsyncmy
+
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    xml = fixtures_cfdi.cfdi_nomina(uuid="20202020-2020-2020-2020-202020202020")
+    cid = await _comprobante_con_xml(db, empresa.empresa_id, "20202020-2020-2020-2020-202020202020", xml, "N")
+
+    async def _deadlock(db_: AsyncSession, comprobante_id: int, datos: DatosComprobante, hash_: str) -> None:
+        await _ganador_escribe_el_detalle(engine, comprobante_id, hash_)
+        raise OperationalError(
+            "DELETE FROM nomina_percepcion WHERE comprobante_id = %s",
+            {},
+            OperationalErrorAsyncmy(1213, "Deadlock found when trying to get lock; try restarting transaction"),
+        )
+
+    monkeypatch.setattr(normalizacion_lote.repo_normalizacion, "escribir", _deadlock)
+
+    resumen = await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    assert resumen == {"normalizados": 0, "con_error": 0, "omitidos": 1}
+
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is not None
+    assert detalle.error_normalizacion is None
+
+
+async def test_integrity_error_que_no_es_carrera_si_registra_error(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    """La otra mitad del hallazgo 6, y la que evita que el arreglo se coma fallos de verdad: un
+    `IntegrityError` que **no** viene de una carrera (aquí una FK violada, no un `comprobante_id`
+    duplicado) deja el comprobante sin normalizar, así que `necesita_normalizar` sigue diciendo
+    `True` y el error sí se registra."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    cid = await _comprobante_con_xml(
+        db,
+        empresa.empresa_id,
+        "30303030-3030-3030-3030-303030303030",
+        fixtures_cfdi.cfdi_nomina(uuid="30303030-3030-3030-3030-303030303030"),
+        "N",
+    )
+
+    async def _fk_violada(db_: AsyncSession, comprobante_id: int, datos: DatosComprobante, hash_: str) -> None:
+        # `comprobante_id` inexistente: viola la FK de `cfdi_concepto` → IntegrityError (1452).
+        db_.add(CfdiConcepto(comprobante_id=-1, num_linea=1, clave_prod_serv="84111505", importe=Decimal("1.00")))
+        await db_.flush()
+
+    monkeypatch.setattr(normalizacion_lote.repo_normalizacion, "escribir", _fk_violada)
+
+    resumen = await normalizacion_lote.normalizar_lote(db, empresa.empresa_id, [cid])
+    assert resumen == {"normalizados": 0, "con_error": 1, "omitidos": 0}
+
+    detalle = await db.scalar(select(ComprobanteDetalle).where(ComprobanteDetalle.comprobante_id == cid))
+    assert detalle is not None
+    assert detalle.error_normalizacion is not None
 
 
 async def test_endpoint_de_reproceso_encola_y_pide_operador(client, db: AsyncSession, monkeypatch) -> None:  # type: ignore[no-untyped-def]
