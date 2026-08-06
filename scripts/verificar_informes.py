@@ -1,9 +1,10 @@
-"""Verificación en vivo de la fase 1 contra los datos reales (spec §13, §14).
+"""Verificación en vivo de los informes de nómina contra los datos reales (spec §13, §14).
 
 Comprueba las 9 identidades de B-00 (fuente: `Hub_CFDI_docs/00-fuentes/especificacion-
 informes-cfdi.md`, sección "B-00 · Definiciones comunes al grupo") sobre los CFDI de
-nómina ya normalizados, y que B-02 produce filas y columnas dinámicas consistentes con
-esos mismos datos.
+nómina ya normalizados, que B-02 produce filas y columnas dinámicas consistentes con esos
+mismos datos, y (desde la fase 2) que **los seis informes del catálogo** —no solo B-02—
+corren sin lanzar, no salen vacíos por error y enmascaran toda columna `sensible=True`.
 
 Las identidades **no se implementan aquí**: viven en `app/informes/identidades_b00.py` y
 `tests/test_identidades_b00.py` las corre en cada pasada de la suite sobre XML sintéticos.
@@ -19,23 +20,38 @@ si alguna falla aquí es un bug de nuestro ETL, nunca un dato malo.
 No imprime CURP, NSS ni cuenta bancaria: son datos personales de personas reales y esto
 se corre en una terminal cuyo historial queda guardado.
 
-Uso: `python scripts/verificar_fase1.py` (dentro del contenedor `api`, o con el `.venv`
+Uso: `python scripts/verificar_informes.py` (dentro del contenedor `api`, o con el `.venv`
 del host apuntando a la misma base). Sale con código 1 si alguna comprobación falla.
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
+import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import openpyxl
+
 from app.db.session import SessionLocal
 from app.informes import b02_conceptos_patron as b02
-from app.informes import identidades_b00
+from app.informes import excel, identidades_b00, registro
+from app.informes.base import ContextoInforme
+from app.services import normalizacion
 
 EMPRESA_ID = 11
+
+_HOJAS_ESPERADAS = {"Datos", "Parámetros", "Banderas", "Diccionario"}
+_MASCARA_RE = re.compile(r"^\*{4}([^*]{4})?$")  # `enmascarar()`: "****" o "****" + últimos 4
+
+# Grano garantizado no vacío cuando hay nóminas normalizadas en el rango: una fila por
+# CFDI (B-01, B-02), por empleado (B-04, B-05) o por (empleado, tipo, clave) de deducción
+# (B-07). B-10 tiene grano de *hallazgo*: cero filas ahí significa "sin hallazgos", un
+# resultado legítimo que no debe tratarse como falla — solo se avisa.
+_CLAVES_CON_FILAS_GARANTIZADAS = {"B-01", "B-02", "B-04", "B-05", "B-07"}
 
 
 async def _verificar_identidades_b00(db: AsyncSession) -> tuple[int, list[str]]:
@@ -110,14 +126,90 @@ async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> li
     return fallas
 
 
+def _parametros_minimos(clave: str) -> dict[str, object]:
+    """Parámetros mínimos —solo lo requerido, todo lo demás con su default declarado,
+    incluido `enmascarar_datos_personales=True`— para ejercitar cada informe del catálogo
+    contra el histórico completo de la empresa."""
+    if clave == "B-05":
+        return {"ejercicio": 2026}
+    return {"fecha_desde": date(2026, 1, 1), "fecha_hasta": date(2026, 12, 31)}
+
+
+async def _verificar_informe_del_catalogo(db: AsyncSession, clave: str, comprobantes_normalizados: int) -> list[str]:
+    """Corre un informe del catálogo end-to-end (consulta + libro de Excel) y comprueba
+    que no lance, que su grano no salga vacío por error, y que ninguna columna declarada
+    `sensible=True` se cuele sin enmascarar al archivo que circula por correo."""
+    definicion = registro.obtener(clave)
+
+    try:
+        p = definicion.Parametros(**_parametros_minimos(clave))
+        resultado = await definicion.consultar(db, EMPRESA_ID, p)
+    except Exception as exc:  # noqa: BLE001 — se reporta cualquier excepción, no se re-lanza
+        return [f"{clave} lanzó al generarse: {type(exc).__name__}: {exc}"]
+
+    fallas: list[str] = []
+    print(f"\n{clave}: {len(resultado.filas)} filas, {len(resultado.columnas)} columnas, {len(resultado.banderas)} banderas")
+
+    if not resultado.filas:
+        mensaje = f"{clave} devolvió 0 filas con {comprobantes_normalizados} CFDI de nómina normalizados en el rango"
+        if clave in _CLAVES_CON_FILAS_GARANTIZADAS and comprobantes_normalizados:
+            fallas.append(mensaje)
+        elif comprobantes_normalizados:
+            print(f"  AVISO: {mensaje} (grano de hallazgo: puede ser un resultado legítimo, no se marca como falla)")
+
+    ctx = ContextoInforme(
+        clave=definicion.CLAVE,
+        nombre=definicion.NOMBRE,
+        usuario="verificacion@script",
+        generado_en=datetime.now(timezone.utc).replace(tzinfo=None),
+        parametros=p.model_dump(mode="json"),
+        etl_version=normalizacion.ETL_VERSION,
+    )
+    libro = openpyxl.load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))
+
+    if set(libro.sheetnames) != _HOJAS_ESPERADAS:
+        fallas.append(f"{clave} no tiene las cuatro hojas esperadas: {libro.sheetnames}")
+        return fallas
+
+    ws = libro["Datos"]
+    columnas_sensibles = [i for i, columna in enumerate(resultado.columnas) if columna.sensible]
+    if columnas_sensibles:
+        for fila in ws.iter_rows(min_row=2, values_only=True):
+            for idx in columnas_sensibles:
+                valor = fila[idx] if idx < len(fila) else None
+                if valor is None or valor == "":
+                    continue
+                if not _MASCARA_RE.match(str(valor)):
+                    fallas.append(
+                        f"{clave}: la columna sensible '{resultado.columnas[idx].titulo}' salió sin enmascarar "
+                        "(¿escribir_libro no recibió enmascarar_datos_personales=True?)"
+                    )
+                    break
+            if fallas:
+                break
+
+    return fallas
+
+
+async def _verificar_catalogo(db: AsyncSession, comprobantes_normalizados: int) -> list[str]:
+    """Recorre los seis informes del catálogo (Task 8, fase 2): el registro es la fuente
+    de verdad de lo que existe, así que un informe nuevo entra a esta comprobación en
+    cuanto se registra en `app.informes.registro`, sin tocar este script."""
+    fallas: list[str] = []
+    for clave in sorted(registro.REGISTRO):
+        fallas.extend(await _verificar_informe_del_catalogo(db, clave, comprobantes_normalizados))
+    return fallas
+
+
 async def main() -> int:
     async with SessionLocal() as db:
         comprobantes_normalizados, fallas_b00 = await _verificar_identidades_b00(db)
         print(f"Identidades de B-00 por CFDI: {identidades_b00.IDENTIDADES_POR_COMPROBANTE}")
 
         fallas_b02 = await _verificar_b02(db, comprobantes_normalizados)
+        fallas_catalogo = await _verificar_catalogo(db, comprobantes_normalizados)
 
-    fallas = fallas_b00 + fallas_b02
+    fallas = fallas_b00 + fallas_b02 + fallas_catalogo
     if fallas:
         print("\nFALLAS:")
         for falla in fallas:

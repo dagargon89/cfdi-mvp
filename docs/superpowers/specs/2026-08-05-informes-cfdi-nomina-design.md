@@ -396,8 +396,9 @@ llamadores:
   "cero fallas" no distingue "todo cuadra" de "no se comprobó nada": un cotejo que no corre no puede
   fallar, así que borrar ocho de las nueve identidades dejaría la suite verde. Un atributo que el XML no
   trae no se compara y no cuenta — la prueba de ese caso asevera su número exacto, uno menos.
-- `scripts/verificar_fase1.py`, **en vivo contra los datos reales, sin que nada entre a git**: los mismos
-  cotejos sobre los CFDI de la empresa 11 tras el reproceso.
+- `scripts/verificar_informes.py` (renombrado desde `verificar_fase1.py` en la fase 2, Task 8, al
+  extenderlo a los seis informes del catálogo), **en vivo contra los datos reales, sin que nada entre
+  a git**: los mismos cotejos sobre los CFDI de la empresa 11 tras el reproceso.
 
 Los informes se prueban comparando valores de celda, no bytes del archivo.
 

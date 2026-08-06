@@ -13,7 +13,8 @@ que tenga **dos** llamadores con una sola implementación:
 - `tests/test_identidades_b00.py`, sobre XML sintéticos que pasan por el ETL completo. Es lo
   que mantiene estas identidades verdes en cada corrida de la suite; ocho informes más se van
   a construir sobre esta capa.
-- `scripts/verificar_fase1.py`, sobre los CFDI reales de la empresa (spec §13, §14).
+- `scripts/verificar_informes.py` (renombrado desde `verificar_fase1.py` en la fase 2, Task 8),
+  sobre los CFDI reales de la empresa (spec §13, §14).
 
 Las nueve, por comprobante:
 

@@ -5888,6 +5888,11 @@ git commit -m "feat(web): agregar seccion de Informes con formulario desde el ca
 Esta tarea no escribe código de producción: comprueba que la fase 1 funciona sobre los datos
 reales de la empresa 11. Es el criterio de cierre del spec §14.
 
+> **Nota (fase 2, Task 8):** este script se renombró a `scripts/verificar_informes.py` al
+> extenderlo a los seis informes del catálogo. Las referencias a `verificar_fase1.py` más abajo
+> son el registro histórico de lo que se ejecutó en esta tarea; el archivo vigente es el
+> renombrado.
+
 **Files:**
 - Create: `scripts/verificar_fase1.py` (script de verificación, no se importa desde `app`)
 

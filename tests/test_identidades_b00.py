@@ -6,7 +6,7 @@ nodos. Un CFDI timbrado por el SAT las cumple por construcción, así que un des
 solo puede ser un nodo que el ETL lee mal — el tipo de bug que en este dominio se descubre
 cuando la autoridad lo señala. Ocho informes más se van a construir sobre esta capa.
 
-Antes vivían únicamente en `scripts/verificar_fase1.py`, fuera de `testpaths`, así que nada
+Antes vivían únicamente en `scripts/verificar_informes.py` (entonces `verificar_fase1.py`), fuera de `testpaths`, así que nada
 las mantenía verdes. Ahora la implementación es una sola (`app/informes/identidades_b00.py`)
 y tiene dos llamadores: este archivo, sobre XML sintéticos que pasan por el ETL completo, y
 el script, sobre los CFDI reales de la empresa.
