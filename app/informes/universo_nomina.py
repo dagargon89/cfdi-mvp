@@ -18,9 +18,20 @@ Lo compartido son tres cosas:
 2. `rango_de_emision()` + `banderas_de_no_normalizables()`: los CFDI de nómina que el
    `join` con `nomina` de `universo()` deja fuera, recuperados por `fecha_emision` (§9 del
    diseño) para que ninguno desaparezca en silencio de la hoja `Datos`.
-3. `banderas_de_estatus()` + `banderas_de_totales_descuadrados()`: las banderas de estatus
-   del comprobante/ETL y de descuadre de los tres totales del encabezado de Nómina, que no
+3. `banderas_de_estatus()`, `banderas_de_totales_descuadrados()` y
+   `banderas_de_gravado_y_exento_descuadrados()`: las banderas de estatus del comprobante/ETL y
+   las de descuadre entre los totales del encabezado de Nómina y la suma de sus nodos, que no
    dependen de cómo cada informe agrupe sus columnas dinámicas.
+
+**`banderas_de_estatus()` la llaman los seis informes del grupo B**, no solo B-01/B-02. Es la
+condición explícita con la que el §11 del diseño acepta la divergencia de R-T1 ("todo
+comprobante incluido que no sea vigente lleva bandera"): B-04, B-05 y B-07 la omitían, así que
+una celda de la matriz de B-04 llena por un CFDI cancelado ante el SAT decía "esa quincena está
+cubierta" sin marca, un hueco de B-07 podía quedar tapado por un CFDI que el SAT ya no reconoce,
+y el acumulado anual de B-05 mezclaba `vigente` con `no_verificado` sin distinguirlos — y como
+la verificación contra el SAT es asíncrona por diseño, `no_verificado` es el estado **normal** de
+un ejercicio recién descargado, no un caso de borde. B-10 sí la omite y lo argumenta en su propio
+docstring (su grano es el hallazgo, no el comprobante).
 """
 
 from __future__ import annotations
@@ -29,14 +40,14 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Literal, Protocol, Sequence
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes.base import Bandera
 from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
-from app.models.nomina import Nomina, NominaReceptor, NominaTotales
+from app.models.nomina import Nomina, NominaPercepcion, NominaReceptor, NominaTotales
 
 TOLERANCIA = Decimal("0.01")
 """Tolerancia de redondeo para comparar un total declarado contra la suma de sus nodos."""
@@ -140,8 +151,16 @@ def rango_de_emision(p: ParametrosUniverso) -> tuple[datetime, datetime]:
     )
 
 
-async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_empresa: str, p: ParametrosUniverso) -> list[Bandera]:
+async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_empresa: str | None, p: ParametrosUniverso) -> list[Bandera]:
     """Los CFDI de nómina que el informe **no puede** presentar, uno por bandera (§9 del diseño).
+
+    **`rfc_empresa=None` desactiva el filtro de emisor**, para el único informe del grupo cuyo
+    universo tampoco lo aplica: B-05 no puede filtrar por `rfc_emisor` porque su regla
+    `MULTI_PATRON` existe precisamente para detectar al empleado que cobra de más de un RFC (ver
+    el docstring de `b05_acumulado_anual`). Si esta consulta filtrara por emisor y el universo de
+    ese informe no, un CFDI de nómina roto de un segundo patrón —el caso que B-05 existe para
+    señalar— desaparecería sin bandera del informe más delicado del catálogo. Los otros cinco
+    informes pasan el RFC de la empresa y el filtro se aplica igual que antes.
 
     `universo()` hace `join` con `nomina`: sin fila en `nomina` el comprobante queda fuera
     de la hoja `Datos`, y ahí se acaba cualquier rastro de que existió. Esta segunda consulta
@@ -168,7 +187,6 @@ async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_em
         .outerjoin(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
         .where(
             Comprobante.empresa_id == empresa_id,
-            Comprobante.rfc_emisor == rfc_empresa,
             Comprobante.tipo_comprobante == "N",
             Nomina.comprobante_id.is_(None),
             Comprobante.fecha_emision >= inicio,
@@ -176,6 +194,8 @@ async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_em
         )
         .order_by(Comprobante.comprobante_id)
     )
+    if rfc_empresa is not None:
+        consulta = consulta.where(Comprobante.rfc_emisor == rfc_empresa)
     if not p.incluir_cancelados:
         consulta = consulta.where(Comprobante.estatus != EstatusCfdi.CANCELADO)
 
@@ -282,10 +302,16 @@ def banderas_de_estatus(comprobante: Comprobante, detalle: ComprobanteDetalle | 
 
 
 def banderas_de_totales_descuadrados(ambito: str, identidades: Sequence[tuple[str, Decimal | None, Decimal]]) -> list[Bandera]:
-    """`TOTALES_DESCUADRADOS`: uno de los tres totales que declara el encabezado de Nómina
-    (`total_percepciones`, `total_deducciones`, `total_otros_pagos`) no coincide con la suma
-    de sus nodos, fuera de `TOLERANCIA`. `identidades` es `(nombre, declarado, calculado)`;
-    un `declarado is None` no se compara (ausencia no es descuadre)."""
+    """`TOTALES_DESCUADRADOS`: un total que declara el encabezado del complemento de Nómina no
+    coincide con la suma de sus nodos, fuera de `TOLERANCIA`. `identidades` es
+    `(nombre, declarado, calculado)`; un `declarado is None` no se compara (ausencia no es
+    descuadre).
+
+    Los llamadores cotejan con ella `total_percepciones`, `total_deducciones`,
+    `total_otros_pagos` y `total_impuestos_retenidos` (identidades #1, #2, #3 y #9 de B-00);
+    `total_gravado` y `total_exento` (#4 y #5) las cotejan a través de
+    `banderas_de_gravado_y_exento_descuadrados`, que trae de la BD los datos que hacen falta y
+    termina llamando aquí."""
     banderas: list[Bandera] = []
     for nombre, declarado, calculado in identidades:
         if declarado is not None and abs(declarado - calculado) > TOLERANCIA:
@@ -298,3 +324,77 @@ def banderas_de_totales_descuadrados(ambito: str, identidades: Sequence[tuple[st
                 )
             )
     return banderas
+
+
+async def banderas_de_gravado_y_exento_descuadrados(db: AsyncSession, ids: Sequence[int]) -> list[Bandera]:
+    """Identidades **#4 y #5 de B-00** (`nomina_totales.total_gravado` = Σ `importe_gravado` de
+    las percepciones, y lo análogo para el exento), como banderas `TOTALES_DESCUADRADOS` al
+    generar cualquier informe.
+
+    **Por qué hacía falta, y por qué es una sola implementación compartida.** Estas dos
+    identidades solo corrían en `tests/test_identidades_b00.py` y en
+    `scripts/verificar_informes.py`; ningún informe las cotejaba al generarse. El efecto es que
+    "Total gravado" y "Total exento" significan dos cosas distintas según el informe —B-01/B-02
+    los reportan **del encabezado** (`nomina_totales`), B-05 los **recalcula de los nodos** para
+    la constancia de percepciones— y con un CFDI descuadrado los dos informes daban cifras
+    distintas del mismo concepto para el mismo periodo **sin una sola advertencia**. Peor dentro
+    de una misma fila de B-05: "Total percepciones" viene del encabezado y "Total gravado +
+    Total exento" de los nodos, así que la fila no cuadraba consigo misma en silencio. Las dos
+    lecturas son correctas para su propósito y no se cambian; lo que se corrige es que el
+    descuadre que las separa ahora se reporta.
+
+    Una sola consulta agregada para todo el universo (regla 11: cero N+1). El `join` con
+    `nomina_totales` es interno a propósito: sin fila ahí no hay total declarado que cotejar, y
+    la ausencia de `nomina_totales` ya la reporta `identidades_b00.verificar` como falla del ETL.
+    Una percepción ausente deja el `SUM` en `NULL`, que se compara como cero (una nómina que
+    declara gravado y no trae percepciones **sí** es un descuadre real).
+    """
+    if not ids:
+        return []
+    consulta = (
+        select(
+            Comprobante.uuid,
+            NominaTotales.total_gravado,
+            NominaTotales.total_exento,
+            func.sum(NominaPercepcion.importe_gravado).label("gravado"),
+            func.sum(NominaPercepcion.importe_exento).label("exento"),
+        )
+        .join(NominaTotales, NominaTotales.comprobante_id == Comprobante.comprobante_id)
+        .outerjoin(NominaPercepcion, NominaPercepcion.comprobante_id == Comprobante.comprobante_id)
+        .where(Comprobante.comprobante_id.in_(ids))
+        # Las cuatro columnas no agregadas van en el `GROUP BY` aunque dependan funcionalmente
+        # del `comprobante_id`: `ONLY_FULL_GROUP_BY` (activo por defecto en MySQL 8) no siempre
+        # deduce la dependencia a través de un `join`.
+        .group_by(Comprobante.comprobante_id, Comprobante.uuid, NominaTotales.total_gravado, NominaTotales.total_exento)
+        .order_by(Comprobante.comprobante_id)
+    )
+
+    banderas: list[Bandera] = []
+    for uuid_cfdi, total_gravado, total_exento, gravado, exento in (await db.execute(consulta)).all():
+        banderas.extend(
+            banderas_de_totales_descuadrados(
+                f"uuid:{uuid_cfdi}",
+                (
+                    ("total_gravado", _dec_o_none(total_gravado), _dec(gravado)),
+                    ("total_exento", _dec_o_none(total_exento), _dec(exento)),
+                ),
+            )
+        )
+    return banderas
+
+
+def _dec(valor: object) -> Decimal:
+    """`func.sum` puede devolver `Decimal`, `float` o `None` según el dialecto; nunca se compara
+    en binario (mismo patrón que `identidades_b00._dec`). `None` es cero: sin percepciones, la
+    suma de nodos es cero."""
+    if valor is None:
+        return Decimal("0")
+    return valor if isinstance(valor, Decimal) else Decimal(str(valor))
+
+
+def _dec_o_none(valor: object) -> Decimal | None:
+    """Como `_dec`, pero conserva el `None` de un total **declarado** ausente: ahí sí importa la
+    distinción, porque `banderas_de_totales_descuadrados` no compara lo que no se declaró."""
+    if valor is None:
+        return None
+    return valor if isinstance(valor, Decimal) else Decimal(str(valor))

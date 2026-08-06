@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b05_acumulado_anual as b05
-from app.models.cfdi_detalle import CfdiRelacionado
+from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
 from app.models.enums import EstatusCfdi
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
@@ -212,3 +212,174 @@ async def test_curp_sensible_y_ejercicio_vacio(db: AsyncSession) -> None:
     eid = await _empresa(db)
     vacio = await b05.consultar(db, eid, b05.Parametros(ejercicio=2020))
     assert vacio.filas == [] and vacio.aviso is not None
+
+
+async def _n_sin_nomina(db: AsyncSession, eid: int, *, uuid: str, rfc_emisor: str = "CHL960913IX9") -> None:
+    """Un CFDI tipo `N` con detalle y `error_normalizacion`, **sin fila en `nomina`**: el que el
+    `join` interno del universo borra del informe. El XML se corrompió en disco o se perdió."""
+    comprobante = await factories.crear_comprobante(
+        db,
+        empresa_id=eid,
+        uuid=uuid,
+        rfc_emisor=rfc_emisor,
+        tipo_comprobante="N",
+        fecha_emision=datetime(2026, 7, 1, 9, 0),
+    )
+    db.add(
+        ComprobanteDetalle(
+            comprobante_id=comprobante.comprobante_id,
+            version="4.0",
+            xml_hash="f" * 64,
+            etl_version=1,
+            error_normalizacion="XMLSyntaxError: Premature end of data in tag Comprobante",
+        )
+    )
+    await db.commit()
+
+
+async def test_un_cfdi_que_el_etl_no_pudo_leer_no_desaparece_sin_bandera(db: AsyncSession) -> None:
+    """**El segundo hallazgo Critical de la revisión final.** B-05 era el único informe del grupo
+    que no llamaba a `universo_nomina.banderas_de_no_normalizables`: un CFDI de nómina del
+    ejercicio cuyo XML el ETL no pudo leer quedaba fuera del `join` con `nomina` y **no dejaba
+    ningún rastro**. El acumulado del empleado salía corto por ese recibo y el patrón emitía la
+    constancia de percepciones —el documento con el que el trabajador declara ante el SAT— con una
+    quincena de menos, creyendo que estaba completa."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30))
+    await _n_sin_nomina(db, eid, uuid="bb000002-0000-0000-0000-000000000002")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    banderas = [b for b in resultado.banderas if b.clave == "SIN_NORMALIZAR"]
+    assert len(banderas) == 1, [b.clave for b in resultado.banderas]
+    assert banderas[0].ambito == "uuid:bb000002-0000-0000-0000-000000000002"
+    assert banderas[0].severidad == "alta"
+    # La fila del CFDI sano sí sale: la bandera avisa, no borra nada.
+    assert len(resultado.filas) == 1
+
+
+async def test_las_banderas_de_no_normalizables_no_filtran_por_emisor(db: AsyncSession) -> None:
+    """El universo de B-05 no filtra por `rfc_emisor` (B-05.R3 depende de ver todos los patrones),
+    así que su consulta de banderas tampoco puede filtrarlo: un CFDI roto de un **segundo** patrón
+    es justo el caso que este informe existe para señalar, y desaparecería sin bandera."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000003-0000-0000-0000-000000000003",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30))
+    await _n_sin_nomina(db, eid, uuid="bb000004-0000-0000-0000-000000000004", rfc_emisor="XAXX010101000")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    ambitos = {b.ambito for b in resultado.banderas if b.clave == "SIN_NORMALIZAR"}
+    assert ambitos == {"uuid:bb000004-0000-0000-0000-000000000004"}
+
+
+async def test_cancelado_excluido_lleva_su_propia_clave(db: AsyncSession) -> None:
+    """Con `incluir_cancelados=False` el cancelado huérfano NO suma, y eso se reporta con
+    `CANCELADO_EXCLUIDO` — **no** con `COMPROBANTE_CANCELADO`, que en B-01/B-02 significa lo
+    contrario ("se incluyó y sus importes suman"). Antes de la revisión final las dos lecturas
+    compartían clave y quien filtrara la hoja `Banderas` por ella en B-02 y en B-05 del mismo
+    periodo sacaba conclusiones opuestas del mismo dato."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000005-0000-0000-0000-000000000005",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          estatus=EstatusCfdi.CANCELADO,
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                          total_percepciones="8000.00", total="8000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    claves = [b.clave for b in resultado.banderas]
+    assert "CANCELADO_EXCLUIDO" in claves
+    assert "COMPROBANTE_CANCELADO" not in claves
+    bandera = next(b for b in resultado.banderas if b.clave == "CANCELADO_EXCLUIDO")
+    assert bandera.severidad == "alta"
+    assert resultado.filas == []  # no hay nada que acumular
+
+
+async def test_cancelado_incluido_suma_y_lleva_la_clave_compartida(db: AsyncSession) -> None:
+    """La rama que **no tenía ninguna prueba** (ninguna prueba de B-05 pasaba
+    `incluir_cancelados=True`) y la peligrosa de las dos: el cancelado entra al acumulado, así que
+    infla el ingreso anual del empleado en su constancia. Antes no emitía **ninguna** bandera."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000006-0000-0000-0000-000000000006",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          estatus=EstatusCfdi.CANCELADO,
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                          total_percepciones="8000.00", total="8000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026, incluir_cancelados=True))
+    assert len(resultado.filas) == 1
+    assert _fila(resultado, "Total percepciones") == Decimal("8000.00")
+    bandera = next(b for b in resultado.banderas if b.clave == "COMPROBANTE_CANCELADO")
+    assert bandera.ambito == "uuid:bb000006-0000-0000-0000-000000000006"
+    assert bandera.severidad == "alta"
+    assert "suman" in bandera.mensaje
+    assert not [b for b in resultado.banderas if b.clave == "CANCELADO_EXCLUIDO"]
+
+
+async def test_no_verificado_entra_al_acumulado_con_bandera(db: AsyncSession) -> None:
+    """§11 del diseño: la divergencia de R-T1 se acepta **con la condición** de que todo
+    comprobante incluido que no sea vigente lleve bandera. B-05 no la cumplía y no tiene columna
+    de estatus, así que el acumulado mezclaba `vigente` y `no_verificado` sin distinguirlos — y
+    como la verificación contra el SAT es asíncrona por diseño, ese es el estado **normal** de un
+    ejercicio recién descargado, no un caso de borde."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000007-0000-0000-0000-000000000007",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          estatus=EstatusCfdi.NO_VERIFICADO)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000008-0000-0000-0000-000000000008",
+                          fecha_pago=date(2026, 7, 15), fecha_final_pago=date(2026, 7, 15),
+                          estatus=EstatusCfdi.VIGENTE)
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    ambitos = {b.ambito for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO"}
+    # Solo el no verificado: un vigente no lleva bandera de estatus.
+    assert ambitos == {"uuid:bb000007-0000-0000-0000-000000000007"}
+    assert next(b for b in resultado.banderas if b.clave == "ESTATUS_NO_VERIFICADO").severidad == "media"
+
+
+async def test_gravado_y_exento_descuadrados_emiten_bandera(db: AsyncSession) -> None:
+    """Identidades #4 y #5 de B-00, cotejadas **al generar el informe** y no solo en las pruebas.
+
+    Este informe recalcula gravado y exento de los nodos (correcto para una constancia) mientras
+    B-01/B-02 reportan lo que declara el encabezado: con un CFDI descuadrado los dos daban cifras
+    distintas del mismo concepto para el mismo periodo sin que ninguno avisara, y dentro de esta
+    misma fila "Total percepciones" (encabezado) no cuadra con gravado + exento (nodos)."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb000009-0000-0000-0000-000000000009",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "500.00")],
+                          total_percepciones="8500.00", total="8500.00",
+                          total_gravado="9999.99", total_exento="1111.11")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    descuadres = [b for b in resultado.banderas if b.clave == "TOTALES_DESCUADRADOS"]
+    mensajes = " | ".join(b.mensaje for b in descuadres)
+    assert "total_gravado" in mensajes, [b.mensaje for b in resultado.banderas]
+    assert "total_exento" in mensajes, [b.mensaje for b in resultado.banderas]
+    assert all(b.severidad == "alta" and b.ambito == "uuid:bb000009-0000-0000-0000-000000000009" for b in descuadres)
+
+
+async def test_gravado_y_exento_cuadrados_no_emiten_bandera(db: AsyncSession) -> None:
+    """La otra mitad: sin ella, una comparación invertida pasaría la prueba de arriba igual."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb00000a-0000-0000-0000-00000000000a",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "500.00")],
+                          total_percepciones="8500.00", total="8500.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert [b for b in resultado.banderas if b.clave == "TOTALES_DESCUADRADOS"] == []
+
+
+async def test_nombre_empleado_es_del_trabajador_no_del_patron(db: AsyncSession) -> None:
+    """La columna "Nombre empleado" sale de `comprobante_detalle.nombre_receptor`, no de
+    `comprobante.razon_social_emisor` (que es el nombre de la EMPRESA). B-05 ya lo hacía bien;
+    esta prueba lo fija, porque hasta la revisión final **ninguna** prueba del proyecto miraba esa
+    columna en ningún informe — y por eso B-01/B-02 llevaban el nombre del patrón en todas sus
+    filas sin que nadie lo notara."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="bb00000b-0000-0000-0000-00000000000b",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          nombre_receptor="JUANA INVENTADA DE PRUEBA")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Nombre empleado") == "JUANA INVENTADA DE PRUEBA"

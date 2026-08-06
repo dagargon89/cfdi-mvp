@@ -43,6 +43,20 @@ de esta tarea lo confirmó de forma empírica: desactivar R1 hace fallar la prue
 `no_verificado` (importe duplicado) pero NO la de `cancelado` (la salva el otro filtro) — el
 contraste es la evidencia de que cada prueba aísla la defensa que dice proteger.
 
+**Semántica de las banderas de cancelación: la clave compartida significa lo mismo aquí que en
+B-01/B-02.** Corrección de la revisión final. Antes este módulo usaba `COMPROBANTE_CANCELADO`
+para decir "se **excluyó** del acumulado", mientras que `universo_nomina.banderas_de_estatus`
+—la que emiten B-01 y B-02— la usa para decir lo contrario: "se **incluyó** y sus importes
+suman". Quien filtrara la hoja `Banderas` por esa clave en B-02 y en B-05 del mismo periodo
+sacaba conclusiones opuestas del mismo dato. Y peor: con `incluir_cancelados=True` este informe
+metía el cancelado al acumulado **sin emitir ninguna bandera**, así que un CFDI cancelado y no
+sustituido inflaba el ingreso anual del empleado en su constancia sin una sola advertencia. Ahora:
+
+- `CANCELADO_EXCLUIDO` (alta) — cancelado, no sustituido, `incluir_cancelados=False`: **no** suma.
+- `COMPROBANTE_CANCELADO` (alta, vía `universo_nomina.banderas_de_estatus`) — cancelado incluido
+  con `incluir_cancelados=True`: **sí** suma, exactamente como en B-01/B-02.
+- `CFDI_SUSTITUIDO` (baja) — excluido por B-05.R1, independientemente del parámetro.
+
 **B-05.R3 — Multipatrón.** Si el mismo `rfc_receptor` aparece con dos `rfc_emisor` distintos
 en el ejercicio (después de resolver R1), el cálculo anual es incompleto por construcción:
 el patrón que genera este informe solo ve una parte de los ingresos del empleado. Se emite
@@ -62,10 +76,10 @@ su propia consulta, acotada por `empresa_id` y por **ejercicio** (`YEAR(fecha_pa
 **Identidad del empleado: del CFDI más reciente, y con el nombre correcto.** Los campos de
 identidad (columna 2) salen del CFDI con `fecha_pago` máxima del ejercicio, no del primero:
 si el empleado cambió de puesto o departamento a media año, interesa su último estado. El
-nombre se toma de `comprobante_detalle.nombre_receptor` — a diferencia de B-01/B-02, que por
-no tener otra fuente usan `comprobante.razon_social_emisor` (la razón social del **emisor**,
-no del empleado) con una etiqueta "Nombre empleado" que promete algo que no es (defecto que
-B-04 ya señaló y evitó omitiendo la columna). Aquí sí existe el campo correcto y se usa.
+nombre se toma de `comprobante_detalle.nombre_receptor`, el campo correcto. B-01/B-02 usaban
+`comprobante.razon_social_emisor` (la razón social del **emisor**, no del empleado) bajo una
+etiqueta "Nombre empleado" que prometía algo que no era; la revisión final de la fase 2 los
+corrigió, así que los seis informes del grupo B usan hoy el mismo campo.
 
 **SBC y SDI son promedios ponderados por días pagados**, no promedios simples
 (`Σ(valor × días) / Σ días`, con guarda de división por cero): un periodo de 5 días pesa
@@ -77,6 +91,14 @@ se suma `NominaPercepcion.importe_gravado`/`importe_exento` directamente — mis
 `app.informes.identidades_b00`: es lo que se puede verificar contra los nodos, y una constancia
 fiscal no debe heredar sin cotejar un descuadre del encabezado que la identidad B-00 #4/#5 ya
 sabe detectar.
+
+**Y ese descuadre ahora se reporta al generar el informe**, no solo en las pruebas
+(`universo_nomina.banderas_de_gravado_y_exento_descuadrados`, corrección de la revisión final).
+Las dos lecturas —encabezado en B-01/B-02, nodos aquí— son correctas cada una para su propósito y
+no se cambian, pero con un CFDI descuadrado daban cifras distintas del mismo concepto para el
+mismo periodo sin advertencia; y dentro de una misma fila de este informe "Total percepciones"
+viene del encabezado y "Total gravado"/"Total exento" de los nodos, así que la fila no cuadraba
+consigo misma en silencio.
 
 **Alcance.** Se implementan las columnas 1–10 y 12–23 del documento fuente. La columna 11
 ("Gravado ordinario") necesita la marca `es_ingreso_ordinario` de una tabla de configuración
@@ -94,12 +116,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.informes import universo_nomina
 from app.informes.base import Bandera, Columna, ResultadoInforme
 from app.informes.identidades_b00 import CLAVE_TIPO_DEDUCCION_ISR
 from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
@@ -155,9 +178,11 @@ class Parametros(BaseModel):
         False,
         description=(
             "Un CFDI cancelado que no fue sustituido (B-05.R1) es un recibo huérfano: no representa "
-            "un pago que subsista. Por defecto se excluye del acumulado; con este parámetro en True "
-            "se incluye, marcado con `COMPROBANTE_CANCELADO`. Los cancelados que SÍ fueron sustituidos "
-            "se excluyen siempre, sin importar este parámetro (ver B-05.R1 en el docstring del módulo)."
+            "un pago que subsista. Por defecto se excluye del acumulado, marcado con `CANCELADO_EXCLUIDO`; "
+            "con este parámetro en True se incluye y sus importes suman, marcado con `COMPROBANTE_CANCELADO` "
+            "—la misma clave y el mismo significado que en B-01/B-02. Los cancelados que SÍ fueron "
+            "sustituidos se excluyen siempre, sin importar este parámetro (ver B-05.R1 en el docstring "
+            "del módulo)."
         ),
     )
     enmascarar_datos_personales: bool = Field(
@@ -210,6 +235,33 @@ _COLUMNAS: tuple[tuple[str, str, bool], ...] = _COLUMNAS_UNO_A_DIEZ + _COLUMNAS_
 
 def _columnas() -> list[Columna]:
     return [Columna(titulo=titulo, tipo=tipo, sensible=sensible) for titulo, tipo, sensible in _COLUMNAS]  # type: ignore[arg-type]
+
+
+@dataclass(slots=True)
+class _ParametrosUniverso:
+    """Adaptador a `universo_nomina.ParametrosUniverso` para poder reusar
+    `banderas_de_no_normalizables` (§9 del diseño) desde un informe cuyo grano es el
+    **ejercicio**, no un rango de fechas.
+
+    Traduce `ejercicio` al rango `[1 de enero, 31 de diciembre]` de ese año, que es el mismo
+    universo que la consulta principal acota con `YEAR(fecha_pago) = ejercicio`, y fija
+    `tipo_nomina="AMBOS"` (B-05 no expone ese filtro: el acumulado anual es de todo lo cobrado).
+    El RFC del emisor **no** viaja aquí: se le pasa `None` a `banderas_de_no_normalizables` para
+    que tampoco filtre por emisor, igual que la consulta principal de este informe (ver el
+    docstring del módulo sobre B-05.R3).
+
+    **Por qué B-05 no podía seguir sin estas banderas.** Era el único informe del grupo que no
+    las emitía: los otros cinco reportan con `SIN_NORMALIZAR`/`COMPLEMENTO_AUSENTE` el CFDI de
+    nómina que el `join` con `nomina` deja fuera de la hoja `Datos`. En B-05 ese recibo
+    desaparecía sin rastro y el acumulado del empleado salía corto por él, así que el patrón
+    emitía la **constancia de percepciones** —el documento con el que el trabajador declara ante
+    el SAT— con una quincena de menos, creyendo que estaba completa. El §9 del diseño lo exige
+    para todo informe del grupo B, y en este es donde más cuesta callarlo."""
+
+    fecha_desde: date
+    fecha_hasta: date
+    incluir_cancelados: bool
+    tipo_nomina: Literal["O", "E", "AMBOS"] = "AMBOS"
 
 
 def _a_decimal(valor: Decimal | float | None) -> Decimal:
@@ -361,8 +413,25 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         ).all()
     )
 
+    # §9 del diseño: los CFDI de nómina que el `join` con `nomina` deja fuera de la hoja `Datos`
+    # se reportan por bandera para que ninguno desaparezca en silencio. Se resuelve ANTES del
+    # retorno temprano (mismo criterio que los otros cinco informes del grupo): si el ETL falló
+    # en TODOS los CFDI del ejercicio, la hoja Datos sale vacía y estas banderas son el único
+    # rastro de que había nómina que acumular. `rfc_empresa=None`: sin filtro de emisor, igual
+    # que la consulta de arriba (ver `_ParametrosUniverso`).
+    p_universo = _ParametrosUniverso(
+        fecha_desde=date(p.ejercicio, 1, 1),
+        fecha_hasta=date(p.ejercicio, 12, 31),
+        incluir_cancelados=p.incluir_cancelados,
+    )
+    banderas_fuera = await universo_nomina.banderas_de_no_normalizables(db, empresa_id, None, p_universo)
+
     if not filas_universo:
-        return ResultadoInforme(columnas=_columnas(), aviso=f"Sin CFDI de nómina en el ejercicio {p.ejercicio}.")
+        return ResultadoInforme(
+            columnas=_columnas(),
+            banderas=banderas_fuera,
+            aviso=f"Sin CFDI de nómina en el ejercicio {p.ejercicio}.",
+        )
 
     ids_universo = [fila[0].comprobante_id for fila in filas_universo]
 
@@ -371,7 +440,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # estatus del sustituido todavía no refleja la cancelación).
     sustituidos = await _sustituidos(db, ids_universo)
 
-    banderas: list[Bandera] = []
+    banderas: list[Bandera] = list(banderas_fuera)
     filas_resueltas: list[Any] = []
     for fila in filas_universo:
         comprobante = fila[0]
@@ -390,14 +459,19 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             )
             continue
         if comprobante.estatus == EstatusCfdi.CANCELADO and not p.incluir_cancelados:
+            # `CANCELADO_EXCLUIDO`, no `COMPROBANTE_CANCELADO`: la clave compartida significa lo
+            # contrario (ver el bloque "Semántica de las banderas de cancelación" en el docstring
+            # del módulo). Aquí el CFDI **no** suma; cuando sí suma, la bandera la emite
+            # `universo_nomina.banderas_de_estatus` más abajo con la clave compartida.
             banderas.append(
                 Bandera(
-                    clave="COMPROBANTE_CANCELADO",
+                    clave="CANCELADO_EXCLUIDO",
                     severidad="alta",
                     ambito=f"uuid:{comprobante.uuid}",
                     mensaje=(
                         "El CFDI está cancelado ante el SAT y no fue sustituido por otro; se excluyó "
-                        "del acumulado porque `incluir_cancelados=False`. No representa un pago vigente."
+                        "del acumulado porque `incluir_cancelados=False`. No representa un pago vigente, "
+                        "así que sus importes NO suman en este informe."
                     ),
                 )
             )
@@ -413,6 +487,11 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     ids_resueltos = [fila[0].comprobante_id for fila in filas_resueltas]
     sumas_por_cid = await _sumas_por_comprobante(db, ids_resueltos)
+    # Identidades #4 y #5 de B-00 sobre lo que SÍ entra al acumulado: sin ellas, una fila de este
+    # informe podía no cuadrar consigo misma en silencio ("Total percepciones" viene del
+    # encabezado y "Total gravado"/"Total exento" de los nodos), y diferir de B-01/B-02 para el
+    # mismo periodo sin aviso. Ver `universo_nomina.banderas_de_gravado_y_exento_descuadrados`.
+    banderas.extend(await universo_nomina.banderas_de_gravado_y_exento_descuadrados(db, ids_resueltos))
 
     acumuladores: dict[str, _Acumulador] = {}
     identidad: dict[str, tuple[str | None, str | None, str | None, str | None, str | None]] = {}
@@ -421,6 +500,14 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         rfc = comprobante.rfc_receptor
         acc = acumuladores.setdefault(rfc, _Acumulador(uuids=set()))
         sumas = sumas_por_cid.get(comprobante.comprobante_id, {})
+
+        # `ESTATUS_NO_VERIFICADO` / `COMPROBANTE_CANCELADO` / `DATOS_DE_CORRIDA_ANTERIOR` sobre lo
+        # que SÍ entra al acumulado: es la condición con la que el §11 del diseño acepta la
+        # divergencia de R-T1 ("todo comprobante incluido que no sea vigente lleva bandera"), y
+        # este informe no la cumplía. Sin ella, un cancelado con `incluir_cancelados=True` inflaba
+        # el ingreso anual del empleado en su constancia de percepciones sin una sola advertencia,
+        # y el acumulado mezclaba `vigente` con `no_verificado` sin distinguirlos.
+        banderas.extend(universo_nomina.banderas_de_estatus(comprobante, detalle))
 
         acc.uuids.add(comprobante.uuid)
         acc.rfc_emisores.add(comprobante.rfc_emisor)
