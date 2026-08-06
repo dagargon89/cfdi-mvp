@@ -47,6 +47,40 @@ _LONGITUDES_CUENTA_VALIDAS = frozenset({10, 11, 16, 18})
 # componente: "P" sola no es una duración válida.
 _PATRON_DURACION_ISO = re.compile(r"^P(?=\d)(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?$")
 
+# Los mismos dos patrones de arriba, pero buscados **embebidos** en un texto cualquiera y no
+# como la totalidad del valor: es lo que hace falta para auditar que una celda que NO está
+# declarada `sensible=True` no traiga un dato personal completo dentro de una frase (ver
+# `dato_personal_en_texto`). Las guardas `(?<!...)`/`(?!...)` exigen que la coincidencia no sea
+# un trozo de una cadena alfanumérica más larga: sin ellas, los 12 dígitos del último segmento
+# de un UUID contendrían once dígitos seguidos y se reportarían como NSS.
+_PATRON_CURP_EMBEBIDA = re.compile(r"(?<![A-Z0-9])[A-Z]{4}[0-9]{6}[HM][A-Z]{5}[A-Z0-9][0-9](?![A-Z0-9])")
+_PATRON_NSS_EMBEBIDO = re.compile(r"(?<![0-9])[0-9]{11}(?![0-9])")
+
+
+def dato_personal_en_texto(texto: object) -> str | None:
+    """`"CURP"`, `"NSS"` o `None`: qué tipo de dato personal completo aparece **dentro** de un
+    texto arbitrario.
+
+    Existe para auditar el enmascaramiento por el lado que el mecanismo no cubre. El motor
+    (`app.informes.excel.escribir_libro`) enmascara las columnas que un informe declara
+    `sensible=True`, y `scripts/verificar_informes.py` comprobaba justamente eso: que esas
+    columnas salieran enmascaradas. Lo que nadie comprobaba es lo contrario — que una columna
+    **no** sensible no traiga el dato personal interpolado en una frase, que es exactamente
+    cómo B-10 filtraba CURP y NSS completos en su columna "Descripción del hallazgo" con el
+    enmascaramiento activado. Verificar el mecanismo no es verificar el resultado.
+
+    **Devuelve el tipo, nunca el valor.** Quien la llama reporta el hallazgo en una terminal
+    (cuyo historial queda guardado) o en la salida de una prueba; imprimir el dato que se está
+    denunciando como fuga sería la misma fuga.
+    """
+    if not isinstance(texto, str):
+        return None
+    if _PATRON_CURP_EMBEBIDA.search(texto):
+        return "CURP"
+    if _PATRON_NSS_EMBEBIDO.search(texto):
+        return "NSS"
+    return None
+
 _DIAS_POR_ANIO = 365
 """Aproximación deliberada (ver `antiguedad_iso_a_dias`): un año calendario real tiene 365
 o 366 días según sea bisiesto, pero la duración ISO 8601 del atributo `@Antigüedad` no dice

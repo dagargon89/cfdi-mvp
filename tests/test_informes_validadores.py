@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from app.informes import validadores as v
@@ -62,3 +64,29 @@ def test_antiguedad_iso_a_dias() -> None:
     assert v.antiguedad_iso_a_dias("P10D") == 10
     assert v.antiguedad_iso_a_dias(None) is None
     assert v.antiguedad_iso_a_dias("663 semanas") is None
+
+
+def test_dato_personal_en_texto_detecta_curp_y_nss_embebidos() -> None:
+    """Auditoría del enmascaramiento por el lado que el mecanismo no cubre: un dato personal
+    completo dentro de una frase, en una columna que no está declarada `sensible=True`. Es
+    exactamente cómo B-10 filtraba CURP y NSS con `enmascarar_datos_personales=True`."""
+    assert v.dato_personal_en_texto("La CURP 'VECJ880326HDFLNS09' también aparece con otro RFC.") == "CURP"
+    assert v.dato_personal_en_texto("VECJ880326HDFLNS09") == "CURP"
+    assert v.dato_personal_en_texto("El NSS '12345678903' no cumple el dígito verificador.") == "NSS"
+    # Devuelve el TIPO, nunca el valor: quien la llama imprime el resultado en una terminal.
+    assert v.dato_personal_en_texto("VECJ880326HDFLNS09") not in {"VECJ880326HDFLNS09", None}
+
+
+def test_dato_personal_en_texto_no_marca_lo_que_no_lo_es() -> None:
+    """Los falsos positivos importan tanto como los negativos: una comprobación que grita con
+    cualquier celda se desactiva, y entonces deja de proteger."""
+    assert v.dato_personal_en_texto(None) is None
+    assert v.dato_personal_en_texto("") is None
+    assert v.dato_personal_en_texto("****NS09") is None  # ya enmascarada por el motor
+    assert v.dato_personal_en_texto("****2101") is None
+    assert v.dato_personal_en_texto("VECJ880326XXX") is None  # RFC, 13 caracteres
+    assert v.dato_personal_en_texto("JUANA INVENTADA DE PRUEBA") is None
+    assert v.dato_personal_en_texto(Decimal("8759.70")) is None  # no es `str`
+    # Un UUID con el último segmento todo numérico tiene 12 dígitos seguidos: las guardas de
+    # frontera del patrón evitan que se reporte como un NSS de 11.
+    assert v.dato_personal_en_texto("11111111-1111-1111-1111-111111111111") is None

@@ -4,7 +4,15 @@ Comprueba las 9 identidades de B-00 (fuente: `Hub_CFDI_docs/00-fuentes/especific
 informes-cfdi.md`, sección "B-00 · Definiciones comunes al grupo") sobre los CFDI de
 nómina ya normalizados, que B-02 produce filas y columnas dinámicas consistentes con esos
 mismos datos, y (desde la fase 2) que **los seis informes del catálogo** —no solo B-02—
-corren sin lanzar, no salen vacíos por error y enmascaran toda columna `sensible=True`.
+corren sin lanzar, no salen vacíos por error, enmascaran toda columna `sensible=True` y **no
+dejan ninguna CURP ni ningún NSS completos en ninguna celda de la hoja `Datos`**.
+
+Esa última comprobación se agregó en la revisión final de la fase 2 y es la razón por la que
+este script no vio la fuga más grave del catálogo: comprobaba el **mecanismo** (que las columnas
+declaradas `sensible=True` salieran enmascaradas) y nunca el **resultado** (que las columnas no
+sensibles no trajeran el dato personal dentro de una frase). B-10 interpolaba la CURP y el NSS en
+su columna "Descripción del hallazgo" —no sensible, y que no puede serlo sin volverse ilegible—,
+así que 6 de 7 filas salían con el dato completo con `enmascarar_datos_personales=True`.
 
 Las identidades **no se implementan aquí**: viven en `app/informes/identidades_b00.py` y
 `tests/test_identidades_b00.py` las corre en cada pasada de la suite sobre XML sintéticos.
@@ -38,7 +46,7 @@ import openpyxl
 
 from app.db.session import SessionLocal
 from app.informes import b02_conceptos_patron as b02
-from app.informes import excel, identidades_b00, registro
+from app.informes import excel, identidades_b00, registro, validadores
 from app.informes.base import ContextoInforme
 from app.services import normalizacion
 
@@ -172,9 +180,11 @@ async def _verificar_informe_del_catalogo(db: AsyncSession, clave: str, comproba
         return fallas
 
     ws = libro["Datos"]
+    filas_datos = list(ws.iter_rows(min_row=2, values_only=True))
+
     columnas_sensibles = [i for i, columna in enumerate(resultado.columnas) if columna.sensible]
     if columnas_sensibles:
-        for fila in ws.iter_rows(min_row=2, values_only=True):
+        for fila in filas_datos:
             for idx in columnas_sensibles:
                 valor = fila[idx] if idx < len(fila) else None
                 if valor is None or valor == "":
@@ -187,6 +197,29 @@ async def _verificar_informe_del_catalogo(db: AsyncSession, clave: str, comproba
                     break
             if fallas:
                 break
+
+    # La comprobación de arriba verifica el **mecanismo** (que las columnas declaradas sensibles
+    # salgan enmascaradas); esta verifica el **resultado**, que es lo que nadie comprobaba y por lo
+    # que B-10 emitía CURP y NSS completos con el enmascaramiento activado: los interpolaba en el
+    # texto de su columna "Descripción del hallazgo", que no es sensible ni puede serlo. Se recorren
+    # TODAS las celdas de texto de la hoja `Datos`, no solo las sensibles, buscando la estructura de
+    # una CURP o de un NSS completos. No se imprime el valor encontrado —solo el tipo y la columna—
+    # porque este script se corre en una terminal cuyo historial queda guardado.
+    for numero_fila, fila in enumerate(filas_datos, start=2):
+        for idx, valor in enumerate(fila):
+            tipo_dato = validadores.dato_personal_en_texto(valor)
+            if tipo_dato is None:
+                continue
+            titulo = resultado.columnas[idx].titulo if idx < len(resultado.columnas) else f"columna {idx}"
+            sensible = idx < len(resultado.columnas) and resultado.columnas[idx].sensible
+            fallas.append(
+                f"{clave}: la celda de la columna '{titulo}' (fila {numero_fila} de Datos) contiene un "
+                f"{tipo_dato} completo con enmascarar_datos_personales=True"
+                + (" (la columna SÍ es sensible: el motor no la enmascaró)" if sensible else " (la columna no es sensible: el dato viene interpolado en el texto)")
+            )
+            break
+        if fallas:
+            break
 
     return fallas
 

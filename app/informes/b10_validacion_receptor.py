@@ -21,9 +21,13 @@ pivote) y está fuera del alcance declarado de esta tarea.
 2. **De conjunto** (`CURP_DUPLICADA`, `RFC_DUPLICADO`, `NSS_DUPLICADO`): no se ven mirando un
    CFDI aislado, hay que cruzar **todos** los comprobantes del rango, no solo el más reciente
    de cada empleado.
-3. **Entre periodos** (`DATOS_CAMBIANTES`): un mismo RFC con distinta CURP, NSS o fecha de
+3. **Entre periodos** (`DATOS_CAMBIANTES`): un mismo RFC con distinto NSS o distinta fecha de
    inicio de relación laboral en quincenas distintas — error de captura que solo aparece
-   comparando periodos.
+   comparando periodos. **La CURP quedó fuera de esta validación** en la revisión final: ese
+   caso exacto ("un RFC con más de una CURP") ya lo reporta `RFC_DUPLICADO` con la misma
+   severidad alta, y en un informe cuyo grano es "una fila = algo que corregir" dos claves para
+   un mismo defecto producen dos filas para una sola corrección. Ver
+   `_hallazgos_de_conjunto`/`_hallazgos_entre_periodos`.
 4. **Derivadas de importes** (`SDI_MENOR_SD_IMPLICITO`): el SDI declarado contra el sueldo
    diario que se deduce del propio CFDI (`Σ percepción '001' / días pagados`).
 
@@ -76,11 +80,11 @@ sentido ni en el otro) en estos casos, todos documentados aquí para que ninguno
   valores vacíos: un CURP o NSS vacío compartido por varios RFC no es una duplicidad real de
   identidad, es ausencia de dato en varios lados a la vez, y ya la señalan otras reglas.
 
-**Identidad del empleado: `comprobante_detalle.nombre_receptor`, no
-`comprobante.razon_social_emisor`.** B-01/B-02 usan `razon_social_emisor` para la columna
-"Nombre empleado" a falta de otra fuente en su momento; B-04 ya señaló que ese dato es la
-razón social del **emisor** (el patrón), no del empleado, y B-05/B-07 corrigieron usando el
-campo correcto. Este informe sigue el criterio corregido.
+**Identidad del empleado: `comprobante_detalle.nombre_receptor`.** B-01/B-02 usaban
+`comprobante.razon_social_emisor` para la columna "Nombre empleado" a falta de otra fuente en su
+momento; B-04 señaló que ese dato es la razón social del **emisor** (el patrón), no del empleado,
+y B-05/B-07/B-10 usaron desde el principio el campo correcto. La revisión final de la fase 2
+corrigió también B-01 y B-02, así que los seis informes del grupo B usan hoy el mismo campo.
 
 **Validaciones por empleado (grupos 1 y 4): la ÚLTIMA fotografía, no todas.** El brief lo
 pide explícito ("trae el último `nomina_receptor` por `rfc_receptor`"): para RFC, CURP, NSS,
@@ -91,9 +95,16 @@ iteración deja la más reciente). Las validaciones de **conjunto** y **entre pe
 (grupos 2 y 3) sí recorren todos los comprobantes del rango, porque su propósito es
 precisamente comparar entre ellos.
 
-**Banderas del informe: solo las del universo compartido, no las de estatus.** Este informe
+**Banderas del informe: las del universo compartido y el conteo de validaciones.** Este informe
 no emite banderas del propio hallazgo (los hallazgos SON las filas: cada uno ya lleva su
-severidad y su descripción). Sí hereda `SIN_NORMALIZAR`/`COMPLEMENTO_AUSENTE`
+severidad y su descripción), pero sí emite `VALIDACIONES_EJECUTADAS` (baja, ámbito `informe`):
+**cuántas validaciones se corrieron de verdad** en la corrida. Es el equivalente del `cotejos`
+de `identidades_b00.verificar` que exige el §13 del diseño, y existe por la misma razón: una
+validación que no corre no puede fallar, así que una hoja `Datos` vacía no distingue "los datos
+están bien" de "no se validó nada" — y una prueba que asevera `filas == []` pasa **más fácil**
+cuando alguien borra una comprobación. Con el conteo a la vista, borrarla rompe la suite. Ver
+`VALIDACIONES_IMPLEMENTADAS` y las tres constantes que la acompañan. También hereda
+`SIN_NORMALIZAR`/`COMPLEMENTO_AUSENTE`
 (`universo_nomina.banderas_de_no_normalizables`), porque un CFDI que el ETL no pudo
 normalizar tampoco puede auditarse. No se incluyen `ESTATUS_NO_VERIFICADO`/
 `COMPROBANTE_CANCELADO`/`DATOS_DE_CORRIDA_ANTERIOR` (`universo_nomina.banderas_de_estatus`):
@@ -112,6 +123,16 @@ bancaria son literalmente el objeto de las validaciones), así que `CURP` y `NSS
 `sensible=True` (spec §8); el motor de informes (`app.informes.excel.escribir_libro`) es
 quien enmascara, esta consulta solo declara.
 
+**Y ningún mensaje de hallazgo repite el dato personal** (corrección de la revisión final, el
+defecto más grave que encontró). La columna "Descripción del hallazgo" **no** es sensible y no
+puede serlo —enmascararla dejaría el mensaje ilegible—, así que interpolar la CURP o el NSS en
+el texto los sacaba en claro en el Excel aunque las columnas `CURP`/`NSS` salieran enmascaradas:
+6 de 7 filas filtraban con el default `enmascarar_datos_personales=True`. Los mensajes describen
+el defecto y, cuando ayuda a accionarlo, nombran los **RFC** implicados (el RFC no es un dato
+enmascarado en este informe: sale completo en su propia columna). `app.informes.validadores.dato_personal_en_texto`
+audita esta regla desde fuera, y la usan tanto `tests/test_informe_b10.py` como
+`scripts/verificar_informes.py`.
+
 **`Decimal` de punta a punta; sin `round()` ni `quantize()`** (el redondeo lo hace
 `app.informes.excel` al escribir la celda)."""
 
@@ -127,7 +148,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import universo_nomina, validadores as v
-from app.informes.base import Columna, ResultadoInforme, Severidad
+from app.informes.base import Bandera, Columna, ResultadoInforme, Severidad
 from app.models.empresa import Empresa
 from app.models.nomina import NominaPercepcion
 
@@ -146,7 +167,6 @@ TIPOS_COMPROBANTE: tuple[str, ...] = ("N",)
 (todo el grupo B declara `("N",)`) y mismo consumidor (el pre-vuelo del ETL en
 `app.worker.tasks._generar_informe_async`)."""
 
-_CERO = Decimal("0")
 _TOLERANCIA_SDI_SBC = Decimal("0.8")
 """`SDI_MENOR_SBC` (B-10.R1, media): el SDI se considera anómalamente bajo frente al SBC solo
 por debajo del 80% de este — un SDI algo menor que el SBC es teóricamente normal (bases
@@ -159,6 +179,26 @@ días, meses de 30) frente al cálculo exacto por fecha."""
 _ORDEN_SEVERIDAD: dict[Severidad, int] = {"alta": 0, "media": 1, "baja": 2}
 """Orden de clasificación de filas (alta, media, baja) y de filtrado por `severidad_minima`:
 a menor número, más severa."""
+
+VALIDACIONES_IMPLEMENTADAS = 21
+"""Las 21 validaciones en alcance (ver el docstring del módulo): 17 por empleado, 3 de
+conjunto y 1 entre periodos."""
+
+VALIDACIONES_POR_EMPLEADO_COMPLETO = 15
+"""Cuántas de las 17 validaciones por empleado se ejecutan sobre una fotografía con **todos**
+sus campos presentes.
+
+Son 15 y no 17 porque dos pares son mutuamente excluyentes por construcción: `NSS_FALTANTE`
+solo se evalúa cuando el NSS está vacío (y entonces no se evalúan `NSS_LONGITUD` ni
+`NSS_DIGITO_VERIFICADOR`, que sí cuentan aquí), y `BANCO_SIN_CUENTA` solo cuando la cuenta
+está vacía (y entonces no se evalúa `CUENTA_INVALIDA`, que sí cuenta aquí)."""
+
+VALIDACIONES_DE_CONJUNTO = 3
+"""`CURP_DUPLICADA`, `RFC_DUPLICADO` y `NSS_DUPLICADO`: se evalúan una vez por corrida sobre
+todo el rango, no una vez por empleado."""
+
+VALIDACIONES_ENTRE_PERIODOS_POR_RFC = 1
+"""`DATOS_CAMBIANTES`: una evaluación por RFC del rango."""
 
 # Claves y descripciones de "puesto/departamento vacío" (§ficha B-10): además de None y
 # cadena vacía, los valores centinela que el patrón usa para decir "no aplica" sin dejar el
@@ -293,59 +333,97 @@ async def _percepciones_001_por_comprobante(db: AsyncSession, ids: list[int]) ->
     return resultado
 
 
-def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001: Decimal | None) -> list[_Hallazgo]:
+def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001: Decimal | None) -> tuple[list[_Hallazgo], int]:
     """Grupos 1 (estructura) y 4 (derivadas de importes) más las validaciones de fecha y de
     campos de texto vacíos: todo lo que se evalúa sobre la ÚLTIMA fotografía de un solo
-    empleado, sin cruzar con otros CFDI del rango."""
+    empleado, sin cruzar con otros CFDI del rango.
+
+    Devuelve `(hallazgos, validaciones_ejecutadas)`. El segundo elemento es lo que hace
+    auditable a la propia validación, con el mismo razonamiento del §13 del diseño para
+    `identidades_b00.verificar`: **una validación que no corre no puede fallar**, así que
+    `filas == []` es indistinguible de "no se comprobó nada" y borrar media docena de
+    comprobaciones dejaría la suite verde. Cada comprobación que de verdad se evalúa suma uno;
+    las que se omiten por falta de operando (ver el docstring del módulo) no suman, igual que
+    `identidades_b00._checar` no cuenta un atributo ausente.
+
+    **Ningún mensaje interpola la CURP, el NSS ni la cuenta bancaria.** El valor ya viaja en su
+    propia columna, enmascarada o no según `enmascarar_datos_personales`; repetirlo en la
+    descripción —que es una columna **no** sensible, y no puede marcarse como tal sin volver el
+    mensaje ilegible— lo dejaba en claro en el Excel incluso con el enmascaramiento activado.
+    Era el defecto más grave de la revisión final: 6 de 7 filas del informe que el propio
+    docstring del módulo describe como "el que más datos personales expone" filtraban el dato
+    que el parámetro decía estar protegiendo. Los mensajes describen el defecto y, cuando
+    ayuda a accionarlo, nombran los **RFC** implicados: el RFC no es un dato enmascarado en
+    este informe (sale completo en su propia columna) y es la llave con la que el capturista
+    localiza al empleado."""
     hallazgos: list[_Hallazgo] = []
     rfc = identidad.rfc
+    ejecutadas = 0
 
     def _marca(clave: str, severidad: Severidad, mensaje: str) -> None:
         hallazgos.append(_Hallazgo(rfc=rfc, clave=clave, severidad=severidad, mensaje=mensaje))
 
     # --- Estructura ---
+    ejecutadas += 1
     if not v.rfc_persona_fisica_valido(rfc):
-        _marca("RFC_ESTRUCTURA", "alta", f"El RFC {rfc!r} no cumple la estructura de persona física.")
+        _marca("RFC_ESTRUCTURA", "alta", f"El RFC {rfc!r} no cumple la estructura de persona física (4 letras, 6 dígitos de fecha, 3 de homoclave).")
 
+    ejecutadas += 1
     curp_estructura_valida = v.curp_valida(identidad.curp)
     if not curp_estructura_valida:
-        _marca("CURP_ESTRUCTURA", "alta", f"La CURP {identidad.curp!r} no cumple la estructura esperada.")
-    elif not v.curp_entidad_valida(identidad.curp):
-        # Solo se evalúa si la estructura general ya es válida (ver docstring del módulo):
-        # sin eso, las posiciones 12-13 no son fiables y ya se marcó CURP_ESTRUCTURA.
-        _marca("CURP_ENTIDAD", "media", f"La CURP {identidad.curp!r} no trae una clave de entidad federativa reconocida en las posiciones 12-13.")
+        _marca("CURP_ESTRUCTURA", "alta", "La CURP capturada no cumple la estructura esperada (ver la columna CURP de esta fila).")
+    else:
+        # `CURP_ENTIDAD` solo se evalúa si la estructura general ya es válida (ver docstring
+        # del módulo): sin eso, las posiciones 12-13 no son fiables y ya se marcó
+        # `CURP_ESTRUCTURA`. Por eso el `+= 1` va aquí y no fuera del `else`.
+        ejecutadas += 1
+        if not v.curp_entidad_valida(identidad.curp):
+            _marca("CURP_ENTIDAD", "media", "La CURP no trae una clave de entidad federativa reconocida en las posiciones 12-13.")
 
     if identidad.curp is not None and not _vacio(identidad.curp) and not _vacio(rfc):
+        ejecutadas += 1
         if rfc[:10] != identidad.curp[:10]:
             _marca(
                 "RFC_CURP_INCONSISTENTE",
                 "alta",
-                f"Las primeras 10 posiciones del RFC ({rfc[:10]!r}) no coinciden con las de la CURP ({identidad.curp[:10]!r}).",
+                "Las primeras 10 posiciones del RFC y de la CURP deben coincidir (mismos apellidos, nombre y fecha de "
+                f"nacimiento) y no coinciden. RFC del empleado: {rfc!r}.",
             )
 
     if not _vacio(identidad.nss):
         nss = identidad.nss
         assert nss is not None  # para mypy: `_vacio` ya descartó `None`
+        ejecutadas += 1
         if len(nss) != 11:
-            _marca("NSS_LONGITUD", "media", f"El NSS {nss!r} tiene {len(nss)} caracteres; se esperan 11.")
-        elif not v.nss_digito_verificador_valido(nss):
-            # Solo se evalúa con longitud correcta (ver docstring): Luhn sobre una longitud
-            # equivocada no es significativo y ya se marcó NSS_LONGITUD.
-            _marca("NSS_DIGITO_VERIFICADOR", "media", f"El NSS {nss!r} no cumple el dígito verificador (Luhn).")
+            _marca("NSS_LONGITUD", "media", f"El NSS capturado tiene {len(nss)} caracteres; se esperan 11.")
+        else:
+            # Luhn solo se evalúa con longitud correcta (ver docstring): sobre una longitud
+            # equivocada no es significativo y ya se marcó `NSS_LONGITUD`.
+            ejecutadas += 1
+            if not v.nss_digito_verificador_valido(nss):
+                _marca("NSS_DIGITO_VERIFICADOR", "media", "El NSS capturado no cumple el dígito verificador (algoritmo de Luhn sobre las 10 primeras posiciones).")
     elif identidad.tipo_regimen == "02":
+        ejecutadas += 1
         _marca("NSS_FALTANTE", "alta", "El NSS está vacío con `tipo_regimen='02'` (régimen obligatorio de cotización IMSS).")
 
     # --- SBC / SDI (B-10.R1) ---
     sbc, sdi = identidad.sbc, identidad.sdi
-    if identidad.tipo_regimen == "02" and sbc is not None and sbc <= 0:
-        _marca("SBC_CERO", "alta", f"El SBC declarado es {sbc} con `tipo_regimen='02'`.")
-    if sdi is not None and sdi <= 0:
-        _marca("SDI_CERO", "alta", f"El SDI declarado es {sdi}.")
-    if sbc is not None and sdi is not None and sdi < sbc * _TOLERANCIA_SDI_SBC:
-        # Media, no alta (B-10.R1): un SDI inferior al SBC es teóricamente posible.
-        _marca("SDI_MENOR_SBC", "media", f"El SDI ({sdi}) es menor al 80% del SBC ({sbc}); son conceptos distintos, pero conviene revisar.")
+    if identidad.tipo_regimen == "02" and sbc is not None:
+        ejecutadas += 1
+        if sbc <= 0:
+            _marca("SBC_CERO", "alta", f"El SBC declarado es {sbc} con `tipo_regimen='02'`.")
+    if sdi is not None:
+        ejecutadas += 1
+        if sdi <= 0:
+            _marca("SDI_CERO", "alta", f"El SDI declarado es {sdi}.")
+    if sbc is not None and sdi is not None:
+        ejecutadas += 1
+        if sdi < sbc * _TOLERANCIA_SDI_SBC:
+            # Media, no alta (B-10.R1): un SDI inferior al SBC es teóricamente posible.
+            _marca("SDI_MENOR_SBC", "media", f"El SDI ({sdi}) es menor al 80% del SBC ({sbc}); son conceptos distintos, pero conviene revisar.")
 
     if sdi is not None and percepciones_001 is not None and identidad.num_dias_pagados is not None and identidad.num_dias_pagados > 0:
+        ejecutadas += 1
         sd_implicito = percepciones_001 / identidad.num_dias_pagados
         if sdi < sd_implicito:
             _marca(
@@ -357,6 +435,7 @@ def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001
 
     # --- Fechas ---
     if identidad.fecha_inicio_rel_laboral is not None and identidad.fecha_final_pago is not None:
+        ejecutadas += 1
         if identidad.fecha_inicio_rel_laboral > identidad.fecha_final_pago:
             _marca(
                 "FECHA_INICIO_POSTERIOR",
@@ -365,6 +444,7 @@ def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001
             )
         dias_declarados = v.antiguedad_iso_a_dias(identidad.antiguedad)
         if dias_declarados is not None:
+            ejecutadas += 1
             dias_calculados = (identidad.fecha_final_pago - identidad.fecha_inicio_rel_laboral).days
             if abs(dias_declarados - dias_calculados) > _TOLERANCIA_ANTIGUEDAD_DIAS:
                 _marca(
@@ -375,8 +455,10 @@ def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001
                 )
 
     # --- Puesto / departamento ---
+    ejecutadas += 1
     if _vacio_texto(identidad.puesto):
         _marca("PUESTO_VACIO", "baja", "El puesto está vacío, nulo o es un valor centinela (`Ninguno`/`N/A`).")
+    ejecutadas += 1
     if _vacio_texto(identidad.departamento):
         _marca("DEPARTAMENTO_VACIO", "baja", "El departamento está vacío, nulo o es un valor centinela (`Ninguno`/`N/A`).")
 
@@ -386,18 +468,32 @@ def _hallazgos_estructurales_y_derivados(identidad: _Identidad, percepciones_001
     if cuenta_presente:
         cuenta = identidad.cuenta_bancaria
         assert cuenta is not None
+        ejecutadas += 1
         if not v.cuenta_bancaria_longitud_valida(cuenta):
-            _marca("CUENTA_INVALIDA", "baja", f"La cuenta bancaria tiene {len(cuenta)} caracteres; se esperan 10, 11, 16 o 18.")
+            _marca("CUENTA_INVALIDA", "baja", f"La cuenta bancaria capturada tiene {len(cuenta)} caracteres; se esperan 10, 11, 16 o 18.")
     elif banco_presente:
+        ejecutadas += 1
         _marca("BANCO_SIN_CUENTA", "baja", f"El banco ({identidad.banco!r}) está capturado pero la cuenta bancaria está vacía.")
 
-    return hallazgos
+    return hallazgos, ejecutadas
 
 
-def _hallazgos_de_conjunto(todas: list[_Identidad]) -> list[_Hallazgo]:
+def _hallazgos_de_conjunto(todas: list[_Identidad]) -> tuple[list[_Hallazgo], int]:
     """Grupo 2: `CURP_DUPLICADA`, `RFC_DUPLICADO`, `NSS_DUPLICADO`. Cruza **todos** los
     comprobantes del rango (no solo la última fotografía de cada empleado): una duplicidad de
-    identidad no se ve mirando un solo CFDI."""
+    identidad no se ve mirando un solo CFDI.
+
+    Devuelve `(hallazgos, validaciones_ejecutadas)`; las tres se evalúan una vez por corrida
+    sobre todo el rango, no una vez por empleado, así que el conteo es
+    `VALIDACIONES_DE_CONJUNTO` siempre que haya universo (ver `_hallazgos_estructurales_y_derivados`
+    para el porqué del conteo).
+
+    **`RFC_DUPLICADO` es la única clave que reporta "un RFC con más de una CURP"** (decisión de
+    la revisión final). `DATOS_CAMBIANTES` disparaba también con ese mismo hecho y con la misma
+    severidad alta, así que un solo defecto producía **dos** filas en un informe cuyo grano es
+    "una fila = algo que corregir". Se conservó `RFC_DUPLICADO` —es una de las tres validaciones
+    de duplicidad que pide la ficha, simétrica de `CURP_DUPLICADA`/`NSS_DUPLICADO`— y se acotó
+    `DATOS_CAMBIANTES` a los campos que ninguna otra clave cubre (ver esa función)."""
     curp_a_rfcs: dict[str, set[str]] = {}
     rfc_a_curps: dict[str, set[str]] = {}
     nss_a_rfcs: dict[str, set[str]] = {}
@@ -423,7 +519,7 @@ def _hallazgos_de_conjunto(todas: list[_Identidad]) -> list[_Hallazgo]:
                         rfc=rfc,
                         clave="CURP_DUPLICADA",
                         severidad="alta",
-                        mensaje=f"La CURP {curp!r} también aparece con otro(s) RFC en el rango: {otros}.",
+                        mensaje=f"La CURP de este empleado también aparece con otro(s) RFC en el rango: {otros}.",
                     )
                 )
     for rfc, curps in rfc_a_curps.items():
@@ -433,7 +529,10 @@ def _hallazgos_de_conjunto(todas: list[_Identidad]) -> list[_Hallazgo]:
                     rfc=rfc,
                     clave="RFC_DUPLICADO",
                     severidad="alta",
-                    mensaje=f"El RFC {rfc!r} aparece con más de una CURP en el rango: {sorted(curps)}.",
+                    mensaje=(
+                        f"El RFC {rfc!r} aparece con {len(curps)} CURP distintas en el rango: una sola persona no puede "
+                        "tener más de una. Revisa la captura de la CURP en los CFDI de este empleado."
+                    ),
                 )
             )
     for nss, rfcs in nss_a_rfcs.items():
@@ -445,34 +544,42 @@ def _hallazgos_de_conjunto(todas: list[_Identidad]) -> list[_Hallazgo]:
                         rfc=rfc,
                         clave="NSS_DUPLICADO",
                         severidad="alta",
-                        mensaje=f"El NSS {nss!r} también aparece con otro(s) RFC en el rango: {otros}.",
+                        mensaje=f"El NSS de este empleado también aparece con otro(s) RFC en el rango: {otros}.",
                     )
                 )
-    return hallazgos
+    return hallazgos, VALIDACIONES_DE_CONJUNTO
 
 
-def _hallazgos_entre_periodos(todas: list[_Identidad]) -> list[_Hallazgo]:
-    """Grupo 3: `DATOS_CAMBIANTES` — un mismo RFC con distinta CURP, NSS o fecha de inicio de
+def _hallazgos_entre_periodos(todas: list[_Identidad]) -> tuple[list[_Hallazgo], int]:
+    """Grupo 3: `DATOS_CAMBIANTES` — un mismo RFC con distinto NSS o distinta fecha de inicio de
     relación laboral entre comprobantes del rango. Solo aparece comparando periodos, nunca
-    mirando un CFDI aislado."""
+    mirando un CFDI aislado.
+
+    **Ya no incluye la CURP** (decisión de la revisión final, documentada también en
+    `_hallazgos_de_conjunto`): "un RFC con más de una CURP" lo reporta `RFC_DUPLICADO`, con la
+    misma severidad alta y el mismo grano, así que incluirlo aquí generaba dos filas para un
+    solo defecto. Los dos campos que quedan no los cubre ninguna otra clave: `NSS_DUPLICADO`
+    mira la dirección contraria (un NSS con varios RFC), y ninguna validación compara fechas de
+    inicio entre periodos.
+
+    Devuelve `(hallazgos, validaciones_ejecutadas)` — una evaluación por RFC del rango."""
     por_rfc: dict[str, list[_Identidad]] = {}
     for identidad in todas:
         por_rfc.setdefault(identidad.rfc, []).append(identidad)
 
     hallazgos: list[_Hallazgo] = []
     for rfc, identidades in por_rfc.items():
-        # `i.curp is not None` (además de `not _vacio(i.curp)`) es lo que permite a mypy
-        # --strict angostar `str | None` a `str` dentro de la comprehension: `_vacio` es una
-        # función cualquiera para el checker, no un type guard.
-        curps = {i.curp for i in identidades if i.curp is not None and not _vacio(i.curp)}
+        # `i.nss is not None` (además de `not _vacio(i.nss)`) es lo que permite a mypy --strict
+        # angostar `str | None` a `str` dentro de la comprehension: `_vacio` es una función
+        # cualquiera para el checker, no un type guard.
         nss_vistos = {i.nss for i in identidades if i.nss is not None and not _vacio(i.nss)}
         fechas_inicio = {i.fecha_inicio_rel_laboral for i in identidades if i.fecha_inicio_rel_laboral is not None}
 
         campos_cambiantes = []
-        if len(curps) > 1:
-            campos_cambiantes.append(f"CURP: {sorted(curps)}")
         if len(nss_vistos) > 1:
-            campos_cambiantes.append(f"NSS: {sorted(nss_vistos)}")
+            # Sin los valores: el NSS es dato personal y esta descripción va en una columna no
+            # sensible (ver `_hallazgos_estructurales_y_derivados`).
+            campos_cambiantes.append(f"NSS ({len(nss_vistos)} valores distintos)")
         if len(fechas_inicio) > 1:
             campos_cambiantes.append(f"fecha de inicio de relación laboral: {sorted(fechas_inicio)}")
 
@@ -485,7 +592,7 @@ def _hallazgos_entre_periodos(todas: list[_Identidad]) -> list[_Hallazgo]:
                     mensaje=f"El RFC {rfc!r} tiene valores distintos entre periodos del rango — {'; '.join(campos_cambiantes)}.",
                 )
             )
-    return hallazgos
+    return hallazgos, VALIDACIONES_ENTRE_PERIODOS_POR_RFC * len(por_rfc)
 
 
 async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme:
@@ -541,10 +648,39 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     percepciones_001 = await _percepciones_001_por_comprobante(db, ids_ultima_fotografia)
 
     hallazgos: list[_Hallazgo] = []
+    validaciones_ejecutadas = 0
     for rfc, identidad in ultima_por_rfc.items():
-        hallazgos.extend(_hallazgos_estructurales_y_derivados(identidad, percepciones_001.get(identidad.comprobante_id)))
-    hallazgos.extend(_hallazgos_de_conjunto(todas))
-    hallazgos.extend(_hallazgos_entre_periodos(todas))
+        del rfc  # la clave no se usa: la identidad ya trae su propio `rfc`
+        propios, ejecutadas = _hallazgos_estructurales_y_derivados(identidad, percepciones_001.get(identidad.comprobante_id))
+        hallazgos.extend(propios)
+        validaciones_ejecutadas += ejecutadas
+    de_conjunto, ejecutadas_conjunto = _hallazgos_de_conjunto(todas)
+    hallazgos.extend(de_conjunto)
+    validaciones_ejecutadas += ejecutadas_conjunto
+    entre_periodos, ejecutadas_periodos = _hallazgos_entre_periodos(todas)
+    hallazgos.extend(entre_periodos)
+    validaciones_ejecutadas += ejecutadas_periodos
+
+    # `VALIDACIONES_EJECUTADAS`: la hoja `Banderas` dice cuántas comprobaciones se corrieron de
+    # verdad, no solo qué encontraron. Es el equivalente del `cotejos` de
+    # `identidades_b00.verificar` (§13 del diseño) y existe por la misma razón: sin este número,
+    # una hoja `Datos` vacía no distingue "los datos están bien" de "no se validó nada", y las
+    # pruebas que aseveran `filas == []` pasan **más fácil** cuando se borra una validación.
+    banderas = list(banderas_fuera)
+    banderas.append(
+        Bandera(
+            clave="VALIDACIONES_EJECUTADAS",
+            severidad="baja",
+            ambito="informe",
+            mensaje=(
+                f"Se ejecutaron {validaciones_ejecutadas} validaciones sobre {len(ultima_por_rfc)} empleado(s) "
+                f"y {len(todas)} CFDI del rango, de las {VALIDACIONES_IMPLEMENTADAS} implementadas "
+                f"({VALIDACIONES_POR_EMPLEADO_COMPLETO} por empleado con todos sus campos presentes, "
+                f"{VALIDACIONES_DE_CONJUNTO} de conjunto y {VALIDACIONES_ENTRE_PERIODOS_POR_RFC} entre periodos por RFC). "
+                "Una validación que se omite por falta de dato no cuenta."
+            ),
+        )
+    )
 
     umbral = _ORDEN_SEVERIDAD[p.severidad_minima]
     hallazgos_filtrados = [h for h in hallazgos if _ORDEN_SEVERIDAD[h.severidad] <= umbral]
@@ -570,4 +706,4 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             ]
         )
 
-    return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas_fuera)
+    return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas)
