@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Any, Literal, Protocol, Sequence
+from typing import Any, Iterable, Literal, Protocol, Sequence
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -330,6 +330,24 @@ def _banderas_de_no_verificado(uuids: Sequence[str]) -> list[Bandera]:
             ),
         )
     ]
+
+
+def comprobantes_y_detalles(filas_universo: Iterable[Any]) -> list[tuple[Comprobante, ComprobanteDetalle | None]]:
+    """Lo que `banderas_de_estatus` necesita de las filas de `universo()`.
+
+    Las filas de `universo()` son `(Comprobante, Nomina, NominaReceptor, NominaTotales,
+    ComprobanteDetalle)`; de las cinco, la bandera de estatus solo usa la primera y la última. Los
+    cinco informes construían esta misma comprehension a mano, y equivocarse en el orden del
+    desempaquetado —pasar `NominaTotales` donde va `ComprobanteDetalle`— no lo atrapa `mypy`, porque
+    las filas que devuelve SQLAlchemy son `Any`. Aquí el desempaquetado por nombre ocurre una sola
+    vez y el valor de retorno sí queda tipado, así que el error se detecta en el único sitio donde
+    puede cometerse.
+
+    `Iterable[Any]` y no la tupla de cinco: el `.all()` de SQLAlchemy devuelve `Row`, que no es una
+    `tuple` para el verificador de tipos. El desempaquetado del cuerpo es la documentación de la
+    forma real.
+    """
+    return [(comprobante, detalle) for comprobante, _nomina, _receptor, _totales, detalle in filas_universo]
 
 
 def banderas_de_estatus(comprobantes: Sequence[tuple[Comprobante, ComprobanteDetalle | None]]) -> list[Bandera]:

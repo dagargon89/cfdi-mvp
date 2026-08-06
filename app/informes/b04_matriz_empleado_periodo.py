@@ -291,7 +291,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # `no_verificado` es el estado normal de un rango recién descargado. Recibe el universo
     # completo, no un comprobante: el colapso por umbral de `ESTATUS_NO_VERIFICADO` es una
     # decisión sobre el conjunto (ver su docstring).
-    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
+    banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
     # celdas[rfc][indice] = CFDI asignados a esa celda de la matriz.
     celdas: dict[str, dict[int, list[_DatoCfdi]]] = {}
     # Última fotografía del receptor observada por empleado (filas_universo viene ordenado

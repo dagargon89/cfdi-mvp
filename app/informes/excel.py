@@ -38,6 +38,17 @@ _FORMATO = {
 _NEGRITA = Font(bold=True)
 _DOS_DECIMALES = Decimal("0.01")
 
+HOJAS_CON_ENCABEZADO = frozenset({"Datos", "Banderas", "Diccionario"})
+"""De las cuatro hojas del libro, las que llevan una fila de **títulos** en la fila 1.
+
+`Parámetros` no está: su primera fila ya es contenido (`["Informe", "B-05 · ..."]`, ver
+`_escribir_parametros`), y su bloque de parámetros trae su propio encabezado más abajo. Lo consume
+`validadores.fugas_de_datos_personales_en_libro` para nombrar la columna donde encuentra una fuga:
+sin esta distinción reportaba una fuga de la hoja `Parámetros` como si estuviera en una columna
+llamada "B-05 · Acumulado anual" —el contenido de la fila 1— en vez de decir su posición. La
+constante vive aquí, en el módulo que **escribe** el libro, porque es un hecho de su estructura y
+no del auditor."""
+
 
 def enmascarar(valor: str | None) -> str | None:
     """`****` conservando los últimos 4 caracteres (spec §8). Un valor de 4 o menos se

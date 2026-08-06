@@ -503,7 +503,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring), y en este
     # informe es donde más pesaba —4 filas de datos contra ~96 banderas de un ejercicio recién
     # descargado—.
-    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_resueltas]))
+    banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_resueltas)))
 
     acumuladores: dict[str, _Acumulador] = {}
     identidad: dict[str, tuple[str | None, str | None, str | None, str | None, str | None]] = {}

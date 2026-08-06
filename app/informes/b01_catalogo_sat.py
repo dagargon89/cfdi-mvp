@@ -271,7 +271,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     banderas: list[Bandera] = list(banderas_fuera) + banderas_gravado_exento
     # `banderas_de_estatus` recibe el universo completo, no un comprobante: el colapso por umbral
     # de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring).
-    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
+    banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
     if p.solo_tipos_con_movimiento:
         banderas.append(
             Bandera(

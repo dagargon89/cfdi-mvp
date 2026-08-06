@@ -5,8 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from openpyxl import Workbook
 
 from app.informes import validadores as v
+from app.informes.excel import HOJAS_CON_ENCABEZADO
 
 
 @pytest.mark.parametrize("rfc", ["VECJ880326XXX", "ÑAAA000101AA1", "AAA&000101AA1"])
@@ -90,3 +92,154 @@ def test_dato_personal_en_texto_no_marca_lo_que_no_lo_es() -> None:
     # Un UUID con el último segmento todo numérico tiene 12 dígitos seguidos: las guardas de
     # frontera del patrón evitan que se reporte como un NSS de 11.
     assert v.dato_personal_en_texto("11111111-1111-1111-1111-111111111111") is None
+
+
+# --- El auditor anti-fuga del libro (`fugas_de_datos_personales_en_libro`) ---
+#
+# Estas pruebas son puras (openpyxl en memoria, sin BD): fijan el comportamiento del auditor
+# mismo. Las que lo ejercen end-to-end sobre un informe real viven en `tests/test_informe_b10.py`.
+
+_CURP_INVENTADA = "VECJ880326HDFLNS09"
+_CURP_MAL_FORMADA = "MALA880326HDF"  # 13 caracteres: no cumple el patrón, sí identifica a la persona
+_VALORES = {"CURP": [_CURP_INVENTADA, _CURP_MAL_FORMADA], "NSS": ["12345678901"]}
+
+
+def _libro(hojas: dict[str, list[list[object]]]) -> Workbook:
+    """Un libro con las hojas y filas dadas, en el orden dado."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for nombre, filas in hojas.items():
+        ws = wb.create_sheet(nombre)
+        for fila in filas:
+            ws.append(fila)
+    return wb
+
+
+def test_fuga_en_la_fila_de_encabezado_no_publica_el_valor() -> None:
+    """**El hallazgo Critical de la revisión.** Auditar la fila 1 como una fila cualquiera es
+    correcto —es la corrección del hueco B—, pero el nombre de la columna con el que se reporta una
+    fuga sale de esa misma fila 1. Cuando la celda que dispara la fuga **es** el encabezado, el
+    campo `columna` acababa siendo el dato personal, y de ahí salía a la consola del script y al
+    mensaje de aserción de la suite: la fuga dentro del aviso de fuga.
+
+    No era teórico: los títulos dinámicos de B-01 y B-02 se construyen con el `@Concepto` del XML,
+    texto libre no controlado — la misma clase de contenido que causó el incidente de B-10.
+
+    Se asevera lo fuerte: **ningún** campo del hallazgo ni su `descripcion` contiene el valor.
+    """
+    libro = _libro({"Datos": [["RFC empleado", _CURP_INVENTADA], ["VECJ880326XXX", "****NS09"]]})
+
+    fugas = v.fugas_de_datos_personales_en_libro(libro, _VALORES)
+
+    assert [(f.hoja, f.fila, f.tipo) for f in fugas] == [("Datos", 1, "CURP"), ("Datos", 1, "CURP")]
+    assert {f.deteccion for f in fugas} == {"patrón", "valor"}
+    # La columna se nombra por posición, no con su propio contenido.
+    assert {f.columna for f in fugas} == {"columna 2"}
+    for fuga in fugas:
+        for campo in (fuga.hoja, fuga.columna, fuga.tipo, fuga.deteccion, fuga.descripcion):
+            assert _CURP_INVENTADA not in campo, "un reporte de fuga no puede reproducir el valor que denuncia"
+
+
+def test_un_titulo_dinamico_con_dato_personal_no_se_usa_como_etiqueta() -> None:
+    """La otra mitad del Critical: el título contamina la etiqueta aunque la fuga esté en **otra**
+    fila. Es el caso de B-01/B-02 con un `@Concepto` del XML que trajera el dato.
+
+    La CURP del título está **mal formada**, así que solo la ve la comprobación por valor: sin ella
+    el título se publicaría tal cual.
+    """
+    libro = _libro(
+        {
+            "Datos": [
+                ["RFC empleado", f"P¦001¦001¦Sueldo de {_CURP_MAL_FORMADA}"],
+                ["VECJ880326XXX", f"Revisar {_CURP_INVENTADA}"],
+            ]
+        }
+    )
+
+    fugas = v.fugas_de_datos_personales_en_libro(libro, _VALORES)
+
+    # La fuga de la fila 2 se reporta con la posición, no con el título contaminado.
+    de_la_fila_2 = [f for f in fugas if f.fila == 2]
+    assert de_la_fila_2, [f.descripcion for f in fugas]
+    assert {f.columna for f in de_la_fila_2} == {"columna 2"}
+    for fuga in fugas:
+        assert _CURP_MAL_FORMADA not in fuga.descripcion and _CURP_INVENTADA not in fuga.descripcion
+
+
+def test_un_titulo_limpio_si_se_usa_como_etiqueta() -> None:
+    """La mitad negativa: sin ella, nombrar **siempre** por posición pasaría igual y el diagnóstico
+    sería peor de lo que era."""
+    libro = _libro({"Datos": [["RFC empleado", "Descripción del hallazgo"], ["VECJ880326XXX", f"Revisar {_CURP_INVENTADA}"]]})
+
+    fugas = v.fugas_de_datos_personales_en_libro(libro, _VALORES)
+
+    assert [f.columna for f in fugas] == ["Descripción del hallazgo", "Descripción del hallazgo"]
+
+
+def test_la_hoja_parametros_se_reporta_por_posicion() -> None:
+    """**Hallazgo Important de la revisión.** `Parámetros` no tiene fila de títulos: su fila 1 ya es
+    contenido (`["Informe", "B-05 · ..."]`, ver `excel._escribir_parametros`). Tomarla como
+    encabezado reportaba una fuga de la columna "Valor" como si la columna se llamara
+    "B-05 · Acumulado anual" — un diagnóstico que manda a mirar donde no es.
+
+    `excel.HOJAS_CON_ENCABEZADO` es la fuente de verdad, y vive en el módulo que escribe el libro.
+    """
+    assert "Parámetros" not in HOJAS_CON_ENCABEZADO
+    libro = _libro(
+        {
+            "Parámetros": [
+                ["Informe", "B-05 · Acumulado anual"],
+                ["Generado por", "consulta@test.mx"],
+                ["Parámetro", "Valor"],
+                ["curp_del_empleado", _CURP_INVENTADA],
+            ]
+        }
+    )
+
+    fugas = v.fugas_de_datos_personales_en_libro(libro, _VALORES)
+
+    assert [(f.hoja, f.fila, f.columna) for f in fugas] == [("Parámetros", 4, "columna 2"), ("Parámetros", 4, "columna 2")]
+    assert all("B-05" not in f.columna for f in fugas), "no se inventa un título donde la hoja no lo tiene"
+
+
+def test_las_cuatro_hojas_se_auditan() -> None:
+    """El hueco B, en su forma más directa: las cuatro hojas viajan en el mismo archivo."""
+    libro = _libro(
+        {
+            "Datos": [["RFC empleado"], ["VECJ880326XXX"]],
+            "Parámetros": [["Informe", "B-10"]],
+            "Banderas": [["Bandera", "Severidad", "Ámbito", "Mensaje"], ["X", "baja", "informe", f"Corregir {_CURP_INVENTADA}."]],
+            "Diccionario": [["Etiqueta"], [f"P¦001¦001¦{_CURP_INVENTADA}"]],
+        }
+    )
+
+    fugas = v.fugas_de_datos_personales_en_libro(libro, _VALORES)
+
+    assert {f.hoja for f in fugas} == {"Banderas", "Diccionario"}
+    assert ("Banderas", 2, "Mensaje") in {(f.hoja, f.fila, f.columna) for f in fugas}
+
+
+def test_fuga_dato_personal_rechaza_un_campo_con_dato_personal() -> None:
+    """El cable trampa de `FugaDatoPersonal.__post_init__`: la garantía principal está en
+    `_nombre_de_columna`, pero si alguien construyera el hallazgo por otra ruta la clase falla en
+    vez de publicar el valor. **Falla, no censura**: recortarlo en silencio dejaría la red
+    aparentando funcionar.
+
+    Y la excepción tampoco nombra el valor — sería la misma fuga por otra vía.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        v.FugaDatoPersonal(hoja="Datos", fila=1, columna=_CURP_INVENTADA, tipo="CURP", deteccion="patrón")
+    assert _CURP_INVENTADA not in str(excinfo.value)
+    assert "columna" in str(excinfo.value)
+    # Un hallazgo bien formado sí se construye.
+    assert v.FugaDatoPersonal(hoja="Datos", fila=1, columna="columna 2", tipo="CURP", deteccion="valor").fila == 1
+
+
+def test_un_valor_personal_demasiado_corto_no_se_busca() -> None:
+    """`LONGITUD_MINIMA_VALOR_PERSONAL`: una captura basura de dos caracteres aparecería como
+    subcadena de media hoja y convertiría la red en ruido, que es otra forma de desactivarla."""
+    assert v.LONGITUD_MINIMA_VALOR_PERSONAL == 8
+    libro = _libro({"Datos": [["RFC empleado"], ["VECJ880326XXX"]]})
+    assert v.fugas_de_datos_personales_en_libro(libro, {"CURP": ["X"], "NSS": ["88"]}) == []
+    # Y uno de longitud suficiente sí: sin esta mitad, la prueba pasaría con la búsqueda desactivada.
+    assert v.fugas_de_datos_personales_en_libro(libro, {"CURP": ["VECJ8803"]}) != []

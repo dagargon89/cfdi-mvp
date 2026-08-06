@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
+
+from app.informes.excel import HOJAS_CON_ENCABEZADO
 
 # RFC de persona física (spec B-10): 4 letras (incluye Ñ y &, usados en apellidos
 # compuestos/paterno de una sola letra), 6 dígitos de fecha, 3 caracteres de homoclave.
@@ -100,7 +102,21 @@ celdas que son `str`: los importes son `Decimal` y las fechas `date`, y no se co
 class FugaDatoPersonal:
     """Una celda de un libro ya escrito que lleva un dato personal. **Nunca guarda el valor**:
     solo dónde está y de qué tipo es, porque quien la reporta lo hace en una terminal cuyo
-    historial queda guardado o en la salida de una prueba."""
+    historial queda guardado o en la salida de una prueba.
+
+    **`__post_init__` es un cable trampa, no la garantía principal.** El campo `columna` se rellena
+    con el título de la columna, que es contenido del propio libro; si ese título fuera (o
+    contuviera) un dato personal, el reporte de la fuga reproduciría el valor que denuncia — la
+    fuga dentro del aviso de fuga. La garantía principal está en `_nombre_de_columna`, que certifica
+    la etiqueta con el **mismo** detector que encuentra las fugas. Este `__post_init__` levanta la
+    excepción si aun así se cuela algo con estructura de CURP/NSS por **cualquier** ruta de
+    construcción, presente o futura: no puede comprobar la vía "por valor" (no conoce el universo),
+    pero sí la estructural, y la comprueba sin necesitar ningún argumento extra.
+
+    **Falla, no censura.** Un dato personal en un campo de este objeto significa que la garantía de
+    arriba se rompió, y eso es un bug que nadie debe poder ignorar: recortar el valor en silencio
+    dejaría la red aparentando funcionar. El mensaje de la excepción nombra el campo, nunca el
+    valor."""
 
     hoja: str
     fila: int
@@ -111,19 +127,71 @@ class FugaDatoPersonal:
     """`"patrón"` (la estructura de una CURP/NSS bien formados) o `"valor"` (coincide con el dato
     de algún empleado del universo, esté bien formado o no)."""
 
+    def __post_init__(self) -> None:
+        for nombre_campo in ("hoja", "columna", "tipo", "deteccion"):
+            if dato_personal_en_texto(getattr(self, nombre_campo)) is not None:
+                raise ValueError(
+                    f"el campo {nombre_campo!r} de una FugaDatoPersonal lleva un dato personal: un reporte de fuga "
+                    "no puede reproducir el valor que denuncia (ver `_nombre_de_columna`)"
+                )
+
     @property
     def descripcion(self) -> str:
+        """Único texto que se publica de una fuga. Se construye **solo** con campos ya validados por
+        `__post_init__`, así que no puede introducir un valor que los campos no tuvieran."""
         return f"{self.tipo} (por {self.deteccion}) en la hoja '{self.hoja}', fila {self.fila}, columna '{self.columna}'"
 
 
-def _nombre_de_columna(encabezados: tuple[Any, ...], indice: int) -> str:
-    """Título de la columna según la primera fila de la hoja, o su posición si ahí no hay texto
-    (la hoja `Parámetros` no tiene encabezados: su primera fila ya es contenido)."""
-    if indice < len(encabezados):
-        encabezado = encabezados[indice]
-        if isinstance(encabezado, str) and encabezado.strip():
-            return encabezado
-    return f"columna {indice + 1}"
+def _datos_personales_en_celda(valor: object, buscables: Mapping[str, Sequence[str]]) -> list[tuple[str, str]]:
+    """Qué datos personales lleva una celda, como pares `(tipo, deteccion)`; vacío = limpia.
+
+    **Es el único detector del módulo, y eso es deliberado.** Lo usa el recorrido de
+    `fugas_de_datos_personales_en_libro` para encontrar las fugas y lo usa `_nombre_de_columna` para
+    certificar que la etiqueta con la que se reporta una fuga no es, ella misma, un dato personal.
+    Al ser el mismo código no pueden divergir: nada que el auditor consideraría una fuga puede
+    acabar publicado como nombre de columna.
+
+    El orden —patrón antes que valor— es el orden en que se reportan las fugas de una misma celda.
+    """
+    encontrados: list[tuple[str, str]] = []
+    tipo_por_patron = dato_personal_en_texto(valor)
+    if tipo_por_patron is not None:
+        encontrados.append((tipo_por_patron, "patrón"))
+    if isinstance(valor, str):
+        for tipo, valores_del_tipo in buscables.items():
+            if any(buscable in valor for buscable in valores_del_tipo):
+                encontrados.append((tipo, "valor"))
+    return encontrados
+
+
+def _nombre_de_columna(hoja: str, encabezados: tuple[Any, ...], indice: int, buscables: Mapping[str, Sequence[str]]) -> str:
+    """Con qué nombre se publica la columna de una fuga: su título si hay uno y es **seguro**, su
+    posición (`columna N`) en cualquier otro caso.
+
+    Tres razones para caer a la posición, y las tres importan:
+
+    1. **La hoja no tiene fila de títulos.** Solo `excel.HOJAS_CON_ENCABEZADO` la tiene; la fila 1
+       de `Parámetros` ya es contenido (`["Informe", "B-05 · ..."]`), así que tomarla como
+       encabezado reportaba una fuga de la columna "Valor" como si la columna se llamara
+       "B-05 · Acumulado anual" — un diagnóstico que manda a mirar donde no es.
+    2. **El título no es texto útil** (`None`, vacío, un número).
+    3. **El título es (o contiene) un dato personal**, comprobado con el mismo
+       `_datos_personales_en_celda` que encuentra las fugas. Cubre los dos casos en que eso pasa:
+       cuando la celda que dispara la fuga **es** la propia fila de encabezados —y entonces el
+       "título" de su columna es esa misma celda—, y cuando el título de una columna dinámica trae
+       el dato aunque la fuga esté en otra fila. Lo segundo no es hipotético: los títulos dinámicos
+       de B-01 y B-02 se construyen con el `@Concepto` que viene en el XML, texto libre no
+       controlado — exactamente la clase de contenido que causó el incidente original de B-10.
+    """
+    posicional = f"columna {indice + 1}"
+    if hoja not in HOJAS_CON_ENCABEZADO or indice >= len(encabezados):
+        return posicional
+    encabezado = encabezados[indice]
+    if not isinstance(encabezado, str) or not encabezado.strip():
+        return posicional
+    if _datos_personales_en_celda(encabezado, buscables):
+        return posicional
+    return encabezado
 
 
 def fugas_de_datos_personales_en_libro(libro: Any, valores_por_tipo: Mapping[str, Iterable[object]]) -> list[FugaDatoPersonal]:
@@ -150,6 +218,13 @@ def fugas_de_datos_personales_en_libro(libro: Any, valores_por_tipo: Mapping[str
        interpolaban la CURP). Se recorren las cuatro hojas, incluida la fila de encabezados
        —B-02 y B-01 construyen títulos de columna dinámicos a partir de datos—.
 
+    **Lo que publica no puede contener el valor que denuncia**, y ese invariante no depende de
+    quien la llame: la etiqueta de la columna se resuelve por `_nombre_de_columna`, que la certifica
+    con el mismo detector que encuentra las fugas, y `FugaDatoPersonal.__post_init__` levanta la
+    excepción si algo con estructura de CURP/NSS llegara a un campo por cualquier otra ruta. Fue un
+    hallazgo de la revisión: auditar la fila 1 como una fila cualquiera —que es lo correcto— hacía
+    que una fuga **en el propio encabezado** se reportara con `columna=<la CURP>`.
+
     `valores_por_tipo` es `{"CURP": [...], "NSS": [...]}`; los `None`, los vacíos y los más
     cortos que `LONGITUD_MINIMA_VALOR_PERSONAL` se descartan (ver esa constante). El costo es
     `celdas × valores` de búsquedas de subcadena, lineal en las dos: con el histórico de una
@@ -170,14 +245,15 @@ def fugas_de_datos_personales_en_libro(libro: Any, valores_por_tipo: Mapping[str
         encabezados = filas[0]
         for numero_fila, fila in enumerate(filas, start=1):
             for indice, valor in enumerate(fila):
-                tipo_por_patron = dato_personal_en_texto(valor)
-                if tipo_por_patron is not None:
-                    fugas.append(FugaDatoPersonal(hoja.title, numero_fila, _nombre_de_columna(encabezados, indice), tipo_por_patron, "patrón"))
-                if not isinstance(valor, str):
+                hallados = _datos_personales_en_celda(valor, buscables)
+                if not hallados:
                     continue
-                for tipo, valores_del_tipo in buscables.items():
-                    if any(buscable in valor for buscable in valores_del_tipo):
-                        fugas.append(FugaDatoPersonal(hoja.title, numero_fila, _nombre_de_columna(encabezados, indice), tipo, "valor"))
+                # La etiqueta se resuelve **una sola vez por celda afectada** y por el camino
+                # certificado: es lo único que sale publicado de la celda, así que no puede ser
+                # contenido crudo del libro (ver `_nombre_de_columna`).
+                columna = _nombre_de_columna(hoja.title, encabezados, indice, buscables)
+                for tipo, deteccion in hallados:
+                    fugas.append(FugaDatoPersonal(hoja.title, numero_fila, columna, tipo, deteccion))
     return fugas
 
 

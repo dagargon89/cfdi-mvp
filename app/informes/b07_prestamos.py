@@ -289,7 +289,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # y antes del retorno por "sin descuentos": el estatus del comprobante no depende de que haya
     # deducciones que reportar. Recibe el universo completo, no un comprobante: el colapso por
     # umbral de `ESTATUS_NO_VERIFICADO` es una decisión sobre el conjunto (ver su docstring).
-    banderas.extend(universo_nomina.banderas_de_estatus([(comprobante, detalle) for comprobante, _n, _r, _t, detalle in filas_universo]))
+    banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
 
     if not importes_por_concepto:
         return ResultadoInforme(
