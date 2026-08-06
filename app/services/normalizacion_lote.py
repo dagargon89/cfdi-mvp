@@ -35,6 +35,29 @@ def _es_fallo_de_concurrencia(exc: BaseException) -> bool:
     pisan en `_upsert_detalle`, que hace SELECT-luego-INSERT sin protección, y en
     `_limpiar_hijos`, que borra 14 tablas por `comprobante_id`. El resultado es un
     `IntegrityError` por PK duplicada o —lo más probable— un deadlock de InnoDB.
+
+    **Limitación conocida: la protección es completa para el 1062 y parcial para el 1213.**
+    Lo que hace el caller al detectar concurrencia es re-consultar `necesita_normalizar`, y
+    eso solo funciona si el proceso ganador **ya commiteó**:
+
+    - Con `IntegrityError` (1062, PK duplicada) el orden es forzoso: la clave duplicada solo
+      existe si el ganador commiteó. La re-consulta siempre lo ve y el comprobante sano nunca
+      se marca.
+    - Con un deadlock (1213) no: InnoDB aborta a la víctima **mientras** el ganador sigue con
+      su transacción abierta. En ese orden —el real— la re-consulta no ve nada todavía,
+      `necesita_normalizar` sigue devolviendo `True` y sí se registra el error sobre un
+      comprobante sano. La prueba de deadlock de la suite tiene al ganador ya commiteado, así
+      que cubre la condición de esta función, no esa carrera temporal.
+
+    **Lo robusto sería reintentar** la normalización una vez ante un fallo de concurrencia,
+    en vez de consultar el estado de inmediato: el reintento espera de forma natural a que el
+    ganador termine, y solo entonces `necesita_normalizar` da la respuesta buena. Queda
+    anotado como deuda.
+
+    Se acepta dejarlo así porque el residual ya no produce un dato falso silencioso: con la
+    bandera `DATOS_DE_CORRIDA_ANTERIOR` de B-02, un comprobante marcado por error sigue
+    entrando al informe con sus importes y llega al patrón como un aviso visible que se
+    puede investigar, no como una fila que desaparece.
     """
     if isinstance(exc, IntegrityError):
         return True
