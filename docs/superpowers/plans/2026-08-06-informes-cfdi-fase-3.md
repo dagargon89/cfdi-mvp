@@ -48,7 +48,7 @@ Y el trato es distinto por informe **a propósito**:
 |---|---|---|
 | **B-03** | Columnas 1–13 normales; las de topes de exención **vacías con bandera** `FALTA_UMA` (o `UMA_SIN_CONFIRMAR`) | El desglose gravado/exento ya es útil sin los topes; calcularlos con un cero daría exenciones falsas |
 | **B-06** | Agrupa por el texto libre del XML y emite `DEPARTAMENTO_SIN_MAPEO` con el conteo de filas afectadas | El agrupamiento aproximado sirve desde el día uno, y la calidad queda auditable |
-| **B-08** | **No se genera.** Devuelve aviso diciendo exactamente qué falta cargar | La ficha B-08.R2 dice que sin `map_concepto_provision` no es calculable. Una provisión de pasivo laboral calculada sin saber qué conceptos son aguinaldo es un número sin significado que alguien podría llevar a sus estados financieros |
+| **B-08** | **No se genera** mientras algún concepto de percepción esté **sin clasificar**, y el aviso dice cuáles. Con la clasificación completa —aunque todos sean `NO_APLICA`— **sí se genera** | Sin clasificar, no se puede distinguir "no se pagó aguinaldo" de "sí se pagó y no sé cuál es", y una provisión calculada sobre esa duda es un número sin significado que alguien podría llevar a sus estados financieros. Con la clasificación completa, el cero es un hecho conocido |
 | **B-10** | Las dos validaciones de SBC **no se evalúan** y el conteo `VALIDACIONES_EJECUTADAS` lo refleja | Una validación de "salario bajo el mínimo" con el mínimo equivocado es peor que no tenerla: da falsos negativos silenciosos |
 
 ## Qué se sincroniza automáticamente y qué no — investigado, no supuesto
@@ -93,7 +93,7 @@ Y el trato es distinto por informe **a propósito**:
 | `param_fiscal` | `ejercicio` INT, `clave` VARCHAR(40), `valor` `Numeric(18,6)`, `vigencia_desde` DATE, `vigencia_hasta` DATE NULL, **`origen`** ENUM(`SEMILLA`,`MANUAL`,`SINCRONIZADO`), **`fuente`** VARCHAR(500), **`sincronizado_en`** DATETIME NULL, **`confirmado_por`** VARCHAR(128) NULL, **`confirmado_en`** DATETIME NULL | Claves: `UMA_DIARIA`, `UMA_MENSUAL`, `UMA_ANUAL`, `SALARIO_MINIMO_GENERAL`, `SALARIO_MINIMO_ZLFN`, `TIPO_CAMBIO_USD`. PK compuesta `(clave, vigencia_desde)` |
 | `catalogo_percepcion_marca` | `tipo_percepcion` CHAR(3) **PK**, `es_ingreso_ordinario` BOOL, `base_exencion` ENUM(`UMA_DIAS`,`SM_DIAS`,`PORCENTAJE`,`NINGUNA`), `factor_exencion` `Numeric(9,4)` NULL, `integra_sbc` BOOL, `es_provisionable` BOOL | Las marcas del §3.1 que el catálogo del SAT no trae |
 | `map_departamento` | `empresa_id` FK, `departamento_texto` VARCHAR(100), `centro_costo` VARCHAR(100) | PK `(empresa_id, departamento_texto)` |
-| `map_concepto_provision` | `empresa_id` FK, `naturaleza` CHAR(1), `tipo` CHAR(3), `clave` VARCHAR(15), `categoria` ENUM(`AGUINALDO`,`VACACIONES`,`PRIMA_VACACIONAL`) | PK con las cuatro primeras |
+| `map_concepto_provision` | `empresa_id` FK, `naturaleza` CHAR(1), `tipo` CHAR(3), `clave` VARCHAR(15), `categoria` ENUM(`AGUINALDO`,`VACACIONES`,`PRIMA_VACACIONAL`,`NO_APLICA`) | PK con las cuatro primeras |
 | `tabla_vacaciones` | `anios_antiguedad` INT **PK**, `dias` INT | Art. 76 LFT. Global: es ley |
 | `configuracion_empresa` | `empresa_id` FK **PK**, `zona_salarial` ENUM(`GENERAL`,`ZLFN`) **NULL**, `dias_aguinaldo` INT **NULL**, `factor_prima_vacacional` `Numeric(5,4)` **NULL** | Política de cada organización. **Los tres nacen nulos a propósito** |
 
@@ -766,6 +766,11 @@ git commit -m "feat(config): sembrar la ley y los valores fiscales 2026 como pro
   - `GET /v1/configuracion/percepciones` y `PUT /v1/configuracion/percepciones/{tipo}` → marcas del §3.1 (`require_admin`).
   - `GET /v1/empresas/{empresa_id}/configuracion` y `PUT ...` → zona salarial, días de aguinaldo, factor de prima (`require_empresa(RolEmpresa.OPERADOR)`).
   - `GET /v1/empresas/{empresa_id}/configuracion/mapeos` y `PUT ...` → `map_departamento` y `map_concepto_provision`.
+  - **`GET /v1/empresas/{empresa_id}/configuracion/conceptos-observados`** → los conceptos que **realmente aparecen** en los CFDI de la empresa, cada uno con su naturaleza, tipo, clave, descripción, número de comprobantes en que aparece, importe acumulado, y la categoría que tenga asignada (o ninguna). Igual para los departamentos observados.
+
+**Por qué existe `conceptos-observados`, y es la pieza que hace usable toda la configuración por empresa.** Nadie sabe de memoria que su aguinaldo se timbra como `P/002/047`: las claves internas las inventa el sistema de nómina del patrón, no el usuario. Pedirle a alguien que las escriba a ciegas es pedirle un dato que no tiene, y fue un defecto de diseño de las versiones anteriores de este plan. Con este endpoint la pantalla puede **listar lo que la nómina realmente emitió** y dejar que la persona reconozca la descripción —"Aguinaldo", "Prima vacacional"— y elija su categoría de una lista. Nunca teclea una clave.
+
+Sale de las tablas normalizadas que ya existen (`nomina_percepcion`, `nomina_receptor`), con una consulta agregada. **Cero N+1.**
 
 **El registro va en `app/api/v1/router.py`, no en `app/main.py`.** (Se documentó dos veces en las fases anteriores porque el plan lo tenía mal.)
 
@@ -1171,7 +1176,15 @@ git add app/informes/ tests/ && git commit -m "feat(informes): agregar B-06 (cos
 
 **B-08.R3, que hay que respetar en la presentación:** esto es una **estimación con base en CFDI**, no un cálculo actuarial. No cubre prima de antigüedad ni beneficios al retiro (NIF D-3). **Rotúlalo en la hoja `Parámetros` del libro**, no solo en el docstring: quien reciba el Excel tiene que verlo.
 
-**Sin `map_concepto_provision` cargado, el informe NO se genera.** Devuelve un `ResultadoInforme` sin filas y un aviso que diga exactamente qué falta y cómo cargarlo. Es la decisión aprobada por el dueño del repo: la ficha B-08.R2 dice que sin esa tabla no es calculable, y una provisión calculada sin saber qué conceptos son aguinaldo es un número sin significado. **No intentes inferir la categoría por el texto del concepto** — la ficha lo prohíbe.
+**La condición para generarse no es "que existan filas en `map_concepto_provision`", sino que la clasificación esté completa.** Esta es la corrección de una versión anterior del plan, y el matiz decide si el informe sirve o no:
+
+- Lo que B-08 necesita saber es **cuánto aguinaldo se pagó ya**, para restarlo del devengado. El devengado se calcula del salario y los días trabajados, sin necesidad del mapeo.
+- Si algún concepto de percepción de la empresa **no tiene categoría asignada**, es imposible distinguir *"no se pagó aguinaldo"* de *"sí se pagó, pero no sé cuál concepto es"*. Ahí el informe **no se genera**, y el aviso dice **cuáles conceptos faltan por clasificar** — no un mensaje genérico.
+- Pero si **todos** los conceptos observados están clasificados —incluidos los marcados explícitamente como `NO_APLICA`— entonces "aguinaldo pagado = 0" es un **hecho conocido**, no una laguna, y **el informe se genera con normalidad**. Una organización cuyo periodo no incluye diciembre tiene legítimamente cero aguinaldo pagado y una provisión igual al devengado completo.
+
+Por eso `CategoriaProvision` incluye **`NO_APLICA`**: sin esa opción, marcar "este concepto no es ninguna de las tres" sería indistinguible de no haberlo revisado, y la clasificación nunca podría estar completa.
+
+**No intentes inferir la categoría por el texto del concepto** — la ficha B-08.R2 lo prohíbe, y con razón: "Fondo ahorro empresa" y "Fondo de Ahorro Empleado" son conceptos distintos con el mismo texto casi idéntico.
 
 **Los dos parámetros nacen `None` y se resuelven desde `configuracion_empresa`.** Si el parámetro viene nulo **y** la configuración también, el informe **no se genera** y dice que falta configurar los días de aguinaldo. **No uses 15 como default silencioso**: el mínimo legal es 15, pero muchas organizaciones dan más, y adivinar subestima la provisión. El parámetro explícito, cuando viene, gana sobre la configuración — es la corrida puntual con otro supuesto.
 
