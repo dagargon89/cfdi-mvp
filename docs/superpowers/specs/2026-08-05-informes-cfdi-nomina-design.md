@@ -288,7 +288,24 @@ también se publicaría al reportar una fuga de otra fila. Dos capas:
    segura. Es la garantía principal.
 2. `FugaDatoPersonal.__post_init__` levanta `ValueError` si algo con estructura de CURP/NSS llega a cualquier
    campo por cualquier otra ruta de construcción. **Falla, no censura:** recortar el valor en silencio
-   dejaría la red aparentando funcionar. La excepción nombra el campo, nunca el valor.
+   dejaría la red aparentando funcionar.
+3. **`__repr__` y `descripcion` pasan por `_publicable`** (ronda 2). Un dataclass con `slots=True` puebla sus
+   campos **antes** de correr `__post_init__`, así que cuando la capa 2 lanza, `self` ya tiene el valor
+   crudo — y el formateador de tracebacks de pytest imprime los argumentos del marco donde se levantó la
+   excepción. El mensaje nunca llevaba el valor; **el `repr` del objeto sí**, y lo imprimía otra herramienta:
+   `self = FugaDatoPersonal(..., columna='VECJ...', ...)`. El incidente original por otro mecanismo. Se usa
+   `repr=False` + `__repr__` propio y no `repr=False` a secas porque el `repr` se usa en el camino sano (las
+   premisas `assert fugas == []`), y `<FugaDatoPersonal object at 0x...>` perdería el diagnóstico entero.
+
+**La afirmación exacta.** No es "la excepción nombra el campo, nunca el valor" —cierto del mensaje, falso de
+lo que CI imprimiría—, sino: *ninguna forma de convertir el objeto en texto reproduce el valor*, y con el
+`--tb=auto` por defecto (el de CI: `pyproject.toml` no fija ninguno) el objeto es lo único que se renderiza
+del marco donde salta el cable trampa, así que la salida real queda limpia. **Residual declarado:** con
+`--tb=long` o `--showlocals` —acciones deliberadas de quien depura, no el default— pytest renderiza también
+los marcos que *recibieron* el valor: el `__init__` que genera `@dataclass` y el del propio auditor, donde
+`valores_por_tipo` trae las CURP y los NSS de todo el universo. Son locales de marcos de CPython, fuera del
+alcance de cualquier método del objeto, y la segunda exposición existiría igual aunque el cable trampa no
+lanzara nunca. Por eso la capa 1 es la garantía y las otras dos son la red.
 
 `excel.HOJAS_CON_ENCABEZADO` (`Datos`, `Banderas`, `Diccionario`) es la fuente de verdad de qué hoja tiene
 fila de títulos, y vive en el módulo que **escribe** el libro porque es un hecho de su estructura.
