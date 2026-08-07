@@ -872,6 +872,8 @@ git commit -m "feat(web): pantalla de configuracion fiscal con procedencia y con
   - `async def sincronizar_tipo_cambio(db, *, hoy: date) -> int` — Banxico; devuelve cuántos valores propuso.
   - Tarea Celery `revisar_vigencia_fiscal` (diaria, por beat).
 
+**Una fuente de caducidad más, que no es un valor sino el propio catálogo.** Desde la ronda de la tarea 4, capturar una marca de percepción exige que el tipo exista en `C75b_c_TipoPercepcion` de satcfdi. Es la protección correcta contra un dedazo (`150` por `015`), pero tiene un costo: **si el SAT publica claves nuevas, se rechazarán hasta que se actualice la versión de `satcfdi`**. Inclúyelo en las alertas: si la versión instalada lleva mucho sin actualizarse, dilo, porque el síntoma sin aviso sería "no puedo capturar un tipo que el SAT ya publicó".
+
 **Esto es lo que de verdad mantiene los valores al día.** No hay API para la UMA ni para el salario mínimo, pero **sí se sabe cuándo cambian**: la UMA el 1 de febrero, el salario mínimo el 1 de enero. Si esa fecha del año en curso ya pasó y no hay un valor **confirmado** cuya `vigencia_desde` sea igual o posterior, el valor está caducado y hay que gritarlo. Esto no se rompe nunca, porque no depende de que una página web conserve su estructura.
 
 **La sincronización de Banxico propone, no confirma** — como todo lo demás. Y **falla ruidosamente**: si la API no responde o el token falta, se registra y la alerta lo dice; nunca se traga el error dejando un valor viejo con cara de vigente.
