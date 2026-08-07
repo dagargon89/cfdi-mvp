@@ -51,13 +51,27 @@ async def test_get_automatizaciones_default_todas_activas(client: AsyncClient, d
     await db.commit()
     res = await client.get("/v1/config/automatizaciones", headers={"Authorization": "Bearer admin1"})
     assert res.status_code == 200
-    assert res.json() == {"sync_diaria": True, "lista_69b": True, "re_verificar": True, "limpieza": True}
+    # El diccionario se afirma completo a propósito: agregar un interruptor debe romper esta
+    # prueba, para que nadie sume una automatización sin decidir su valor por omisión.
+    assert res.json() == {
+        "sync_diaria": True,
+        "lista_69b": True,
+        "re_verificar": True,
+        "limpieza": True,
+        "vigencia_fiscal": True,
+    }
 
 
 async def test_put_automatizaciones_persiste(client: AsyncClient, db: AsyncSession) -> None:
     await crear_usuario(db, uid="admin1", correo="admin@example.com", rol_global=RolGlobal.ADMIN)
     await db.commit()
-    body = {"sync_diaria": False, "lista_69b": True, "re_verificar": False, "limpieza": False}
+    body = {
+        "sync_diaria": False,
+        "lista_69b": True,
+        "re_verificar": False,
+        "limpieza": False,
+        "vigencia_fiscal": False,
+    }
     res = await client.put("/v1/config/automatizaciones", json=body, headers={"Authorization": "Bearer admin1"})
     assert res.status_code == 200
     assert res.json() == body
@@ -66,6 +80,7 @@ async def test_put_automatizaciones_persiste(client: AsyncClient, db: AsyncSessi
     assert bool(await config_repo.valor(db, "auto_lista_69b", True)) is True
     assert bool(await config_repo.valor(db, "auto_re_verificar", True)) is False
     assert bool(await config_repo.valor(db, "auto_limpieza", True)) is False
+    assert bool(await config_repo.valor(db, "auto_vigencia_fiscal", True)) is False
 
 
 async def test_automatizaciones_solo_admin(client: AsyncClient, db: AsyncSession) -> None:

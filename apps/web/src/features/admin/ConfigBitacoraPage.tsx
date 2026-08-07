@@ -42,7 +42,7 @@ const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: 
     key: 'vigencia_fiscal',
     nombre: 'Alarma de vigencia fiscal',
     queHace: 'Revisa a diario si la UMA, los salarios mínimos y el tipo de cambio están al día, y baja el tipo de cambio del día de Banxico para que lo confirmes.',
-    consecuencia: 'Dejarás de recibir el aviso cuando un valor fiscal caduque (la UMA cambia cada 1 de febrero y el salario mínimo cada 1 de enero) y el tipo de cambio dejará de actualizarse solo; tendrás que revisarlo por tu cuenta.',
+    consecuencia: 'Dejará de revisarse a diario por su cuenta y el tipo de cambio no volverá a bajarse solo de Banxico; tendrás que hacerlo tú. Las alertas seguirán apareciendo en la pestaña Fiscal cada vez que la abras, porque se calculan en ese momento: lo que se apaga es la revisión automática, no el aviso.',
   },
   {
     key: 'limpieza',
