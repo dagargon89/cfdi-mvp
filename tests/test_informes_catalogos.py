@@ -60,3 +60,16 @@ def test_tipos_de_esta_ordenado_por_clave_como_texto() -> None:
 
 def test_tipos_de_naturaleza_desconocida_devuelve_vacio() -> None:
     assert catalogos.tipos_de("X") == []
+
+
+def test_tipos_de_regimen_trae_el_catalogo_del_sat() -> None:
+    """`c_TipoRegimen`, que usa `B-10.TIPO_REGIMEN_INVALIDO` para atrapar un régimen mal
+    tecleado (`'2'` por `'02'`) — el defecto que hacía desaparecer del informe a un empleado con
+    el SBC en cero, porque `SBC_CERO` exige `'02'` exacto.
+
+    Se aseveran las dos claves que sostienen esa validación y **la que no debe estar**: si `'2'`
+    llegara a ser una clave válida, la comprobación dejaría de atrapar el caso que la motiva."""
+    regimenes = catalogos.tipos_de_regimen()
+    assert "02" in regimenes and "09" in regimenes and "99" in regimenes
+    assert "2" not in regimenes, "el caso que TIPO_REGIMEN_INVALIDO existe para atrapar"
+    assert all(isinstance(clave, str) for clave in regimenes)

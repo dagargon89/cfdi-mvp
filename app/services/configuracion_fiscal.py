@@ -307,7 +307,9 @@ async def marcas_de_percepcion(db: AsyncSession) -> dict[str, CatalogoPercepcion
     alimenta el cálculo de exenciones igual que la UMA, pero mientras la UMA se verifica
     contra un boletín oficial, estos factores son 44 derivaciones del art. 93 de la LISR
     hechas a mano. Un tipo que falte aquí porque nadie lo confirmó sale como bandera
-    (`FALTA_CATALOGO_DE_MARCAS`), no como un cero que parecería "no tuvo ingreso ordinario".
+    (`MARCA_SIN_CONFIRMAR` si hay propuesta esperando, `FALTA_MARCA` si no hay ni eso — las
+    mismas dos claves en B-03 y en B-05), no como un cero que parecería "no tuvo ingreso
+    ordinario".
 
     Al leer `factor_exencion`, ojo con la unidad: con `PORCENTAJE` va en escala 0-100, no
     como fracción. Está documentado junto a la columna en `app/models/configuracion_fiscal.py`.
@@ -556,6 +558,23 @@ async def dias_de_vacaciones(db: AsyncSession, anios: int) -> int | None:
 async def configuracion_de_empresa(db: AsyncSession, empresa_id: int) -> ConfiguracionEmpresa | None:
     """La política laboral configurada de una empresa, o `None` si nunca se capturó."""
     return await db.get(ConfiguracionEmpresa, empresa_id)
+
+
+def clave_de_salario_minimo(zona: ZonaSalarial) -> str:
+    """Qué renglón de `param_fiscal` le toca a una zona salarial.
+
+    Se expone —el mapa sigue siendo privado— para el caller que resuelve **muchas fechas** de
+    la misma empresa: con la clave en la mano lee la configuración de la empresa **una vez** y
+    después resuelve cada fecha con `valor_vigente`/`valor_propuesto`, en vez de llamar a
+    `salario_minimo_de_empresa` por fecha y volver a pedir `configuracion_empresa` en cada
+    una. Es el caso de B-10, que resuelve una fecha por quincena del rango.
+
+    Lo que **no** hace es sustituir a `salario_minimo_de_empresa` para el caller de una sola
+    fecha: esa función es la que encapsula la decisión de negocio ("sin zona configurada no
+    hay valor, y no se mira ningún renglón"), y duplicarla en cada informe es exactamente
+    cómo se pierde. Esta función solo traduce zona → clave.
+    """
+    return _CLAVE_SALARIO_MINIMO[zona]
 
 
 async def salario_minimo_de_empresa(db: AsyncSession, empresa_id: int, en_fecha: date) -> Decimal | None:

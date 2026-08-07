@@ -14,7 +14,7 @@ columna por validación, una fila por empleado) que también ofrece la ficha B-1
 un parámetro sin efecto (`severidad_minima` no tendría nada que filtrar de forma limpia en un
 pivote) y está fuera del alcance declarado de esta tarea.
 
-**Las 23 validaciones en alcance, en cinco grupos con dificultad propia:**
+**Las 25 validaciones en alcance, en cinco grupos con dificultad propia:**
 
 1. **Estructura** (`app.informes.validadores`, puro, sin BD): RFC, CURP, NSS y cuenta
    bancaria por expresión regular y dígito verificador.
@@ -33,40 +33,90 @@ pivote) y está fuera del alcance declarado de esta tarea.
 5. **Dependientes de la configuración fiscal** (`SBC_SOBRE_TOPE`, `SBC_BAJO_MINIMO`): las dos
    que la fase 2 dejó fuera de alcance por falta de `param_fiscal`. Ver el bloque siguiente.
 
-Las dos validaciones de SBC y el conteo variable
---------------------------------------------------
+Las dos validaciones de SBC, su grano propio, y el conteo variable
+--------------------------------------------------------------------
 - **`SBC_SOBRE_TOPE`** (media): `salario_base_cot_apor > 25 × UMA_DIARIA` **vigente a la fecha
   de pago**. El límite superior de cotización del artículo 28 de la Ley del Seguro Social. Es
   media y no alta porque un SBC sobre el tope no daña al trabajador: sobrestima la cuota, y el
   IMSS la recorta al tope de todos modos.
-- **`SBC_BAJO_MINIMO`** (alta): `salario_base_cot_apor < salario_minimo_de_empresa(...)`. Un SBC
-  por debajo del mínimo es incumplimiento directo y deja al trabajador con prestaciones
-  subvaluadas.
+- **`SBC_BAJO_MINIMO`** (alta): `salario_base_cot_apor` por debajo del salario mínimo de la zona
+  configurada. Incumplimiento directo, y deja al trabajador con prestaciones subvaluadas.
+
+**Estas dos NO se evalúan sobre la última fotografía: recorren TODOS los periodos del rango.**
+Es la corrección de la ronda 1 y vale la pena entender por qué, porque es la excepción a la
+regla general del informe. "Última fotografía" es correcto para los campos de **identidad** —una
+CURP es la misma en todas las quincenas, así que mirar la más reciente es mirar el dato bueno—,
+pero el SBC es un **importe de cumplimiento que cambia periodo a periodo**. Con el grano de
+última fotografía, un empleado de la ZLFN pagado con SBC 400 el 30 de junio (mínimo 440.87:
+incumple) y con 500 el 15 de julio **no producía ningún hallazgo**: el informe miraba julio y
+julio cumplía. Ese es exactamente el falso negativo que `SBC_BAJO_MINIMO` existe para evitar, y
+además la corrección de julio es *evidencia* de que junio estuvo mal, no su descargo. Ninguna
+otra validación cubría el hueco: `DATOS_CAMBIANTES` cruza NSS y fecha de inicio, no el SBC.
+
+**El grano de la fila no cambia** (`(rfc, clave)`, "una fila = algo que corregir"): los periodos
+infractores de un mismo empleado se colapsan en **una** fila, y el mensaje dice cuántos son,
+cuál fue el peor y en qué fecha de pago. **Residuo declarado:** las columnas `SBC`/`SDI` de esa
+fila siguen siendo las de la última fotografía —salen del bloque de identidad, común a todas las
+filas del empleado—, así que pueden mostrar un SBC que sí cumple mientras la fila reporta que
+otro periodo no. Por eso el mensaje **siempre** cita el importe y la fecha del periodo infractor
+y advierte de qué es la columna: el dato accionable va en el texto, no en la celda.
 
 **El SBC solo se compara si es positivo.** Con `sbc <= 0` ninguna de las dos corre: un SBC en
 cero no está "por debajo del mínimo", es una base ausente, y `SBC_CERO` ya nombra ese defecto
 donde sí lo es (`tipo_regimen='02'`). Sin esta regla, cada asimilado a salarios —que legítimamente
-no cotiza— saldría con un hallazgo de severidad alta por cada corrida.
+no cotiza— saldría con un hallazgo de severidad alta por cada corrida. Lo que esa guarda **no**
+puede tapar lo cubren dos validaciones nuevas; ver el bloque siguiente.
 
 **Nada de heurísticas para la zona salarial.** El CFDI no dice en qué zona está el trabajador y
 **no se infiere del código postal ni del domicilio**: sale de `configuracion_empresa.zona_salarial`,
-que nace nula a propósito, y `salario_minimo_de_empresa` devuelve `None` **sin mirar los valores**
-cuando no está configurada. El mínimo de la Zona Libre de la Frontera Norte y el general se llevan
-casi un 40%, así que suponer el general produciría **falsos negativos** en una validación de
-cumplimiento: empleados por debajo del mínimo que nadie detecta. Cuando falta el dato, la
-validación **no se evalúa** y se emite una bandera que dice cuál falta, distinguiendo los tres
-estados igual que B-03 —confirmado calcula; propuesto sin confirmar lleva su procedencia
-(`UMA_SIN_CONFIRMAR`); ausente dice qué capturar (`FALTA_UMA`, `FALTA_ZONA_SALARIAL`,
-`FALTA_SALARIO_MINIMO`)—. **Una bandera por causa, con el número de empleados afectados, nunca
-una por empleado.**
+que nace nula a propósito, y sin ella no se mira ningún renglón de salario mínimo. El mínimo de la
+Zona Libre de la Frontera Norte y el general se llevan casi un 40%, así que suponer el general
+produciría **falsos negativos** en una validación de cumplimiento: empleados por debajo del mínimo
+que nadie detecta. Cuando falta el dato, la validación **no se evalúa** y se emite una bandera que
+dice cuál falta, distinguiendo los tres estados igual que B-03 —confirmado calcula; propuesto sin
+confirmar lleva su procedencia (`UMA_SIN_CONFIRMAR`, `SALARIO_MINIMO_SIN_CONFIRMAR`); ausente dice
+qué capturar (`FALTA_UMA`, `FALTA_ZONA_SALARIAL`, `FALTA_SALARIO_MINIMO`)—. **Una bandera por
+causa, con el número de empleados afectados, nunca una por empleado.**
+
+El estado "propuesto" del salario mínimo no es teórico: los dos mínimos **ya están capturados**
+con vigencia 2026-01-01 y sin confirmar, así que en cuanto se configure la zona ese va a ser el
+estado del 100 % de las corridas de ese tramo. Decir "captúralo" sobre un valor que ya está ahí y
+al que solo le falta un clic es justo la diferencia que toda la interfaz de confirmación existe
+para marcar.
 
 **Y el conteo `VALIDACIONES_EJECUTADAS` lo refleja: una validación que no corre no se cuenta.**
 Por eso el número **es variable** desde la fase 3, y no un invariante del módulo: con la
 configuración fiscal ausente —que es el estado de la instalación real hoy, 5 parámetros y 44
-marcas sin confirmar— un empleado con todos sus campos ejecuta 15 validaciones, y con la UMA y la
-zona configuradas ejecuta 17. Un conteo que dijera "ejecuté 21" habiendo ejecutado 19 sería peor
-que no tenerlo: convertiría la bandera que existe para hacer auditable al informe en una
-afirmación falsa. Ver `VALIDACIONES_POR_EMPLEADO_COMPLETO` y `VALIDACIONES_QUE_EXIGEN_CONFIGURACION`.
+marcas sin confirmar— un empleado con todos sus campos ejecuta 17 validaciones, y con la UMA y la
+zona configuradas ejecuta 2 más **por cada CFDI suyo del rango**. Un conteo que dijera "ejecuté
+25" habiendo ejecutado 21 sería peor que no tenerlo: convertiría la bandera que existe para hacer
+auditable al informe en una afirmación falsa. Ver `VALIDACIONES_POR_EMPLEADO_COMPLETO` y
+`VALIDACIONES_QUE_EXIGEN_CONFIGURACION`.
+
+Las dos validaciones que tapan el hueco de la guarda `sbc <= 0`
+------------------------------------------------------------------
+La guarda es correcta, pero **compuesta** con la condición de régimen de `SBC_CERO` dejaba caer
+casos por la rendija, y los dejaba caer en silencio:
+
+- **`SBC_NEGATIVO`** (alta), **sin ninguna condición de régimen**: un SBC negativo no es legítimo
+  bajo ningún régimen, así que no necesita condicionarse a nada. Antes, un SBC negativo con
+  `tipo_regimen` distinto de `'02'` no lo veía nadie: `SBC_CERO` exige el régimen `'02'` y las dos
+  de SBC exigen positivo.
+- **`TIPO_REGIMEN_INVALIDO`** (alta): `tipo_regimen` vacío, o con un valor que no está en
+  `c_TipoRegimen`. Es la validación que faltaba sobre el campo del que **dependen otras dos de
+  severidad alta** (`SBC_CERO` y `NSS_FALTANTE`) y que nadie comprobaba. El caso concreto: un
+  empleado de régimen `'02'` con el régimen tecleado `'2'` y el SBC en cero **desaparecía por
+  completo** del informe —ninguna de las tres validaciones se activaba— y no había forma de
+  enterarse. Ahora el defecto de captura se reporta, que es además la corrección que hay que
+  hacer **primero**: con el régimen bien capturado, `SBC_CERO` vuelve a funcionar sola.
+
+  Una sola clave para "vacío" y para "no existe en el catálogo" porque la corrección es la misma
+  —capturar bien el régimen—, y el informe promete "una fila = algo que corregir"; el mensaje sí
+  distingue los dos casos. Ojo con los ceros a la izquierda: `'2'` y `'02'` se teclean casi igual y
+  solo uno existe, el mismo error que `exige_tipo_percepcion_conocido` atrapa del lado de la
+  escritura. Si el catálogo de `satcfdi` no se puede leer, `tipos_de_regimen()` devuelve vacío y
+  entonces solo se comprueba el caso "vacío" —nunca se marca a toda la plantilla por no poder leer
+  un catálogo—, pero la validación **sí corre y sí cuenta**, porque esa mitad siempre se evalúa.
 
 **B-10.R1 — SBC y SDI son conceptos distintos, y hay que respetarlo.** El SBC es la base de
 cotización ante el IMSS (topada a 25 UMA); el SDI es el salario diario integrado de los
@@ -74,7 +124,7 @@ artículos 84 y 89 de la LFT, base de indemnizaciones. Un SDI **inferior** al SB
 teóricamente posible aunque infrecuente (los conceptos usan bases distintas), así que
 `SDI_MENOR_SBC` es severidad **media**, no un error absoluto como `SBC_CERO` o `SDI_CERO`.
 
-**Reglas de aplicabilidad — cuándo una validación se omite (no cuándo se relaja).** Las 23
+**Reglas de aplicabilidad — cuándo una validación se omite (no cuándo se relaja).** Las 25
 validaciones son en principio independientes entre sí, pero varias necesitan un dato que
 puede faltar, y comparar contra `None` no está definido. Se omiten (no se marcan, ni en un
 sentido ni en el otro) en estos casos, todos documentados aquí para que ninguno sea un olvido:
@@ -110,7 +160,12 @@ sentido ni en el otro) en estos casos, todos documentados aquí para que ninguno
 - **`SBC_SOBRE_TOPE` y `SBC_BAJO_MINIMO`** se omiten con `sbc` ausente o no positivo (arriba) y,
   cada una por separado, cuando falta el valor de configuración que necesita: la UMA diaria
   vigente a la fecha de pago para la primera, la zona salarial de la empresa o el mínimo
-  confirmado de esa zona para la segunda. La omisión **siempre** deja bandera.
+  confirmado de esa zona para la segunda. La omisión **siempre** deja bandera. Se evalúan por
+  **cada** comprobante del rango, no sobre la última fotografía (ver el bloque de arriba), así
+  que se omiten periodo a periodo: un CFDI sin fecha de pago no bloquea a los demás.
+- **`SBC_NEGATIVO`** se omite solo si `sbc` es `None`. **No** se condiciona al régimen: ver el
+  bloque "Las dos validaciones que tapan el hueco". **`TIPO_REGIMEN_INVALIDO`** no se omite
+  nunca; si el catálogo de `satcfdi` no se puede leer, comprueba solo que el campo no esté vacío.
 - **`CURP_DUPLICADA`, `RFC_DUPLICADO`, `NSS_DUPLICADO` y `DATOS_CAMBIANTES`** ignoran los
   valores vacíos: un CURP o NSS vacío compartido por varios RFC no es una duplicidad real de
   identidad, es ausencia de dato en varios lados a la vez, y ya la señalan otras reglas.
@@ -129,6 +184,12 @@ universo viene ordenado ascendente por `fecha_pago`, así que sobrescribir en el
 iteración deja la más reciente). Las validaciones de **conjunto** y **entre periodos**
 (grupos 2 y 3) sí recorren todos los comprobantes del rango, porque su propósito es
 precisamente comparar entre ellos.
+
+**Y el grupo 5 también los recorre todos**, por un motivo distinto del de los grupos 2 y 3: no
+compara periodos entre sí, sino que **cada periodo contra la ley por separado**. La última
+fotografía basta para un dato de identidad y no basta para un importe de cumplimiento; el
+argumento completo, con el falso negativo que lo motivó, está en el bloque de las dos
+validaciones de SBC.
 
 **Banderas del informe: las del universo compartido y el conteo de validaciones.** Este informe
 no emite banderas del propio hallazgo (los hallazgos SON las filas: cada uno ya lleva su
@@ -185,7 +246,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.informes import universo_nomina, validadores as v
+from app.informes import catalogos, universo_nomina, validadores as v
 from app.informes.base import Bandera, Columna, ResultadoInforme, Severidad
 from app.models.empresa import Empresa
 from app.models.nomina import NominaPercepcion
@@ -223,27 +284,33 @@ _FACTOR_TOPE_SBC = Decimal(25)
 """`SBC_SOBRE_TOPE`: el límite superior de cotización del artículo 28 de la Ley del Seguro
 Social, "veinticinco veces" la UMA diaria.
 
-**No es un importe fiscal codificado** (§2.12): es el multiplicador que fija el texto del
-artículo, no una cifra en pesos. El importe —la UMA— sale de `param_fiscal` resuelto por
-vigencia, que es lo que el §2.12 protege; poner el 25 en la tabla no ganaría nada y obligaría a
-que una validación de cumplimiento dependiera de un renglón más por capturar. Mismo criterio que
-el `_CIEN` de la escala 0-100 en `b03_gravado_exento`."""
+**No es un importe fiscal codificado** (§2.12), y la prueba buena para decidirlo es *¿cambia
+este valor sin cambiar el código?*: la UMA sí, cada enero, y por eso vive en `param_fiscal`
+resuelta por vigencia; el 25 solo cambia por una reforma al artículo 28 de la LSS, y esa reforma
+cambiaría **la regla entera** —qué se compara contra qué—, no solo una cifra. Se acepta a
+sabiendas de que esa reforma exigiría un release, precisamente porque exigiría revisar la
+validación de todos modos.
 
-VALIDACIONES_IMPLEMENTADAS = 23
-"""Las 23 validaciones en alcance (ver el docstring del módulo): 19 por empleado, 3 de
+**Y no es el mismo caso que el `_CIEN` de `b03_gravado_exento`**, aunque se parezcan: aquel es
+aritmética de unidades pura (pasar de escala 0-100 a fracción) y este es un parámetro legal. El
+precedente honesto es el segundo, no el primero."""
+
+VALIDACIONES_IMPLEMENTADAS = 25
+"""Las 25 validaciones en alcance (ver el docstring del módulo): 21 por empleado, 3 de
 conjunto y 1 entre periodos."""
 
-VALIDACIONES_POR_EMPLEADO_COMPLETO = 15
+VALIDACIONES_POR_EMPLEADO_COMPLETO = 17
 """Cuántas validaciones por empleado se ejecutan sobre una fotografía con **todos** sus campos
 presentes y **sin** configuración fiscal disponible — el estado de la instalación real hoy.
 
-Son 15 y no 19 por dos motivos distintos, que conviene no mezclar:
+Son 17 y no 21 por dos motivos distintos, que conviene no mezclar:
 
 - Dos pares son mutuamente excluyentes **por construcción**: `NSS_FALTANTE` solo se evalúa
   cuando el NSS está vacío (y entonces no se evalúan `NSS_LONGITUD` ni `NSS_DIGITO_VERIFICADOR`,
   que sí cuentan aquí), y `BANCO_SIN_CUENTA` solo cuando la cuenta está vacía (y entonces no se
-  evalúa `CUENTA_INVALIDA`, que sí cuenta aquí). Eso descuenta dos de las 19.
-- Las otras dos son las de SBC, que dependen de la configuración fiscal y se cuentan aparte en
+  evalúa `CUENTA_INVALIDA`, que sí cuenta aquí). Eso descuenta dos de las 21.
+- Las otras dos son las de SBC, que dependen de la configuración fiscal **y de cuántos CFDI
+  tenga el empleado en el rango**, así que se cuentan aparte en
   `VALIDACIONES_QUE_EXIGEN_CONFIGURACION`.
 
 **Esta constante no es el total: es el piso.** El conteo real de una corrida es variable por
@@ -251,9 +318,14 @@ diseño (ver el docstring del módulo)."""
 
 VALIDACIONES_QUE_EXIGEN_CONFIGURACION = 2
 """`SBC_SOBRE_TOPE` (UMA diaria vigente a la fecha de pago) y `SBC_BAJO_MINIMO` (zona salarial
-de la empresa más el mínimo confirmado de esa zona). Se suman a
-`VALIDACIONES_POR_EMPLEADO_COMPLETO` **solo** cuando el dato existe y está confirmado; si no,
-no corren, no se cuentan, y dejan bandera."""
+de la empresa más el mínimo confirmado de esa zona). Se suman **solo** cuando el dato existe y
+está confirmado; si no, no corren, no se cuentan, y dejan bandera.
+
+**Y son por CFDI, no por empleado**, a diferencia de todas las de
+`VALIDACIONES_POR_EMPLEADO_COMPLETO`: el SBC es un importe que cambia entre quincenas y cada una
+se compara contra la ley por su cuenta (ver el docstring del módulo). Un empleado con 24
+quincenas en el rango y la configuración completa aporta 48 evaluaciones por este concepto, no
+2 — el conteo dice lo que de verdad corrió."""
 
 VALIDACIONES_DE_CONJUNTO = 3
 """`CURP_DUPLICADA`, `RFC_DUPLICADO` y `NSS_DUPLICADO`: se evalúan una vez por corrida sobre
@@ -358,6 +430,22 @@ class _Hallazgo:
 
 
 @dataclass(frozen=True, slots=True)
+class _ValoresDeFecha:
+    """La UMA diaria y el salario mínimo de la empresa aplicables a **una** fecha de pago, cada
+    uno con su propuesta cuando no hay valor confirmado.
+
+    Las propuestas se guardan al lado del valor y no aparte porque las dos mitades tienen que
+    decidirse juntas: `propuesta is not None` solo tiene sentido leerlo cuando el valor es
+    `None`, y separarlas invita a preguntar por una sin mirar la otra.
+    """
+
+    uma: Decimal | None
+    uma_propuesta: cfg.ValorFiscal | None
+    salario_minimo: Decimal | None
+    salario_minimo_propuesto: cfg.ValorFiscal | None
+
+
+@dataclass(frozen=True, slots=True)
 class _ConfiguracionSbc:
     """Los insumos de `param_fiscal` y `configuracion_empresa` que necesitan las dos
     validaciones de SBC, resueltos **por fecha de pago distinta** (regla 11).
@@ -369,48 +457,54 @@ class _ConfiguracionSbc:
     aviso de configuración.
     """
 
-    uma: dict[date, Decimal | None]
-    uma_propuesta: dict[date, cfg.ValorFiscal | None]
-    salario_minimo: dict[date, Decimal | None]
+    por_fecha: dict[date, _ValoresDeFecha]
     zona_configurada: bool
 
+    def de(self, fecha: date | None) -> _ValoresDeFecha:
+        """Los valores de una fecha, o todo en `None` si la fecha no se resolvió (un CFDI sin
+        `fecha_pago`, inalcanzable a través de `universo()`, que filtra por ese campo)."""
+        if fecha is None:
+            return _VALORES_VACIOS
+        return self.por_fecha.get(fecha, _VALORES_VACIOS)
 
-@dataclass(frozen=True, slots=True)
-class _PorEmpleado:
-    """Lo que produce evaluar la última fotografía de un empleado.
 
-    `omitidas` son las **claves de bandera** de las validaciones que no se pudieron evaluar por
-    falta de configuración fiscal. Viaja junto a `ejecutadas` a propósito: el conteo y el motivo
-    de lo no contado se deciden en el mismo sitio, y así no hay dos copias de la condición
-    "¿corrió esta validación?" que puedan divergir.
-    """
-
-    hallazgos: list[_Hallazgo]
-    ejecutadas: int
-    omitidas: tuple[str, ...]
+_VALORES_VACIOS = _ValoresDeFecha(uma=None, uma_propuesta=None, salario_minimo=None, salario_minimo_propuesto=None)
 
 
 async def _configuracion_sbc(db: AsyncSession, empresa_id: int, fechas: set[date]) -> _ConfiguracionSbc:
     """La UMA diaria y el salario mínimo de la empresa, resueltos a cada fecha de pago distinta
-    de las últimas fotografías del rango.
+    del rango.
+
+    **La configuración de la empresa se lee UNA vez**, no una por fecha: con la zona en la mano
+    se resuelve la clave de `param_fiscal` con `cfg.clave_de_salario_minimo` y cada fecha cuesta
+    una consulta, no dos. Antes esto llamaba a `salario_minimo_de_empresa` por fecha, que vuelve
+    a pedir `configuracion_empresa` en cada llamada — no era un N+1 (el número de fechas lo
+    acota el calendario de nómina, no la plantilla), pero eran tres consultas donde bastaban dos.
 
     `valor_propuesto` solo se consulta cuando no hay valor confirmado: es lo que convierte
     "falta la UMA, ve a buscarla" en "la UMA 2026 está propuesta con su fuente, confírmala".
     """
     config_empresa = await cfg.configuracion_de_empresa(db, empresa_id)
-    uma: dict[date, Decimal | None] = {}
-    uma_propuesta: dict[date, cfg.ValorFiscal | None] = {}
-    salario_minimo: dict[date, Decimal | None] = {}
+    zona = config_empresa.zona_salarial if config_empresa is not None else None
+    # Sin zona configurada no se mira **ningún** renglón de salario mínimo: es la decisión de
+    # `salario_minimo_de_empresa`, replicada aquí porque este caller resuelve muchas fechas.
+    clave_minimo = cfg.clave_de_salario_minimo(zona) if zona is not None else None
+
+    por_fecha: dict[date, _ValoresDeFecha] = {}
     for fecha in sorted(fechas):
-        uma[fecha] = await cfg.valor_vigente(db, "UMA_DIARIA", fecha)
-        uma_propuesta[fecha] = None if uma[fecha] is not None else await cfg.valor_propuesto(db, "UMA_DIARIA", fecha)
-        salario_minimo[fecha] = await cfg.salario_minimo_de_empresa(db, empresa_id, fecha)
-    return _ConfiguracionSbc(
-        uma=uma,
-        uma_propuesta=uma_propuesta,
-        salario_minimo=salario_minimo,
-        zona_configurada=config_empresa is not None and config_empresa.zona_salarial is not None,
-    )
+        uma = await cfg.valor_vigente(db, "UMA_DIARIA", fecha)
+        minimo = None if clave_minimo is None else await cfg.valor_vigente(db, clave_minimo, fecha)
+        por_fecha[fecha] = _ValoresDeFecha(
+            uma=uma,
+            uma_propuesta=None if uma is not None else await cfg.valor_propuesto(db, "UMA_DIARIA", fecha),
+            salario_minimo=minimo,
+            salario_minimo_propuesto=(
+                None
+                if minimo is not None or clave_minimo is None
+                else await cfg.valor_propuesto(db, clave_minimo, fecha)
+            ),
+        )
+    return _ConfiguracionSbc(por_fecha=por_fecha, zona_configurada=zona is not None)
 
 
 def _a_decimal(valor: Decimal | float | None) -> Decimal | None:
@@ -457,28 +551,28 @@ async def _percepciones_001_por_comprobante(db: AsyncSession, ids: list[int]) ->
 
 
 def _hallazgos_estructurales_y_derivados(
-    identidad: _Identidad,
-    percepciones_001: Decimal | None,
-    uma: Decimal | None,
-    hay_propuesta_de_uma: bool,
-    salario_minimo: Decimal | None,
-    zona_configurada: bool,
-) -> _PorEmpleado:
-    """Grupos 1 (estructura), 4 (derivadas de importes) y 5 (dependientes de la configuración
-    fiscal) más las validaciones de fecha y de campos de texto vacíos: todo lo que se evalúa
-    sobre la ÚLTIMA fotografía de un solo empleado, sin cruzar con otros CFDI del rango.
+    identidad: _Identidad, percepciones_001: Decimal | None, regimenes_conocidos: frozenset[str]
+) -> tuple[list[_Hallazgo], int]:
+    """Grupos 1 (estructura) y 4 (derivadas de importes) más las validaciones de fecha y de
+    campos de texto vacíos: todo lo que se evalúa sobre la ÚLTIMA fotografía de un solo
+    empleado, sin cruzar con otros CFDI del rango.
 
-    Devuelve un `_PorEmpleado` con los hallazgos, cuántas validaciones se ejecutaron y qué
-    causas de configuración impidieron evaluar alguna. El conteo es lo que hace auditable a la
-    propia validación, con el mismo razonamiento del §13 del diseño para
+    **El grupo 5 no está aquí**: las dos validaciones de SBC recorren todos los periodos del
+    rango y viven en `_hallazgos_de_sbc` (ver el docstring del módulo para el falso negativo que
+    lo obliga).
+
+    Devuelve `(hallazgos, validaciones_ejecutadas)`. El segundo elemento es lo que hace
+    auditable a la propia validación, con el mismo razonamiento del §13 del diseño para
     `identidades_b00.verificar`: **una validación que no corre no puede fallar**, así que
     `filas == []` es indistinguible de "no se comprobó nada" y borrar media docena de
     comprobaciones dejaría la suite verde. Cada comprobación que de verdad se evalúa suma uno;
     las que se omiten por falta de operando (ver el docstring del módulo) no suman, igual que
     `identidades_b00._checar` no cuenta un atributo ausente.
 
-    Los valores de configuración llegan **ya resueltos a la fecha de pago de este empleado**:
-    esta función es pura y no toca la base (ver `_configuracion_sbc`).
+    `regimenes_conocidos` llega ya resuelto (`catalogos.tipos_de_regimen()`) para que esta
+    función siga siendo pura: no toca la base ni abre el catálogo. Vacío significa "no se pudo
+    leer el catálogo", y entonces `TIPO_REGIMEN_INVALIDO` solo comprueba que el campo no esté
+    vacío — nunca marca a toda la plantilla por una avería de lectura.
 
     **Ningún mensaje interpola la CURP, el NSS ni la cuenta bancaria.** El valor ya viaja en su
     propia columna, enmascarada o no según `enmascarar_datos_personales`; repetirlo en la
@@ -493,7 +587,6 @@ def _hallazgos_estructurales_y_derivados(
     hallazgos: list[_Hallazgo] = []
     rfc = identidad.rfc
     ejecutadas = 0
-    omitidas: list[str] = []
 
     def _marca(clave: str, severidad: Severidad, mensaje: str) -> None:
         hallazgos.append(_Hallazgo(rfc=rfc, clave=clave, severidad=severidad, mensaje=mensaje))
@@ -541,12 +634,48 @@ def _hallazgos_estructurales_y_derivados(
         ejecutadas += 1
         _marca("NSS_FALTANTE", "alta", "El NSS está vacío con `tipo_regimen='02'` (régimen obligatorio de cotización IMSS).")
 
+    # --- Tipo de régimen: el campo del que dependen `SBC_CERO` y `NSS_FALTANTE` ---
+    # Se evalúa **siempre** (no depende de ningún otro dato), así que siempre cuenta. Con el
+    # catálogo ilegible `regimenes_conocidos` llega vacío y solo se comprueba el vacío: no se
+    # marca a toda la plantilla por no poder abrir un sqlite.
+    ejecutadas += 1
+    if _vacio(identidad.tipo_regimen):
+        _marca(
+            "TIPO_REGIMEN_INVALIDO",
+            "alta",
+            "El `tipo_regimen` del receptor está vacío. De él dependen otras dos validaciones de este "
+            "informe (`SBC_CERO` y `NSS_FALTANTE`), que sin él no se pueden evaluar: corrígelo primero.",
+        )
+    elif regimenes_conocidos and identidad.tipo_regimen not in regimenes_conocidos:
+        _marca(
+            "TIPO_REGIMEN_INVALIDO",
+            "alta",
+            f"El `tipo_regimen` capturado ({identidad.tipo_regimen!r}) no existe en el catálogo "
+            f"`c_TipoRegimen` del SAT ({len(regimenes_conocidos)} claves). Revisa los ceros a la izquierda: "
+            "'2' y '02' se teclean casi igual y solo uno existe. De este campo dependen otras dos "
+            "validaciones (`SBC_CERO` y `NSS_FALTANTE`), que con un régimen equivocado no se evalúan.",
+        )
+
     # --- SBC / SDI (B-10.R1) ---
     sbc, sdi = identidad.sbc, identidad.sdi
     if identidad.tipo_regimen == "02" and sbc is not None:
         ejecutadas += 1
         if sbc <= 0:
             _marca("SBC_CERO", "alta", f"El SBC declarado es {sbc} con `tipo_regimen='02'`.")
+    if sbc is not None:
+        # **Sin condición de régimen, a propósito.** Una base de cotización negativa no es
+        # legítima bajo ningún régimen, así que no hay nada que condicionar — y componer la
+        # condición de `SBC_CERO` (que sí exige '02') con la guarda `sbc > 0` de las dos
+        # validaciones del grupo 5 dejaba caer en silencio todo SBC negativo de un régimen
+        # distinto de '02', incluido el de un régimen mal tecleado.
+        ejecutadas += 1
+        if sbc < 0:
+            _marca(
+                "SBC_NEGATIVO",
+                "alta",
+                f"El SBC declarado es {sbc}: una base de cotización negativa no es válida bajo ningún "
+                "régimen. Es un error de captura o de signo en el sistema de nómina.",
+            )
     if sdi is not None:
         ejecutadas += 1
         if sdi <= 0:
@@ -556,39 +685,6 @@ def _hallazgos_estructurales_y_derivados(
         if sdi < sbc * _TOLERANCIA_SDI_SBC:
             # Media, no alta (B-10.R1): un SDI inferior al SBC es teóricamente posible.
             _marca("SDI_MENOR_SBC", "media", f"El SDI ({sdi}) es menor al 80% del SBC ({sbc}); son conceptos distintos, pero conviene revisar.")
-
-    # Las dos validaciones del grupo 5. `sbc > 0` y no `sbc is not None`: un SBC en cero no está
-    # "por debajo del mínimo", es una base ausente, y `SBC_CERO` ya nombra ese defecto donde lo
-    # es. Sin esta condición cada asimilado a salarios —que legítimamente no cotiza— saldría con
-    # un hallazgo alta por corrida. `fecha_pago is not None` es inalcanzable a través de
-    # `universo()` (filtra por ese campo): se comprueba para no atribuirle a la configuración un
-    # hueco que sería del CFDI.
-    if sbc is not None and sbc > 0 and identidad.fecha_pago is not None:
-        if uma is None:
-            omitidas.append("UMA_SIN_CONFIRMAR" if hay_propuesta_de_uma else "FALTA_UMA")
-        else:
-            ejecutadas += 1
-            tope = _FACTOR_TOPE_SBC * uma
-            if sbc > tope:
-                _marca(
-                    "SBC_SOBRE_TOPE",
-                    "media",
-                    f"El SBC declarado ({sbc}) excede el límite superior de cotización del artículo 28 de la "
-                    f"LSS: {_FACTOR_TOPE_SBC} UMA diarias vigentes a la fecha de pago = {tope} "
-                    f"({_FACTOR_TOPE_SBC} × {uma}).",
-                )
-        if salario_minimo is None:
-            omitidas.append("FALTA_SALARIO_MINIMO" if zona_configurada else "FALTA_ZONA_SALARIAL")
-        else:
-            ejecutadas += 1
-            if sbc < salario_minimo:
-                _marca(
-                    "SBC_BAJO_MINIMO",
-                    "alta",
-                    f"El SBC declarado ({sbc}) es menor al salario mínimo vigente a la fecha de pago para la "
-                    f"zona salarial configurada en la empresa ({salario_minimo}). Ningún salario base de "
-                    "cotización puede quedar por debajo del mínimo.",
-                )
 
     if sdi is not None and percepciones_001 is not None and identidad.num_dias_pagados is not None and identidad.num_dias_pagados > 0:
         ejecutadas += 1
@@ -643,7 +739,126 @@ def _hallazgos_estructurales_y_derivados(
         ejecutadas += 1
         _marca("BANCO_SIN_CUENTA", "baja", f"El banco ({identidad.banco!r}) está capturado pero la cuenta bancaria está vacía.")
 
-    return _PorEmpleado(hallazgos=hallazgos, ejecutadas=ejecutadas, omitidas=tuple(omitidas))
+    return hallazgos, ejecutadas
+
+
+@dataclass(slots=True)
+class _Infraccion:
+    """Los periodos en que un empleado incumplió una de las dos reglas de SBC, colapsados.
+
+    Se guarda el **peor** valor y su fecha —no el primero ni el último— porque es el que hace
+    accionable el hallazgo: quien corrige la nómina quiere saber cuánto se alejó del límite en
+    el peor caso, no cuál fue cronológicamente el primero.
+    """
+
+    periodos: int = 0
+    peor_sbc: Decimal | None = None
+    peor_fecha: date | None = None
+    limite: Decimal | None = None
+
+    def registrar(self, sbc: Decimal, fecha: date, limite: Decimal, *, peor_es_menor: bool) -> None:
+        self.periodos += 1
+        es_peor = self.peor_sbc is None or (sbc < self.peor_sbc if peor_es_menor else sbc > self.peor_sbc)
+        if es_peor:
+            self.peor_sbc, self.peor_fecha, self.limite = sbc, fecha, limite
+
+
+_NOTA_COLUMNA_SBC = (
+    "Ojo: la columna SBC de esta fila es la de la última fotografía del rango, que no es "
+    "necesariamente el periodo señalado."
+)
+"""El residuo declarado del grano: las columnas de identidad de la fila salen del comprobante
+más reciente del empleado, así que pueden enseñar un SBC que sí cumple mientras la fila reporta
+que otro periodo no. El dato accionable va en el mensaje, y el mensaje avisa de qué es la celda."""
+
+
+def _hallazgos_de_sbc(
+    todas: list[_Identidad], config: _ConfiguracionSbc
+) -> tuple[list[_Hallazgo], int, dict[str, set[str]]]:
+    """Grupo 5: `SBC_SOBRE_TOPE` y `SBC_BAJO_MINIMO`, sobre **todos** los periodos del rango.
+
+    Es la única parte del informe que evalúa un dato del receptor fuera de la última fotografía,
+    y el motivo está en el docstring del módulo: el SBC es un importe de cumplimiento que cambia
+    quincena a quincena, así que mirar solo la más reciente convertía "cobró por debajo del
+    mínimo en junio y se corrigió en julio" en un informe limpio. El grano de la **fila** no
+    cambia: los periodos infractores de un mismo empleado se colapsan en una sola.
+
+    Devuelve `(hallazgos, ejecutadas, omitidas_por_causa)`, donde `omitidas_por_causa` mapea la
+    clave de bandera al conjunto de **RFC** que dejó sin evaluar — RFC y no comprobantes porque
+    el mensaje habla de empleados, y no una lista de UUID porque el hueco es de configuración,
+    no de ningún CFDI en particular.
+    """
+    hallazgos: list[_Hallazgo] = []
+    ejecutadas = 0
+    omitidas: dict[str, set[str]] = {}
+    sobre_tope: dict[str, _Infraccion] = {}
+    bajo_minimo: dict[str, _Infraccion] = {}
+
+    for identidad in todas:
+        sbc, fecha = identidad.sbc, identidad.fecha_pago
+        # `sbc > 0` y no `sbc is not None`: un SBC en cero no está "por debajo del mínimo", es una
+        # base ausente (ver el docstring del módulo; `SBC_CERO` y `SBC_NEGATIVO` cubren lo que
+        # esta guarda deja fuera). `fecha is None` es inalcanzable a través de `universo()`, que
+        # filtra por `fecha_pago`: se comprueba para no atribuirle a la configuración un hueco
+        # que sería del CFDI.
+        if sbc is None or sbc <= 0 or fecha is None:
+            continue
+        valores = config.de(fecha)
+
+        if valores.uma is None:
+            causa = "UMA_SIN_CONFIRMAR" if valores.uma_propuesta is not None else "FALTA_UMA"
+            omitidas.setdefault(causa, set()).add(identidad.rfc)
+        else:
+            ejecutadas += 1
+            tope = _FACTOR_TOPE_SBC * valores.uma
+            if sbc > tope:
+                sobre_tope.setdefault(identidad.rfc, _Infraccion()).registrar(sbc, fecha, tope, peor_es_menor=False)
+
+        if valores.salario_minimo is None:
+            if not config.zona_configurada:
+                causa = "FALTA_ZONA_SALARIAL"
+            else:
+                causa = "SALARIO_MINIMO_SIN_CONFIRMAR" if valores.salario_minimo_propuesto is not None else "FALTA_SALARIO_MINIMO"
+            omitidas.setdefault(causa, set()).add(identidad.rfc)
+        else:
+            ejecutadas += 1
+            if sbc < valores.salario_minimo:
+                bajo_minimo.setdefault(identidad.rfc, _Infraccion()).registrar(
+                    sbc, fecha, valores.salario_minimo, peor_es_menor=True
+                )
+
+    for rfc in sorted(sobre_tope):
+        caso = sobre_tope[rfc]
+        hallazgos.append(
+            _Hallazgo(
+                rfc=rfc,
+                clave="SBC_SOBRE_TOPE",
+                severidad="media",
+                mensaje=(
+                    f"El SBC excede el límite superior de cotización del artículo 28 de la LSS "
+                    f"({_FACTOR_TOPE_SBC} UMA diarias) en {caso.periodos} periodo(s) del rango. El más alto fue "
+                    f"{caso.peor_sbc} contra un tope de {caso.limite} en el pago del {caso.peor_fecha}. "
+                    f"{_NOTA_COLUMNA_SBC}"
+                ),
+            )
+        )
+    for rfc in sorted(bajo_minimo):
+        caso = bajo_minimo[rfc]
+        hallazgos.append(
+            _Hallazgo(
+                rfc=rfc,
+                clave="SBC_BAJO_MINIMO",
+                severidad="alta",
+                mensaje=(
+                    f"El SBC quedó por debajo del salario mínimo de la zona configurada en la empresa en "
+                    f"{caso.periodos} periodo(s) del rango. El más bajo fue {caso.peor_sbc} contra un mínimo de "
+                    f"{caso.limite} en el pago del {caso.peor_fecha}. Ningún salario base de cotización puede "
+                    f"quedar por debajo del mínimo, y que un periodo posterior lo cumpla no subsana el anterior. "
+                    f"{_NOTA_COLUMNA_SBC}"
+                ),
+            )
+        )
+    return hallazgos, ejecutadas, omitidas
 
 
 def _hallazgos_de_conjunto(todas: list[_Identidad]) -> tuple[list[_Hallazgo], int]:
@@ -778,52 +993,70 @@ _MENSAJES_DE_CONFIGURACION: dict[str, str] = {
         "empresa fronteriza que sí están por debajo del mínimo. Configúrala en Configuración › Empresa."
     ),
     "FALTA_SALARIO_MINIMO": (
-        "La zona salarial de la empresa está configurada, pero no hay un salario mínimo confirmado para esa "
-        "zona en la fecha de pago de estos empleados, así que `SBC_BAJO_MINIMO` no se evaluó. Captúralo o "
-        "confírmalo en Configuración › Fiscal."
+        "La zona salarial de la empresa está configurada, pero no hay ningún salario mínimo capturado para esa "
+        "zona en la fecha de pago de estos empleados, así que `SBC_BAJO_MINIMO` no se evaluó. Captúralo en "
+        "Configuración › Fiscal."
     ),
 }
-"""Texto de las causas que no llevan procedencia. `UMA_SIN_CONFIRMAR` no está aquí: su mensaje
-cita la **fuente** de la propuesta, que es lo que separa un aviso accionable de uno inútil (ver
+"""Texto de las causas que no llevan procedencia. Las dos que sí la llevan
+—`UMA_SIN_CONFIRMAR` y `SALARIO_MINIMO_SIN_CONFIRMAR`— no están aquí: sus mensajes citan la
+**fuente** de la propuesta, que es lo que separa un aviso accionable de uno inútil (ver
 `_banderas_de_configuracion`). Las claves son las mismas que usa `b03_gravado_exento` para los
 mismos huecos, a propósito: quien filtre la hoja `Banderas` por `FALTA_ZONA_SALARIAL` debe
 encontrar los dos informes que la necesitan, no una clave distinta en cada uno."""
 
+_VALIDACION_DE_CAUSA: dict[str, str] = {
+    "UMA_SIN_CONFIRMAR": "`SBC_SOBRE_TOPE`",
+    "SALARIO_MINIMO_SIN_CONFIRMAR": "`SBC_BAJO_MINIMO`",
+}
+"""Qué validación se quedó sin evaluar por cada causa **con propuesta pendiente**, para no
+escribir dos mensajes casi idénticos."""
 
-def _banderas_de_configuracion(omitidas: dict[str, int], config: _ConfiguracionSbc) -> list[Bandera]:
+
+def _banderas_de_configuracion(omitidas: dict[str, set[str]], config: _ConfiguracionSbc) -> list[Bandera]:
     """**Una bandera por causa**, con el número de empleados a los que dejó sin evaluar — nunca
-    una por empleado (la lección del colapso de banderas de la fase 2: 300 avisos idénticos
-    sepultan los hallazgos accionables, que aquí son las filas del informe).
+    una por empleado ni una por periodo (la lección del colapso de banderas de la fase 2: 300
+    avisos idénticos sepultan los hallazgos accionables, que aquí son las filas del informe).
+    Con 4 empleados × 24 quincenas y sin configuración, contar por evaluación daría 96 avisos
+    donde el hueco es **uno**.
 
-    Ámbito `informe` en las cuatro: lo que falta es un valor global de la empresa o del
+    Ámbito `informe` en las cinco: lo que falta es un valor global de la empresa o del
     ejercicio, y la acción no cambia de un empleado a otro.
     """
     banderas: list[Bandera] = []
     for causa in sorted(omitidas):
-        empleados = omitidas[causa]
-        if causa == "UMA_SIN_CONFIRMAR":
-            fuentes = sorted({valor.fuente for valor in config.uma_propuesta.values() if valor is not None})
-            procedencia = f" Fuente de la propuesta: {'; '.join(fuentes)}." if fuentes else ""
+        empleados = len(omitidas[causa])
+        validacion = _VALIDACION_DE_CAUSA.get(causa)
+        if validacion is None:
             banderas.append(
                 Bandera(
                     clave=causa,
                     severidad="alta",
                     ambito="informe",
-                    mensaje=(
-                        "Hay una UMA diaria capturada para la fecha de pago de estos empleados, pero nadie la ha "
-                        "confirmado, y un valor sin confirmar no calcula: `SBC_SOBRE_TOPE` no se evaluó. Basta con "
-                        f"revisarla y confirmarla en Configuración › Fiscal.{procedencia} Empleados sin evaluar: "
-                        f"{empleados}."
-                    ),
+                    mensaje=f"{_MENSAJES_DE_CONFIGURACION[causa]} Empleados sin evaluar: {empleados}.",
                 )
             )
             continue
+        # Estado "propuesto sin confirmar": el valor ya está capturado y solo le falta un clic.
+        # El mensaje lleva la fuente para que confirmarlo sea una decisión y no un acto de fe.
+        if causa == "UMA_SIN_CONFIRMAR":
+            propuestas = [v.uma_propuesta for v in config.por_fecha.values()]
+            que_es = "una UMA diaria capturada"
+        else:
+            propuestas = [v.salario_minimo_propuesto for v in config.por_fecha.values()]
+            que_es = "un salario mínimo capturado para la zona de la empresa"
+        fuentes = sorted({v.fuente for v in propuestas if v is not None})
+        procedencia = f" Fuente de la propuesta: {'; '.join(fuentes)}." if fuentes else ""
         banderas.append(
             Bandera(
                 clave=causa,
                 severidad="alta",
                 ambito="informe",
-                mensaje=f"{_MENSAJES_DE_CONFIGURACION[causa]} Empleados sin evaluar: {empleados}.",
+                mensaje=(
+                    f"Hay {que_es} para la fecha de pago de estos empleados, pero nadie lo ha confirmado, y un "
+                    f"valor sin confirmar no calcula: {validacion} no se evaluó. Basta con revisarlo y "
+                    f"confirmarlo en Configuración › Fiscal.{procedencia} Empleados sin evaluar: {empleados}."
+                ),
             )
         )
     return banderas
@@ -881,32 +1114,27 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     ids_ultima_fotografia = [identidad.comprobante_id for identidad in ultima_por_rfc.values()]
     percepciones_001 = await _percepciones_001_por_comprobante(db, ids_ultima_fotografia)
-    # Solo las fechas de pago de las últimas fotografías, y sin repetir: las dos validaciones de
-    # SBC se evalúan sobre esa fotografía, no sobre todo el rango.
-    config_sbc = await _configuracion_sbc(
-        db, empresa_id, {i.fecha_pago for i in ultima_por_rfc.values() if i.fecha_pago is not None}
-    )
+    # **Todas** las fechas de pago del rango, no solo las de las últimas fotografías: las dos
+    # validaciones de SBC se evalúan periodo a periodo (ver `_hallazgos_de_sbc`). Sin repetir,
+    # así que el costo lo acota el calendario de nómina y no la plantilla.
+    config_sbc = await _configuracion_sbc(db, empresa_id, {i.fecha_pago for i in todas if i.fecha_pago is not None})
+    # El catálogo `c_TipoRegimen` se resuelve una vez por corrida y se pasa ya resuelto: las
+    # funciones de hallazgos son puras. Vacío = catálogo ilegible, y entonces
+    # `TIPO_REGIMEN_INVALIDO` solo comprueba el vacío.
+    regimenes_conocidos = catalogos.tipos_de_regimen()
 
     hallazgos: list[_Hallazgo] = []
     validaciones_ejecutadas = 0
-    # Causa de configuración -> a cuántos empleados dejó sin evaluar. Es lo que colapsa las
-    # banderas de degradación en una por causa.
-    omitidas_por_causa: dict[str, int] = {}
     for rfc, identidad in ultima_por_rfc.items():
         del rfc  # la clave no se usa: la identidad ya trae su propio `rfc`
-        fecha = identidad.fecha_pago
-        resultado_empleado = _hallazgos_estructurales_y_derivados(
-            identidad,
-            percepciones_001.get(identidad.comprobante_id),
-            config_sbc.uma.get(fecha) if fecha is not None else None,
-            (config_sbc.uma_propuesta.get(fecha) is not None) if fecha is not None else False,
-            config_sbc.salario_minimo.get(fecha) if fecha is not None else None,
-            config_sbc.zona_configurada,
+        propios, ejecutadas = _hallazgos_estructurales_y_derivados(
+            identidad, percepciones_001.get(identidad.comprobante_id), regimenes_conocidos
         )
-        hallazgos.extend(resultado_empleado.hallazgos)
-        validaciones_ejecutadas += resultado_empleado.ejecutadas
-        for causa in resultado_empleado.omitidas:
-            omitidas_por_causa[causa] = omitidas_por_causa.get(causa, 0) + 1
+        hallazgos.extend(propios)
+        validaciones_ejecutadas += ejecutadas
+    de_sbc, ejecutadas_sbc, omitidas_por_causa = _hallazgos_de_sbc(todas, config_sbc)
+    hallazgos.extend(de_sbc)
+    validaciones_ejecutadas += ejecutadas_sbc
     de_conjunto, ejecutadas_conjunto = _hallazgos_de_conjunto(todas)
     hallazgos.extend(de_conjunto)
     validaciones_ejecutadas += ejecutadas_conjunto
@@ -934,7 +1162,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 f"{VALIDACIONES_DE_CONJUNTO} de conjunto y {VALIDACIONES_ENTRE_PERIODOS_POR_RFC} entre periodos por RFC). "
                 "Una validación que se omite por falta de dato no cuenta, así que este número es variable por "
                 "diseño: si falta la UMA o la zona salarial, las dos validaciones de SBC no corren y las "
-                "banderas de esta misma hoja dicen cuál falta."
+                "banderas de esta misma hoja dicen cuál falta. Esas dos, además, se evalúan una vez por CFDI "
+                "—el SBC cambia entre quincenas y cada una se compara por su cuenta—, no una vez por empleado."
             ),
         )
     )

@@ -282,7 +282,7 @@ async def test_gravado_ordinario_excluye_separacion_y_jubilacion(db: AsyncSessio
     assert _fila(resultado, "Total gravado") == Decimal("16000.00")
     assert _fila(resultado, "Gravado ordinario") == Decimal("8000.00")
     # No hay nada que reportar: el catálogo alcanzó para clasificar todos los tipos.
-    assert not [b for b in resultado.banderas if b.clave in ("FALTA_CATALOGO_DE_MARCAS", "MARCAS_SIN_CONFIRMAR")]
+    assert not [b for b in resultado.banderas if b.clave in ("FALTA_MARCA", "MARCA_SIN_CONFIRMAR")]
 
 
 async def test_gravado_ordinario_acumula_todos_los_cfdi_del_ejercicio(db: AsyncSession, tmp_path: Path) -> None:
@@ -310,7 +310,14 @@ async def test_sin_catalogo_de_marcas_la_columna_va_vacia_con_una_sola_bandera(d
     año, y viaja a su constancia de percepciones.
 
     Y **una** bandera por causa, con ámbito `informe`, no una por fila: es la lección del
-    colapso de banderas de la fase 2. Este es además el estado de la instalación real hoy."""
+    colapso de banderas de la fase 2. Este es además el estado de la instalación real hoy.
+
+    **La clave es `FALTA_MARCA`, la misma que emite B-03** para el mismo hueco (ronda 1: la
+    primera versión usaba `FALTA_CATALOGO_DE_MARCAS`). Lo único que hace útil una clave de
+    bandera es que quien filtre la hoja por ella encuentre todos los informes que tienen ese
+    hueco, y el hueco es literalmente el mismo. Lo que sí difiere a propósito es el ámbito: en
+    B-03 es `tipo:0NN` porque cada tipo pierde solo su propio tope; aquí la columna se vacía
+    entera para todos los empleados, así que el daño es de la corrida."""
     eid = await _empresa(db)
     for sufijo, fecha in (("1", date(2026, 6, 30)), ("2", date(2026, 7, 15))):
         await insertar_nomina(db, empresa_id=eid, uuid=f"c100000{sufijo}-0000-0000-0000-00000000000{sufijo}",
@@ -320,11 +327,11 @@ async def test_sin_catalogo_de_marcas_la_columna_va_vacia_con_una_sola_bandera(d
 
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     assert _fila(resultado, "Gravado ordinario") is None
-    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_CATALOGO_DE_MARCAS"]
+    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_MARCA"]
     assert len(faltantes) == 1, [b.clave for b in resultado.banderas]
     assert faltantes[0].severidad == "alta" and faltantes[0].ambito == "informe"
     assert "001" in faltantes[0].mensaje
-    assert "MARCAS_SIN_CONFIRMAR" not in [b.clave for b in resultado.banderas]
+    assert "MARCA_SIN_CONFIRMAR" not in [b.clave for b in resultado.banderas]
 
 
 async def test_marcas_sin_confirmar_degradan_igual_y_la_bandera_dice_que_hay_propuesta(
@@ -345,13 +352,13 @@ async def test_marcas_sin_confirmar_degradan_igual_y_la_bandera_dice_que_hay_pro
 
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     assert _fila(resultado, "Gravado ordinario") is None
-    sin_confirmar = [b for b in resultado.banderas if b.clave == "MARCAS_SIN_CONFIRMAR"]
+    sin_confirmar = [b for b in resultado.banderas if b.clave == "MARCA_SIN_CONFIRMAR"]
     assert len(sin_confirmar) == 1, [b.clave for b in resultado.banderas]
     assert sin_confirmar[0].severidad == "alta" and sin_confirmar[0].ambito == "informe"
     # Procedencia: qué dice la propuesta, para que confirmarla sea una decisión y no un acto de fe.
     assert "001 → ingreso ordinario: sí" in sin_confirmar[0].mensaje
     # Y no se confunde con la ausencia: son dos estados distintos y dos claves distintas.
-    assert "FALTA_CATALOGO_DE_MARCAS" not in [b.clave for b in resultado.banderas]
+    assert "FALTA_MARCA" not in [b.clave for b in resultado.banderas]
 
 
 async def test_un_solo_tipo_sin_marca_deja_la_columna_vacia_en_vez_de_sumar_lo_conocido(
@@ -373,7 +380,7 @@ async def test_un_solo_tipo_sin_marca_deja_la_columna_vacia_en_vez_de_sumar_lo_c
 
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     assert _fila(resultado, "Gravado ordinario") is None
-    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_CATALOGO_DE_MARCAS"]
+    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_MARCA"]
     assert len(faltantes) == 1
     # La bandera nombra el tipo que falta y solo ese: dice qué capturar, no qué sobra.
     assert "percepción 022," in faltantes[0].mensaje, faltantes[0].mensaje

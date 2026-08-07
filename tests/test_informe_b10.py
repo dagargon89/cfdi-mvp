@@ -937,10 +937,15 @@ async def test_sin_zona_salarial_no_se_evalua_el_minimo_aunque_los_valores_esten
     assert _banderas(resultado, "FALTA_SALARIO_MINIMO") == []
 
 
-async def test_zona_configurada_sin_minimo_confirmado_manda_a_la_otra_pantalla(db: AsyncSession) -> None:
-    """La causa gemela: con la zona configurada pero sin mínimo confirmado para esa zona, la
-    validación tampoco corre — pero la bandera es otra y manda a Configuración › Fiscal. Mandar a
-    la pantalla equivocada es lo que vuelve inútil un aviso de configuración."""
+async def test_zona_configurada_y_minimo_solo_propuesto_lleva_su_fuente(db: AsyncSession) -> None:
+    """**El estado real que viene**, no un caso de borde: los dos salarios mínimos ya están
+    capturados con vigencia 2026-01-01 y sin confirmar, así que en cuanto se configure la zona
+    este va a ser el estado del 100 % de las corridas de ese tramo.
+
+    La validación no corre —un valor sin confirmar nunca calcula— pero la bandera dice que el
+    valor **ya está ahí** y trae su fuente: es un clic, no una búsqueda. Antes de la ronda 1 este
+    caso caía en `FALTA_SALARIO_MINIMO` ("captúralo") sobre un valor capturado, que es justo el
+    aviso inútil que toda la interfaz de confirmación existe para evitar."""
     eid = await _empresa(db)
     await _zona(db, eid, ZonaSalarial.ZLFN)
     await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=False, desde=date(2026, 1, 1))
@@ -949,9 +954,284 @@ async def test_zona_configurada_sin_minimo_confirmado_manda_a_la_otra_pantalla(d
     resultado = await b10.consultar(db, eid, _p())
     assert "SBC_BAJO_MINIMO" not in _claves(resultado)
     assert _banderas(resultado, "FALTA_ZONA_SALARIAL") == []
+    # No es "falta": es "está y le falta un clic", y son dos claves distintas.
+    assert _banderas(resultado, "FALTA_SALARIO_MINIMO") == []
+    propuesto = _banderas(resultado, "SALARIO_MINIMO_SIN_CONFIRMAR")
+    assert len(propuesto) == 1, [b.clave for b in resultado.banderas]
+    assert _FUENTE in propuesto[0].mensaje  # type: ignore[attr-defined]
+    assert "Configuración › Fiscal" in propuesto[0].mensaje  # type: ignore[attr-defined]
+
+
+async def test_zona_configurada_sin_ningun_minimo_capturado_manda_a_la_otra_pantalla(db: AsyncSession) -> None:
+    """La causa gemela de la anterior y de `FALTA_ZONA_SALARIAL`: con la zona configurada y **sin
+    ningún** renglón de salario mínimo para esa zona, la validación tampoco corre — y la bandera
+    manda a Configuración › Fiscal, no a Configuración › Empresa. Mandar a la pantalla equivocada
+    es lo que vuelve inútil un aviso de configuración."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    # Solo el mínimo de la OTRA zona: para la ZLFN no hay ni propuesta.
+    await _sembrar_param(db, "SALARIO_MINIMO_GENERAL", _SM_GENERAL, confirmado=True, desde=date(2026, 1, 1))
+    await _empleado_con_sbc(db, eid, uuid="e000000e-0000-0000-0000-00000000000e", sbc="400.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    assert "SBC_BAJO_MINIMO" not in _claves(resultado)
+    assert _banderas(resultado, "FALTA_ZONA_SALARIAL") == []
+    assert _banderas(resultado, "SALARIO_MINIMO_SIN_CONFIRMAR") == []
     faltantes = _banderas(resultado, "FALTA_SALARIO_MINIMO")
     assert len(faltantes) == 1
     assert "Configuración › Fiscal" in faltantes[0].mensaje  # type: ignore[attr-defined]
+
+
+async def test_un_periodo_bajo_el_minimo_se_reporta_aunque_el_ultimo_cumpla(db: AsyncSession) -> None:
+    """**El falso negativo que encontró la revisión de la ronda 1, y la razón del grano propio
+    del grupo 5.**
+
+    Un empleado de la ZLFN cobra con SBC 400 el 30 de junio (mínimo 440.87: incumple) y con 500
+    el 15 de julio. Con el grano de "última fotografía" que usa el resto del informe, B-10 miraba
+    julio, julio cumplía, y **no reportaba nada** — que es exactamente el empleado pagado por
+    debajo del mínimo que esta validación existe para encontrar. Y la corrección de julio es
+    evidencia de que junio estuvo mal, no su descargo.
+
+    Ninguna otra validación tapaba el hueco: `DATOS_CAMBIANTES` cruza NSS y fecha de inicio, no
+    el SBC.
+    """
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    for sufijo, sbc, fecha in (("1", "400.00", date(2026, 6, 30)), ("2", "500.00", date(2026, 7, 15))):
+        await insertar_nomina(
+            db,
+            empresa_id=eid,
+            uuid=f"e100000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+            rfc_receptor="VECJ880326XXX",
+            curp="VECJ880326HDFLNS09",
+            nss="12345678903",
+            tipo_regimen="02",
+            sbc=sbc,
+            sdi=sbc,
+            fecha_pago=fecha,
+            fecha_final_pago=fecha,
+        )
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    filas = [f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_BAJO_MINIMO"]
+    # Una sola fila: el grano del informe sigue siendo `(rfc, clave)`, no un renglón por periodo.
+    assert len(filas) == 1, _claves(resultado)
+    mensaje = filas[0][titulos.index("Descripción del hallazgo")]
+    # El dato accionable va en el mensaje porque no cabe en las columnas: cuántos periodos, cuál
+    # fue el peor y en qué fecha.
+    assert "1 periodo(s)" in mensaje, mensaje
+    assert "400.00" in mensaje and "2026-06-30" in mensaje, mensaje
+    # Residuo declarado: la columna SBC es la última fotografía (500), que sí cumple, así que el
+    # mensaje tiene que avisar de qué es la celda o la fila se lee al revés.
+    assert filas[0][titulos.index("SBC")] == Decimal("500.00")
+    assert "última fotografía" in mensaje, mensaje
+
+
+async def test_ningun_periodo_bajo_el_minimo_no_dispara(db: AsyncSession) -> None:
+    """La gemela negativa de la anterior, y no es redundante con
+    `test_el_mismo_sbc_de_400_no_dispara_en_la_zona_general`: aquella fija que la **zona** cambia
+    el resultado con un solo periodo; esta fija que recorrer **varios** periodos no inventa
+    infracciones. Sin ella, un recorrido que marcara siempre al primer comprobante pasaría la
+    prueba de arriba igual de verde."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    for sufijo, sbc, fecha in (("1", "500.00", date(2026, 6, 30)), ("2", "600.00", date(2026, 7, 15))):
+        await insertar_nomina(
+            db,
+            empresa_id=eid,
+            uuid=f"e200000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+            rfc_receptor="VECJ880326XXX",
+            curp="VECJ880326HDFLNS09",
+            nss="12345678903",
+            tipo_regimen="02",
+            sbc=sbc,
+            sdi=sbc,
+            fecha_pago=fecha,
+            fecha_final_pago=fecha,
+        )
+
+    assert "SBC_BAJO_MINIMO" not in _claves(await b10.consultar(db, eid, _p()))
+
+
+async def test_un_periodo_sobre_el_tope_se_reporta_aunque_el_ultimo_cumpla(db: AsyncSession) -> None:
+    """La mitad simétrica del mismo hueco para `SBC_SOBRE_TOPE`: un SBC de 3000 en junio (tope
+    2932.75) corregido a 2000 en julio se reportaba como si nunca hubiera pasado."""
+    eid = await _empresa(db)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    for sufijo, sbc, fecha in (("1", "3000.00", date(2026, 6, 30)), ("2", "2000.00", date(2026, 7, 15))):
+        await insertar_nomina(
+            db,
+            empresa_id=eid,
+            uuid=f"e300000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+            rfc_receptor="VECJ880326XXX",
+            curp="VECJ880326HDFLNS09",
+            nss="12345678903",
+            tipo_regimen="02",
+            sbc=sbc,
+            sdi=sbc,
+            fecha_pago=fecha,
+            fecha_final_pago=fecha,
+        )
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    filas = [f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_SOBRE_TOPE"]
+    assert len(filas) == 1, _claves(resultado)
+    assert "3000.00" in filas[0][titulos.index("Descripción del hallazgo")]
+
+
+async def test_el_peor_periodo_es_el_que_cita_el_mensaje_no_el_ultimo(db: AsyncSession) -> None:
+    """Con **dos** periodos infractores, el mensaje cita el peor (350, no 400) y su fecha, y
+    cuenta los dos. Es lo que hace accionable el hallazgo: quien corrige quiere saber cuánto se
+    alejó del mínimo en el peor caso."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    for sufijo, sbc, fecha in (("1", "400.00", date(2026, 6, 30)), ("2", "350.00", date(2026, 7, 15))):
+        await insertar_nomina(
+            db,
+            empresa_id=eid,
+            uuid=f"e400000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+            rfc_receptor="VECJ880326XXX",
+            curp="VECJ880326HDFLNS09",
+            nss="12345678903",
+            tipo_regimen="02",
+            sbc=sbc,
+            sdi=sbc,
+            fecha_pago=fecha,
+            fecha_final_pago=fecha,
+        )
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_BAJO_MINIMO")
+    mensaje = fila[titulos.index("Descripción del hallazgo")]
+    assert "2 periodo(s)" in mensaje, mensaje
+    assert "350.00" in mensaje and "2026-07-15" in mensaje, mensaje
+
+
+# --------------------------------------------------------------------------------------
+# Lo que la guarda `sbc <= 0` dejaba caer por la rendija
+# --------------------------------------------------------------------------------------
+
+
+async def test_sbc_negativo_se_reporta_bajo_cualquier_regimen(db: AsyncSession) -> None:
+    """**El segundo falso negativo de la ronda 1.** `SBC_CERO` exige `tipo_regimen='02'` y las
+    dos validaciones de SBC exigen `sbc > 0`, así que compuestas dejaban caer en silencio todo
+    SBC negativo de cualquier otro régimen. Aquí un asimilado a salarios (régimen '09') con SBC
+    −100: antes no lo veía nadie.
+
+    `SBC_NEGATIVO` no lleva condición de régimen a propósito: una base de cotización negativa no
+    es legítima bajo ninguno, así que no hay nada que condicionar."""
+    eid = await _empresa(db)
+    await insertar_nomina(
+        db,
+        empresa_id=eid,
+        uuid="e5000001-0000-0000-0000-000000000001",
+        rfc_receptor="VECJ880326XXX",
+        curp="VECJ880326HDFLNS09",
+        nss="12345678903",
+        tipo_regimen="09",
+        sbc="-100.00",
+        sdi="600.00",
+    )
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_NEGATIVO")
+    assert fila[titulos.index("Severidad")] == "alta"
+    # `SBC_CERO` sigue condicionada al régimen '02': no se dispara aquí, y por eso hacía falta
+    # una clave propia en vez de relajar aquella.
+    assert "SBC_CERO" not in _claves(resultado)
+
+
+async def test_un_sbc_positivo_no_se_reporta_como_negativo(db: AsyncSession) -> None:
+    """La gemela negativa: una comprobación invertida (`sbc > 0`) marcaría a toda la plantilla y
+    la prueba anterior seguiría pasando."""
+    eid = await _empresa(db)
+    await _empleado_con_sbc(db, eid, uuid="e5000002-0000-0000-0000-000000000002", sbc="500.00")
+    assert "SBC_NEGATIVO" not in _claves(await b10.consultar(db, eid, _p()))
+
+
+async def test_un_tipo_de_regimen_mal_tecleado_no_deja_desaparecer_al_empleado(db: AsyncSession) -> None:
+    """**El caso completo del segundo hallazgo:** un empleado de régimen '02' con el régimen
+    tecleado `'2'` y el SBC en cero **desaparecía por completo** del informe. `SBC_CERO` exige
+    `'02'` exacto, y las dos validaciones de SBC exigen `sbc > 0`: ninguna de las tres se
+    activaba, y nada validaba `tipo_regimen`.
+
+    Ahora se reporta el defecto de captura, que además es la corrección que hay que hacer
+    **primero**: con el régimen bien capturado, `SBC_CERO` vuelve a funcionar sola. Los ceros a
+    la izquierda otra vez: `'2'` y `'02'` se teclean casi igual y solo uno existe."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await insertar_nomina(
+        db,
+        empresa_id=eid,
+        uuid="e6000001-0000-0000-0000-000000000001",
+        rfc_receptor="VECJ880326XXX",
+        curp="VECJ880326HDFLNS09",
+        nss="12345678903",
+        tipo_regimen="2",
+        sbc="0.00",
+        sdi="600.00",
+    )
+
+    resultado = await b10.consultar(db, eid, _p())
+    claves = _claves(resultado)
+    # La premisa del hallazgo: las tres que deberían haberlo visto siguen sin verlo.
+    assert "SBC_CERO" not in claves and "SBC_BAJO_MINIMO" not in claves and "SBC_SOBRE_TOPE" not in claves
+    # Y aun así el empleado ya no desaparece.
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "TIPO_REGIMEN_INVALIDO")
+    assert fila[titulos.index("Severidad")] == "alta"
+    assert "'2'" in fila[titulos.index("Descripción del hallazgo")]
+
+
+async def test_tipo_de_regimen_vacio_tambien_se_reporta(db: AsyncSession) -> None:
+    """La otra mitad de `TIPO_REGIMEN_INVALIDO`: el campo vacío. Misma clave porque la corrección
+    es la misma —capturar bien el régimen— y el informe promete "una fila = algo que corregir";
+    el mensaje sí distingue los dos casos."""
+    eid = await _empresa(db)
+    await insertar_nomina(
+        db,
+        empresa_id=eid,
+        uuid="e6000002-0000-0000-0000-000000000002",
+        rfc_receptor="VECJ880326XXX",
+        curp="VECJ880326HDFLNS09",
+        nss="12345678903",
+        tipo_regimen="",
+        sbc="500.00",
+        sdi="600.00",
+    )
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "TIPO_REGIMEN_INVALIDO")
+    assert "vacío" in fila[titulos.index("Descripción del hallazgo")]
+
+
+async def test_un_tipo_de_regimen_valido_del_catalogo_no_dispara(db: AsyncSession) -> None:
+    """La gemela negativa, con un régimen **distinto de '02'** a propósito: `'09'` (asimilados a
+    honorarios) es una clave real de `c_TipoRegimen`. Sin esta prueba, una comprobación que
+    exigiera `'02'` —o que marcara cualquier valor— pasaría las dos anteriores igual de verde."""
+    eid = await _empresa(db)
+    await insertar_nomina(
+        db,
+        empresa_id=eid,
+        uuid="e6000003-0000-0000-0000-000000000003",
+        rfc_receptor="VECJ880326XXX",
+        curp="VECJ880326HDFLNS09",
+        nss="12345678903",
+        tipo_regimen="09",
+        sbc="500.00",
+        sdi="600.00",
+    )
+    assert "TIPO_REGIMEN_INVALIDO" not in _claves(await b10.consultar(db, eid, _p()))
 
 
 async def test_uma_propuesta_sin_confirmar_no_calcula_pero_la_bandera_trae_su_fuente(db: AsyncSession) -> None:

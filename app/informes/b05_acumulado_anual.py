@@ -128,15 +128,33 @@ acumulado, con **una** bandera por causa y ámbito `informe` (no una por fila: e
 colapso de banderas de la fase 2):
 
 - **Confirmado para todos los tipos** → calcula.
-- **Propuesto sin confirmar** → `MARCAS_SIN_CONFIRMAR`, citando los tipos y lo que dice cada
+- **Propuesto sin confirmar** → `MARCA_SIN_CONFIRMAR`, citando los tipos y lo que dice cada
   propuesta: el arreglo es un clic.
-- **Ausente** → `FALTA_CATALOGO_DE_MARCAS`, diciendo qué capturar.
+- **Ausente** → `FALTA_MARCA`, diciendo qué capturar.
 
 Un cero ahí diría "este empleado no tuvo ingreso ordinario", que es una afirmación fiscal falsa
 sobre alguien que cobró todo el año. Y se exige el catálogo **completo** para los tipos presentes
 —no se suma "lo que se pueda"— porque una suma parcial no se distingue de una completa al mirar
 la celda: sería una base de ISR corta con apariencia de correcta, el error espejo del que R4
 existe para evitar.
+
+**Las dos claves son las de B-03, no unas propias.** La primera versión de esta tarea emitía
+`MARCAS_SIN_CONFIRMAR`/`FALTA_CATALOGO_DE_MARCAS` (en plural), que describen mejor la degradación
+todo-o-nada de esta columna pero rompen lo único que hace útil una clave de bandera: que quien
+filtra la hoja `Banderas` por un hueco encuentre **todos** los informes que lo tienen. El hueco es
+literalmente el mismo —no hay marca confirmada para un tipo—, así que gana el nombre que ya
+estaba en producción. Lo que sí difiere, a propósito, es el **ámbito**: en B-03 es `tipo:0NN`
+porque cada tipo pierde solo su propio tope y la acción es por tipo; aquí es `informe` porque la
+columna se vacía entera para todos los empleados, así que el daño y la acción son de la corrida.
+
+**Lo que esta columna NO cotejar contra las 12 y 13, declarado.** "Ingreso por separación" y
+"Ingreso por jubilación" salen del **encabezado** (`nomina_totales`) y el gravado ordinario sale de
+los **nodos** marcados, así que no existe entre ellos ninguna identidad exacta que se pueda
+aseverar: los tipos con régimen propio no son exactamente los que alimentan esos dos totales del
+complemento, y una parte de ellos puede venir exenta. No se emite bandera de descuadre entre las
+tres columnas porque no habría umbral defendible; quien concilie el papel de trabajo tiene que
+saber que son dos lecturas de origen distinto. El descuadre que sí se puede afirmar —encabezado
+contra nodos para gravado y exento— lo reporta `TOTALES_DESCUADRADOS`.
 
 **Alcance.** Se implementan las columnas 1–23 del documento fuente. Las columnas 24–26 (ISR anual
 teórico, diferencia, sujeto a cálculo anual) necesitan la tarifa de ISR, que no existe todavía. No
@@ -234,7 +252,12 @@ class Parametros(BaseModel):
     )
 
 
-# Columnas 1 a 10 (identidad, fechas del ejercicio y los tres totales del encabezado).
+# Columnas 1 a 10 del **documento fuente** (identidad, fechas del ejercicio y los tres totales
+# del encabezado), que son **quince** columnas del Excel: la numeración del documento agrupa
+# varios campos en un solo renglón numerado —su renglón 2 es "RFC / CURP / Nombre / Núm.
+# empleado", cuatro columnas— y aquí se despliegan una por una. Por eso la "columna 11" sale en
+# la posición 16 de la hoja: los nombres de estas constantes citan el documento, no el índice
+# del Excel. Ver la tabla del §B-05 en `Hub_CFDI_docs/00-fuentes/especificacion-informes-cfdi.md`.
 _COLUMNAS_UNO_A_DIEZ: tuple[tuple[str, str, bool], ...] = (
     ("Ejercicio", "entero", False),
     ("RFC empleado", "texto", False),
@@ -505,7 +528,7 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
             )
             banderas.append(
                 Bandera(
-                    clave="MARCAS_SIN_CONFIRMAR",
+                    clave="MARCA_SIN_CONFIRMAR",
                     severidad="alta",
                     ambito="informe",
                     mensaje=(
@@ -519,7 +542,7 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
         if ausentes:
             banderas.append(
                 Bandera(
-                    clave="FALTA_CATALOGO_DE_MARCAS",
+                    clave="FALTA_MARCA",
                     severidad="alta",
                     ambito="informe",
                     mensaje=(

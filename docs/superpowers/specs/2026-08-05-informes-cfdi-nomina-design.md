@@ -472,7 +472,7 @@ ahora su propia clave, `CANCELADO_EXCLUIDO` (alta).
 | B-04 | Matriz empleado × periodo | 2 | Completo |
 | B-05 | Acumulado anual por empleado | 2 (+3) | Columnas 1–23; 24–26 (ISR anual teórico) requieren `tarifa_isr`. La **columna 11 ("Gravado ordinario") ya no está fuera de alcance**: la fase 2 la difirió por falta de `catalogo_percepcion_marca` y la tarea 8 de la fase 3 la implementa sobre `es_ingreso_ordinario`, exigiendo marcas **confirmadas** para todos los tipos presentes y dejando la columna vacía —con `MARCAS_SIN_CONFIRMAR` o `FALTA_CATALOGO_DE_MARCAS`, una bandera por causa— mientras no las haya |
 | B-07 | Cartera de préstamos y descuentos recurrentes | 2 | Columnas 1–9 y 14; 10–13 requieren capturar el monto original |
-| B-10 | Validación de datos del receptor | 2 (+3) | Las 23 reglas. `SBC_SOBRE_TOPE` (25 × `UMA_DIARIA`, art. 28 LSS) y `SBC_BAJO_MINIMO` (`salario_minimo_de_empresa`) **ya no esperan a la fase 3**: las implementa la tarea 8. Sin UMA o sin zona salarial **no se evalúan** —nunca se adivina la zona— y dejan bandera (`FALTA_UMA`/`UMA_SIN_CONFIRMAR`, `FALTA_ZONA_SALARIAL`, `FALTA_SALARIO_MINIMO`, las mismas claves que B-03). Por eso `VALIDACIONES_EJECUTADAS` es **variable por diseño** desde la fase 3. `DATOS_CAMBIANTES` ya no cubre la CURP: ese caso lo reporta `RFC_DUPLICADO` y las dos claves generaban dos filas para un solo defecto (revisión final de la fase 2) |
+| B-10 | Validación de datos del receptor | 2 (+3) | **25 reglas.** `SBC_SOBRE_TOPE` (25 × `UMA_DIARIA`, art. 28 LSS) y `SBC_BAJO_MINIMO` (salario mínimo de la zona) **ya no esperan a la fase 3**: las implementa la tarea 8, y se evalúan **por cada periodo del rango**, no sobre la última fotografía — con ese grano, un SBC bajo el mínimo en junio corregido en julio no se reportaba (falso negativo cerrado en la ronda 1). Sin UMA o sin zona salarial **no se evalúan** —nunca se adivina la zona— y dejan bandera (`FALTA_UMA`/`UMA_SIN_CONFIRMAR`, `FALTA_ZONA_SALARIAL`, `FALTA_SALARIO_MINIMO`/`SALARIO_MINIMO_SIN_CONFIRMAR`, las mismas claves que B-03). Por eso `VALIDACIONES_EJECUTADAS` es **variable por diseño** desde la fase 3. Las otras dos nuevas tapan el hueco que abría la guarda `sbc <= 0` compuesta con la condición de régimen de `SBC_CERO`: `SBC_NEGATIVO` (incondicional: una base negativa no es legítima bajo ningún régimen) y `TIPO_REGIMEN_INVALIDO` (vacío o fuera de `c_TipoRegimen`) — sin ellas, un empleado de régimen `'02'` tecleado `'2'` y con SBC en cero desaparecía del informe. `DATOS_CAMBIANTES` ya no cubre la CURP: ese caso lo reporta `RFC_DUPLICADO` y las dos claves generaban dos filas para un solo defecto (revisión final de la fase 2) |
 | B-03 | Desglose gravado / exento por percepción | 3 | Completo con las tablas de configuración |
 | B-06 | Costo de nómina por centro de costo | 3 | Sin la columna 15 (costo patronal): no es derivable del CFDI |
 | B-08 | Provisión de pasivo laboral | 3 | Estimación con base en CFDI, no cálculo actuarial (B-08.R3) |
@@ -530,7 +530,7 @@ cruzar los dos informes hay que traducir la etiqueta.
 
 | Tabla | Para | Contenido |
 |---|---|---|
-| `param_fiscal` | B-03, B-10 (2 reglas de SBC) | `ejercicio`, `clave`, `valor`, `vigencia_desde`, `vigencia_hasta` — UMA diaria, salario mínimo |
+| `param_fiscal` | B-03, B-10 (`SBC_SOBRE_TOPE`, `SBC_BAJO_MINIMO`) | `ejercicio`, `clave`, `valor`, `vigencia_desde`, `vigencia_hasta` — UMA diaria, salario mínimo |
 | `catalogo_percepcion_marca` | B-03, B-05, B-08 | Las marcas del §3.1: `es_ingreso_ordinario`, `base_exencion`, `factor_exencion`, `integra_sbc`, `es_provisionable` |
 | `map_departamento` | B-06 | `departamento_texto → centro_costo` (el campo del XML es texto libre) |
 | `map_concepto_provision` | B-08 | `(tipo, clave) → categoría` (aguinaldo, vacaciones, prima) |
@@ -571,7 +571,7 @@ llamadores:
   extenderlo a los seis informes del catálogo), **en vivo contra los datos reales, sin que nada entre
   a git**: los mismos cotejos sobre los CFDI de la empresa 11 tras el reproceso.
 
-**El mismo remedio del conteo se aplica a las validaciones de B-10** —21 en la fase 2, 23 desde la tarea 8 de
+**El mismo remedio del conteo se aplica a las validaciones de B-10** —21 en la fase 2, 25 desde la tarea 8 de
 la fase 3— (revisión final de la fase 2), por la
 misma razón y con la misma evidencia empírica: el revisor borró **siete** validaciones del módulo y
 `pytest tests/test_informe_b10.py tests/test_informes_validadores.py -q` siguió dando 26 passed. Diez de las
@@ -586,8 +586,9 @@ comprobación no rompe la prueba, **la hace pasar más fácil**. Dos medidas com
   protege contra **borrados**.
 
   **Desde la fase 3 el número es variable, y esa es la parte que hay que sostener.** Las dos validaciones de
-  SBC dependen de la configuración fiscal, así que un empleado con todos sus campos ejecuta 15 validaciones
-  sin configuración y 17 con la UMA y la zona confirmadas (`VALIDACIONES_QUE_EXIGEN_CONFIGURACION`). Un conteo
+  SBC dependen de la configuración fiscal, así que un empleado con todos sus campos ejecuta 17 validaciones
+  sin configuración y 2 más **por cada CFDI suyo del rango** con la UMA y la zona confirmadas
+  (`VALIDACIONES_QUE_EXIGEN_CONFIGURACION`; son por periodo porque el SBC cambia entre quincenas). Un conteo
   fijo que afirmara haber ejecutado comprobaciones que no corrieron convertiría la bandera en la clase exacta
   de afirmación falsa que vino a impedir, así que las dos ramas se fijan con **dos pruebas gemelas**
   (`test_conteo_de_validaciones_ejecutadas` y `test_el_conteo_sube_cuando_la_configuracion_fiscal_esta_completa`):

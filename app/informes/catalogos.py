@@ -42,10 +42,18 @@ from typing import Any, Callable, cast
 logger = logging.getLogger(__name__)
 
 # Naturaleza (P/D/O) → tabla del catálogo embebido de `satcfdi` (ver docstring del módulo).
+#
+# `"R"` (c_TipoRegimen, 13 claves) no es una naturaleza de concepto como las otras tres: no
+# describe percepciones ni deducciones sino el régimen de contratación del **trabajador**. Se
+# cuelga del mismo mapa a propósito, en vez de duplicar la caché y la garantía de "un fallo de
+# lectura no se memoiza" en una función aparte; el parámetro de `tipos_de` es en realidad "de
+# qué catálogo", y `tipos_de_regimen()` existe para que quien lo consulte no tenga que conocer
+# esta convención.
 _TABLAS = {
     "P": "C75b_c_TipoPercepcion",
     "D": "C75b_c_TipoDeduccion",
     "O": "C75b_c_TipoOtroPago",
+    "R": "C75b_c_TipoRegimen",
 }
 
 
@@ -111,8 +119,9 @@ def tipos_de(naturaleza: str) -> list[tuple[str, str]]:
     """Todas las claves de un catálogo con su descripción, ordenadas por clave **como
     texto**. B-01 genera una columna por cada una (B-01.R1), esté o no en los datos.
 
-    `naturaleza` es `"P"` (percepción), `"D"` (deducción) u `"O"` (otro pago); cualquier
-    otro valor devuelve `[]`. Internamente se apoya en `_tipos_de_cache`, cacheada con
+    `naturaleza` es `"P"` (percepción), `"D"` (deducción), `"O"` (otro pago) o `"R"`
+    (`c_TipoRegimen`, ver el comentario de `_TABLAS`); cualquier otro valor devuelve `[]`.
+    Internamente se apoya en `_tipos_de_cache`, cacheada con
     `lru_cache`: enumerar el catálogo completo cuesta más que resolver una sola clave
     (`descripcion`), y B-01 la llama una vez por naturaleza en cada corrida.
 
@@ -136,6 +145,20 @@ def tipos_de_estricto(naturaleza: str) -> list[tuple[str, str]]:
     la avería.
     """
     return list(_tipos_de_cache(naturaleza))
+
+
+def tipos_de_regimen() -> frozenset[str]:
+    """Las claves de `c_TipoRegimen` (13 en la versión pinada de `satcfdi`), para validar el
+    `tipo_regimen` que trae el complemento de nómina.
+
+    **Falla abierto igual que `tipos_de`**: si el catálogo no se puede leer devuelve un
+    conjunto vacío, y quien lo consulte tiene que interpretarlo como "no puedo opinar" y
+    omitir la comprobación —nunca como "ninguna clave es válida", que marcaría a toda la
+    plantilla—. Es la regla del módulo: un catálogo ilegible no aborta ni contamina un
+    informe. Para una **escritura**, donde esa distinción decide si se guarda un dato, se usa
+    `tipos_de_estricto` (ver `configuracion_fiscal.exige_tipo_percepcion_conocido`).
+    """
+    return frozenset(clave for clave, _descripcion in tipos_de("R"))
 
 
 def _buscar(naturaleza: str, tipo: str) -> str | None:
