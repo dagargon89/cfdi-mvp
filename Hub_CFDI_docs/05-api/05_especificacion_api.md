@@ -191,10 +191,28 @@ sincronizar *proponen*; solo una persona confirma. Los informes leen **solo** lo
 rechaza con `422`: se convierte pasando por `float` y pierde precisión antes de que el servidor pueda
 revisarlo (verificado: `12345678901.123456` llega ya redondeado). Misma regla que el YAML de semillas.
 
-### GET /v1/configuracion/fiscal — Parámetros con procedencia y confirmación *(admin)*
-**200:** `{ "parametros": [ {clave, ejercicio, valor, vigencia_desde, vigencia_hasta, origen, fuente, sincronizado_en, confirmado, confirmado_por, confirmado_en} ], "claves_sin_valor": ["UMA_MENSUAL", …] }`.
+### GET /v1/configuracion/fiscal — Parámetros con procedencia, confirmación y alertas *(admin)*
+**200:** `{ "parametros": [ {clave, ejercicio, valor, vigencia_desde, vigencia_hasta, origen, fuente, sincronizado_en, confirmado, confirmado_por, confirmado_en} ], "claves_sin_valor": ["UMA_MENSUAL", …], "alertas": [ {clave, motivo, vigencia_desde, fecha_esperada, detalle} ] }`.
 `origen` ∈ `SEMILLA|MANUAL|SINCRONIZADO`. `claves_sin_valor` son las claves conocidas de las que no hay
 **ni propuesta**: es el tercer estado (ausente) que la pantalla tiene que poder mostrar.
+
+`alertas` es lo que `claves_sin_valor` **no puede decir: que un valor confirmado ya caducó.** Una UMA de
+2025 confirmada aparece "confirmada" en todas las columnas y no está en `claves_sin_valor`, aunque el 1 de
+febrero de 2026 ya pasó y ese valor esté mal. `motivo` ∈
+`AUSENTE|SIN_CONFIRMAR|CADUCADO|CATALOGO_ILEGIBLE|LIBRERIA_DESACTUALIZADA|SINCRONIZACION_FALLIDA`. Los tres
+primeros son estados de un **valor** y piden acciones distintas —capturar / un clic / actualizar el
+ejercicio—; los otros tres son de la **maquinaria** (el catálogo de `satcfdi` no se puede leer, la versión
+instalada lleva más de un año, el último intento de sincronizar con Banxico falló) y meterlos a la fuerza
+en los primeros haría que la alerta mintiera. `detalle` es la frase lista para mostrar: `motivo` es una
+etiqueta de máquina y las alertas de maquinaria no se explican solas. `vigencia_desde` y `fecha_esperada`
+son nulas en las de maquinaria.
+
+Se calculan en cada petición (dependen de la fecha de hoy: una alerta cacheada de anoche diría "al día" el
+1 de febrero por la mañana) y **no hacen ninguna llamada de red**. Esa es la propiedad central del
+mecanismo: la UMA cambia el 1 de febrero y el salario mínimo el 1 de enero, así que el sistema sabe que
+está desactualizado sin leer el DOF, y eso no se rompe cuando una página cambia de estructura. `TIPO_CAMBIO_USD`
+queda **fuera** de la alarma de calendario a propósito —cambia cada día hábil, no por decreto en fecha
+fija, y meterlo la dejaría permanentemente en rojo—; su ausencia sigue siendo visible por `claves_sin_valor`.
 
 ### PUT /v1/configuracion/fiscal/{clave} — Captura o corrección manual *(admin)*
 Body: `{ "valor": "117.31", "vigencia_desde": "2026-02-01", "vigencia_hasta": null, "fuente": "…", "ejercicio": null }`.
@@ -220,7 +238,7 @@ pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe p
 hay tramo con esa `vigencia_desde`. Bitácora.
 
 ### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
-`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, confirmado, confirmado_por, confirmado_en}`.
+`GET` → lista de `{tipo_percepcion, descripcion_sat, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, confirmado, confirmado_por, confirmado_en}`.
 `PUT /{tipo}` body: los **seis** campos de marca **más `nota_revision`**, todos obligatorios (la nota
 admite `null`). `base_exencion: NINGUNA` exige `factor_exencion: null` y prohíbe
 `sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor presente y positivo (**422** si no).
@@ -241,6 +259,13 @@ valor, esta nota dice que el valor podría estar mal.
 `sujeto_a_tope_conjunto` **no lleva default**: es el mismo cuerpo con el que se confirma, y un default
 dejaría que un cliente que ni lo menciona activara —o creara— una marca de previsión social sin el tope
 del art. 93 a la vista, que es la condición que la migración `c7a1e0b4d92f` declaró inaceptable.
+
+`descripcion_sat` es la descripción de `c_TipoPercepcion` ("Becas para trabajadores y/o hijos"), resuelta
+del **mismo** `satcfdi` que valida la escritura. Quien confirma necesita ver la clave y la descripción, y
+sin este campo el cliente tenía que llevar su propia copia del catálogo: dos copias del mismo dato, y la
+del cliente sin actualizarse cuando se actualiza la librería. `null` si la clave no está en la versión
+instalada o si el catálogo no se pudo leer — **leer falla abierto, escribir no** (503, ver abajo): una
+descripción ausente no impide revisar una marca, escribir sin poder validar sí es inaceptable.
 
 `{tipo}` se valida contra `c_TipoPercepcion` del catálogo embebido de `satcfdi` (44 claves), no solo por
 longitud: **422 `TIPO_PERCEPCION_INVALIDO`** si no existe. `150` en vez de `015` crearía una marca
@@ -284,6 +309,27 @@ categoría; nunca teclea una clave.
 fecha ni de estatus, a propósito:** no es un informe sino el inventario de lo que hay que configurar, y
 un concepto que solo apareció hace dos años sigue necesitando categoría para que la clasificación quede
 completa. Cuatro consultas agregadas en total, con `GROUP BY` en la base (regla 11).
+
+### Quién mantiene los valores al día — y el interruptor que lo apaga
+
+La tarea diaria del beat `revisar_vigencia_fiscal` hace dos cosas, en una sola transacción con su bitácora:
+intenta sincronizar `TIPO_CAMBIO_USD` con la API SIE de Banxico (serie `SF43718`, token en `BANXICO_TOKEN`)
+y después recalcula las alertas. **La sincronización propone, no confirma** —`origen: SINCRONIZADO`,
+`confirmado_en` nulo—, exactamente igual que la semilla y la captura manual: ni la API más confiable activa
+un valor por su cuenta. Un valor que se desvía más del **50%** del anterior se propone igual, pero con la
+desviación calculada dentro de `fuente`, que es lo que la pantalla enseña al lado del botón de confirmar.
+
+**No hay sincronización de la UMA ni del salario mínimo, y no la va a haber.** El INEGI publica la UMA como
+boletín PDF y la CONASAMI publica en el DOF; raspar HTML no falla cuando el sitio cambia, devuelve otra cosa,
+y el resultado es un valor fiscal viejo con cara de vigente. Lo que sí funciona es el calendario, y eso es
+lo que hace la alarma. El razonamiento completo está en el docstring de `app/services/sincronizacion_fiscal.py`.
+
+El interruptor vive en `GET·PUT /v1/config/automatizaciones` *(admin)*, junto a los otros cuatro:
+`{ sync_diaria, lista_69b, re_verificar, limpieza, vigencia_fiscal }`, todos booleanos, default `true`,
+bitácora en el `PUT`. **`vigencia_fiscal` es el único con default en el cuerpo del `PUT`**: los otros cuatro
+son del contrato congelado y este llegó después, así que un cliente anterior no debe recibir `422`. La
+pantalla hace `{...autos, [clave]: valor}` sobre lo que devolvió el `GET`, de modo que el valor viaja de ida
+y vuelta y el default no llega a resetear un interruptor que el administrador apagó.
 
 > **No existe un endpoint de "recargar semillas desde YAML"**, a propósito: `cargar_desde_yaml` hace
 > `commit`/`rollback` sobre la sesión de quien la llama, y ese `rollback` descartaría la fila de bitácora
@@ -336,7 +382,15 @@ export interface ParametroFiscal { clave: string; ejercicio: number; valor: stri
                                    vigencia_hasta: string | null; origen: OrigenValor; fuente: string;
                                    sincronizado_en: string | null; confirmado: boolean;
                                    confirmado_por: string | null; confirmado_en: string | null }
-export interface ConfiguracionFiscal { parametros: ParametroFiscal[]; claves_sin_valor: string[] }
+// Alarma de vigencia (§8bis). Se recalcula en cada GET y no usa red. Los tres primeros motivos
+// describen un VALOR (capturar / un clic / actualizar el ejercicio); los tres últimos, la
+// MAQUINARIA. `detalle` es la frase lista para mostrar.
+export type MotivoAlertaVigencia = 'AUSENTE' | 'SIN_CONFIRMAR' | 'CADUCADO'
+                                 | 'CATALOGO_ILEGIBLE' | 'LIBRERIA_DESACTUALIZADA' | 'SINCRONIZACION_FALLIDA';
+export interface AlertaVigencia { clave: string; motivo: MotivoAlertaVigencia;
+                                  vigencia_desde: string | null; fecha_esperada: string | null; detalle: string }
+export interface ConfiguracionFiscal { parametros: ParametroFiscal[]; claves_sin_valor: string[];
+                                       alertas: AlertaVigencia[] }
 export interface ParametroFiscalIn { valor: string; vigencia_desde: string; vigencia_hasta?: string | null;
                                      fuente: string; ejercicio?: number | null }
 // Marcas de exención del art. 93 (§8bis). `factor_exencion` es CADENA o nula, como todos los
@@ -348,7 +402,10 @@ export interface MarcasPercepcion { es_ingreso_ordinario: boolean; base_exencion
                                     factor_exencion: string | null; integra_sbc: boolean;
                                     es_provisionable: boolean; sujeto_a_tope_conjunto: boolean }
 export interface MarcaPercepcionIn extends MarcasPercepcion { nota_revision: string | null }
+// `descripcion_sat` sale del mismo `c_TipoPercepcion` de `satcfdi` que valida la escritura; con
+// él, la copia del catálogo que el cliente llevaba (`catalogoTipoPercepcion.ts`) sobra.
 export interface MarcaPercepcion extends MarcasPercepcion { tipo_percepcion: string;
+                                    descripcion_sat: string | null;
                                     nota_revision: string | null; confirmado: boolean;
                                     confirmado_por: string | null; confirmado_en: string | null }
 export interface ConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null;

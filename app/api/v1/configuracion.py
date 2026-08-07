@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
 from app.api.v1.schemas import (
+    AlertaVigenciaOut,
     ConceptoObservadoOut,
     ConfiguracionEmpresaIn,
     ConfiguracionEmpresaOut,
@@ -83,6 +84,7 @@ from app.models.nomina import NominaDeduccion, NominaOtroPago, NominaPercepcion,
 from app.models.usuario import Usuario
 from app.services import bitacora as bitacora_service
 from app.services import configuracion_fiscal as cfg
+from app.services import sincronizacion_fiscal as sincronizacion
 
 router = APIRouter(prefix="/configuracion", tags=["configuracion-fiscal"])
 router_empresa = APIRouter(prefix="/empresas/{empresa_id}/configuracion", tags=["configuracion-fiscal"])
@@ -120,9 +122,22 @@ def _param_a_salida(fila: ParamFiscal) -> ParamFiscalOut:
     )
 
 
+def _descripcion_percepcion(tipo: str) -> str | None:
+    """La descripción de `c_TipoPercepcion` para un tipo, o `None` si no está.
+
+    Usa `tipos_de` (cacheada, **falla abierto**) y no `catalog_code` por clave: listar las 44
+    marcas haría 44 consultas al sqlite embebido, y aquí se está *leyendo*. Que falle abierto es
+    lo correcto en esta dirección —una descripción ausente no impide revisar una marca—, al
+    revés que en `exige_tipo_percepcion_conocido`, donde el mismo catálogo ilegible cierra la
+    escritura con 503. El reparto es deliberado (ver el docstring de `app/informes/catalogos.py`).
+    """
+    return dict(catalogos.tipos_de("P")).get(tipo)
+
+
 def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
     return MarcaPercepcionOut(
         tipo_percepcion=fila.tipo_percepcion,
+        descripcion_sat=_descripcion_percepcion(fila.tipo_percepcion),
         es_ingreso_ordinario=fila.es_ingreso_ordinario,
         base_exencion=fila.base_exencion.value,
         factor_exencion=fila.factor_exencion,
@@ -200,15 +215,31 @@ async def listar_fiscal(
     admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ) -> ConfiguracionFiscalOut:
     """Todos los tramos capturados, confirmados o no, con su procedencia — más las claves
-    conocidas de las que no hay ni propuesta, que es el tercer estado del cuadro de
-    degradación y el único que exige ir a capturar algo."""
+    conocidas de las que no hay ni propuesta, y **las alertas de vigencia**.
+
+    Las alertas se calculan aquí y no se leen de una tabla: dependen de la fecha de hoy, y una
+    alerta cacheada de anoche podría decir "al día" el 1 de febrero por la mañana. No hacen
+    ninguna llamada de red (ver `app/services/sincronizacion_fiscal.py`), así que el `GET` no
+    depende de que Banxico conteste.
+    """
     filas = list(
         (await db.scalars(select(ParamFiscal).order_by(ParamFiscal.clave, ParamFiscal.vigencia_desde))).all()
     )
     con_valor = {fila.clave for fila in filas}
+    alertas = await sincronizacion.alertas_de_vigencia(db, date.today())
     return ConfiguracionFiscalOut(
         parametros=[_param_a_salida(fila) for fila in filas],
         claves_sin_valor=sorted(cfg.CLAVES_PARAM_FISCAL - con_valor),
+        alertas=[
+            AlertaVigenciaOut(
+                clave=alerta.clave,
+                motivo=alerta.motivo,
+                vigencia_desde=alerta.vigencia_desde,
+                fecha_esperada=alerta.fecha_esperada,
+                detalle=alerta.detalle,
+            )
+            for alerta in alertas
+        ],
     )
 
 

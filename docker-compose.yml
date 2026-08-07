@@ -63,6 +63,9 @@ services:
       STORAGE_ROOT: /srv/storage
       SIGNING_SECRET: ${SIGNING_SECRET}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      # Sincronización del tipo de cambio con la API SIE de Banxico (informes fase 3, tarea 6).
+      # Vacío = deshabilitada, y la alarma de vigencia fiscal lo dice en vez de callarlo.
+      BANXICO_TOKEN: ${BANXICO_TOKEN:-}
       ENVIRONMENT: development
     depends_on:
       mysql:
@@ -98,6 +101,9 @@ services:
       STORAGE_ROOT: /srv/storage
       SIGNING_SECRET: ${SIGNING_SECRET}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      # Sincronización del tipo de cambio con la API SIE de Banxico (informes fase 3, tarea 6).
+      # Vacío = deshabilitada, y la alarma de vigencia fiscal lo dice en vez de callarlo.
+      BANXICO_TOKEN: ${BANXICO_TOKEN:-}
       ENVIRONMENT: development
     depends_on:
       mysql:

@@ -75,6 +75,14 @@ class AutomatizacionesConfig(BaseModel):
     lista_69b: bool
     re_verificar: bool
     limpieza: bool
+    # Alarma de vigencia fiscal + sincronización del tipo de cambio (informes fase 3, tarea 6).
+    #
+    # **Es el único con default**, y no por descuido: los otros cuatro son del contrato congelado
+    # (doc 05 §9) y este llegó después. Un cliente viejo que haga `PUT` sin el campo no debe
+    # recibir 422 — pero tampoco debe resetear a `true` un interruptor que el admin apagó. La
+    # pantalla real hace `{...autos, [clave]: valor}` sobre lo que devolvió el `GET`, así que el
+    # valor viaja de ida y vuelta y el default nunca llega a aplicarse en esa ruta.
+    vigencia_fiscal: bool = True
 
 
 class BootstrapAdminIn(BaseModel):
@@ -362,14 +370,42 @@ class ParamFiscalOut(BaseModel):
     confirmado_en: str | None
 
 
+class AlertaVigenciaOut(BaseModel):
+    """Un valor fiscal (o una pieza de la maquinaria) que necesita atención hoy.
+
+    `motivo` ∈ `AUSENTE|SIN_CONFIRMAR|CADUCADO` para los valores —capturar / un clic /
+    actualizar el ejercicio— y `CATALOGO_ILEGIBLE|LIBRERIA_DESACTUALIZADA|SINCRONIZACION_FALLIDA`
+    para la maquinaria. Los seis piden acciones distintas; fusionarlos haría que la alerta
+    mintiera (un catálogo que no se puede abrir no es un valor "ausente").
+
+    `detalle` es la frase lista para mostrar: `motivo` es una etiqueta de máquina y las alertas
+    de maquinaria no se explican solas.
+    """
+
+    clave: str
+    motivo: str
+    vigencia_desde: date | None
+    fecha_esperada: date | None
+    detalle: str
+
+
 class ConfiguracionFiscalOut(BaseModel):
     """`claves_sin_valor` hace visible el tercer estado del cuadro de degradación: una clave
     conocida de la que no hay **ni siquiera** una propuesta. Sin ella la pantalla solo podría
     distinguir "confirmado" de "propuesto", y la ausencia —el caso que hay que ir a
-    capturar— sería un renglón que simplemente no aparece."""
+    capturar— sería un renglón que simplemente no aparece.
+
+    `alertas` es lo que `claves_sin_valor` no puede decir: **que un valor confirmado ya
+    caducó**. Una UMA de 2025 confirmada aparece como "confirmada" en todas las columnas de
+    arriba y no está en `claves_sin_valor`, aunque el 1 de febrero de 2026 ya pasó y el valor
+    esté mal. Los dos campos conviven: `claves_sin_valor` sigue cubriendo `TIPO_CAMBIO_USD`,
+    que queda fuera de la alarma de calendario a propósito (ver
+    `app/services/sincronizacion_fiscal.py`).
+    """
 
     parametros: list[ParamFiscalOut]
     claves_sin_valor: list[str]
+    alertas: list[AlertaVigenciaOut]
 
 
 class ParamFiscalGuardarIn(BaseModel):
@@ -474,6 +510,12 @@ class MarcaPercepcionIn(MarcasPercepcion):
 
 class MarcaPercepcionOut(BaseModel):
     tipo_percepcion: str
+    # La descripción del catálogo `c_TipoPercepcion` del SAT ("Becas para trabajadores y/o
+    # hijos"), resuelta del mismo `satcfdi` que valida la escritura. Sin ella, el cliente
+    # necesitaba su propia copia del catálogo —dos copias del mismo dato, y la del cliente sin
+    # actualizarse cuando se actualiza la librería—. `null` si la clave no está en la versión
+    # instalada o si el catálogo no se pudo leer: leer falla abierto, escribir no (503).
+    descripcion_sat: str | None
     es_ingreso_ordinario: bool
     base_exencion: str
     factor_exencion: Decimal | None

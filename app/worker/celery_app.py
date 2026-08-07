@@ -18,4 +18,10 @@ celery_app.conf.beat_schedule = {
     "actualizar-lista-69b": {"task": "app.worker.tasks.actualizar_lista_69b", "schedule": crontab(hour=1, minute=30)},
     "re-verificar-vigentes": {"task": "app.worker.tasks.re_verificar_vigentes", "schedule": crontab(hour=4, minute=0)},
     "limpiar-almacenamiento": {"task": "app.worker.tasks.limpiar_almacenamiento", "schedule": crontab(hour=3, minute=0)},
+    # Alarma de vigencia fiscal (informes fase 3, tarea 6). Fuera del bloque de madrugada de
+    # arriba a propósito: 13:30 UTC son ~07:30 en el centro de México, ya publicado el tipo de
+    # cambio FIX del día hábil anterior y justo antes de que alguien abra la pantalla. Una
+    # alarma que corre a las 3 de la mañana llega igual, pero con el dato de Banxico un día más
+    # viejo de lo necesario.
+    "revisar-vigencia-fiscal": {"task": "app.worker.tasks.revisar_vigencia_fiscal", "schedule": crontab(hour=13, minute=30)},
 }

@@ -867,3 +867,70 @@ async def _generar_informe_async(empresa_id: int, clave: str, parametros: dict[s
 @celery_app.task(name="app.worker.tasks.generar_informe")  # type: ignore[untyped-decorator]
 def generar_informe(empresa_id: int, clave: str, parametros: dict[str, Any], actor: str) -> dict[str, Any]:
     return asyncio.run(_generar_informe_async(empresa_id, clave, parametros, actor))
+
+
+# --------------------------------------------------------------------------- #
+# Alarma de vigencia fiscal (informes fase 3, tarea 6) — tarea diaria (beat).
+#
+# Hace dos cosas en este orden y en una sola transacción: intenta sincronizar el tipo de
+# cambio con Banxico (que **propone**, no confirma) y después revisa el calendario de
+# caducidades. El orden importa: así la revisión ya ve lo que la sincronización acaba de
+# proponer, y una sola fila de bitácora describe la corrida completa.
+#
+# **El fallo de la sincronización no aborta la revisión.** Son independientes a propósito: la
+# alarma de calendario es justamente la parte que no depende de internet, y perderla porque
+# Banxico no contestó sería tirar la defensa buena por culpa de la frágil. El fallo se guarda
+# en `configuracion` para que `alertas_de_vigencia` lo devuelva como una alerta más y el
+# administrador lo vea en la pantalla, no solo en el log del worker.
+# --------------------------------------------------------------------------- #
+
+
+async def _revisar_vigencia_fiscal_async() -> dict[str, Any]:
+    from app.services import bitacora as bitacora_service
+    from app.services import sincronizacion_fiscal as sincronizacion
+
+    async with SessionLocal() as db:
+        if not bool(await config_repo.valor(db, sincronizacion.CLAVE_AUTOMATIZACION, True)):
+            return {"alertas": 0, "propuestos": 0, "razon": "desactivada"}
+
+        hoy = date.today()
+        propuestos = 0
+        fallo: str | None = None
+        try:
+            propuestos = await sincronizacion.sincronizar_tipo_cambio(db, hoy=hoy)
+        except sincronizacion.ErrorDeSincronizacion as exc:
+            # `rollback` y no `continue a secas`: la sincronización pudo haber escrito algunas
+            # observaciones antes de reventar, y media serie propuesta con la corrida marcada
+            # como fallida es un estado que nadie puede interpretar después.
+            await db.rollback()
+            fallo = str(exc)
+            logger.error("revisar_vigencia_fiscal: %s", exc)
+
+        await config_repo.establecer(
+            db,
+            sincronizacion.CLAVE_ESTADO_SINCRONIZACION,
+            {"fallo": fallo, "cuando": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()},
+        )
+        alertas = await sincronizacion.alertas_de_vigencia(db, hoy)
+        # Regla 8: la corrida escribe `param_fiscal` y `configuracion`, así que deja bitácora en
+        # la misma transacción. Se escribe **siempre**, aunque no haya alertas ni propuestas: que
+        # la alarma corrió y no encontró nada es justamente lo que hay que poder demostrar.
+        await bitacora_service.registrar(
+            db,
+            actor="sistema",
+            accion="revisar_vigencia_fiscal",
+            entidad="param_fiscal",
+            detalle={
+                "propuestos": propuestos,
+                "fallo_sincronizacion": fallo,
+                "alertas": [sincronizacion.alerta_a_detalle(a) for a in alertas],
+            },
+        )
+        await db.commit()
+
+    return {"alertas": len(alertas), "propuestos": propuestos, "fallo_sincronizacion": fallo}
+
+
+@celery_app.task(name="app.worker.tasks.revisar_vigencia_fiscal")  # type: ignore[untyped-decorator]
+def revisar_vigencia_fiscal() -> dict[str, Any]:
+    return asyncio.run(_revisar_vigencia_fiscal_async())

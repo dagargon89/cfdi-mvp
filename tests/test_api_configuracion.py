@@ -1582,3 +1582,104 @@ async def test_el_503_del_catalogo_ilegible_no_se_queda_pegado(  # type: ignore[
     )
 
     catalogos._tipos_de_cache.cache_clear()
+
+
+# --------------------------------------------------------------------------------------
+# Alarma de vigencia y descripción del catálogo (informes fase 3, tarea 6)
+# --------------------------------------------------------------------------------------
+
+
+async def test_get_fiscal_devuelve_las_alertas_de_vigencia(client, db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    """Lo que `claves_sin_valor` **no puede decir**: que un valor confirmado ya caducó.
+
+    Una UMA de 2025 confirmada sale "confirmada" en todas las columnas y no está en
+    `claves_sin_valor`; sin el campo de alertas, la pantalla no tendría cómo saber que el 1 de
+    febrero de 2026 ya pasó y ese valor está mal.
+    """
+    from app.api.v1 import configuracion as endpoint
+
+    await _admin(db)
+    db.add(_param("UMA_DIARIA", "113.140000", date(2025, 2, 1), confirmado=True, hasta=None))
+    await db.commit()
+
+    class _Hoy(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 8, 6)
+
+    monkeypatch.setattr(endpoint, "date", _Hoy)
+
+    r = await client.get("/v1/configuracion/fiscal", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    cuerpo = r.json()
+    assert "UMA_DIARIA" not in cuerpo["claves_sin_valor"]
+
+    por_clave = {a["clave"]: a for a in cuerpo["alertas"]}
+    assert por_clave["UMA_DIARIA"]["motivo"] == "CADUCADO"
+    assert por_clave["UMA_DIARIA"]["fecha_esperada"] == "2026-02-01"
+    assert por_clave["UMA_DIARIA"]["vigencia_desde"] == "2025-02-01"
+    assert por_clave["UMA_DIARIA"]["detalle"], "la alerta tiene que traer la frase que la pantalla muestra"
+    # Las claves que ni se capturaron salen como AUSENTE, no solo en `claves_sin_valor`.
+    assert por_clave["SALARIO_MINIMO_GENERAL"]["motivo"] == "AUSENTE"
+
+
+async def test_get_percepciones_trae_la_descripcion_del_catalogo_del_sat(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Quien confirma necesita ver `015` **y** "Becas para trabajadores y/o hijos".
+
+    Sin este campo el cliente necesitaba su propia copia del catálogo: dos copias del mismo
+    dato, y la del cliente sin actualizarse cuando se actualiza `satcfdi`.
+    """
+    await _admin(db)
+    db.add(
+        CatalogoPercepcionMarca(
+            tipo_percepcion="001",
+            es_ingreso_ordinario=True,
+            base_exencion=BaseExencion.NINGUNA,
+            factor_exencion=None,
+            integra_sbc=True,
+            es_provisionable=False,
+            sujeto_a_tope_conjunto=False,
+            nota_revision=None,
+        )
+    )
+    await db.commit()
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    fila = next(m for m in r.json() if m["tipo_percepcion"] == "001")
+    assert fila["descripcion_sat"] == "Sueldos, Salarios Rayas y Jornales"
+
+
+async def test_las_automatizaciones_incluyen_la_alarma_de_vigencia_fiscal(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """El interruptor nuevo se guarda y se lee como los otros cuatro, y deja bitácora."""
+    await _admin(db)
+
+    r = await client.get("/v1/config/automatizaciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["vigencia_fiscal"] is True  # default: activa
+
+    cuerpo = {**r.json(), "vigencia_fiscal": False}
+    r = await client.put("/v1/config/automatizaciones", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["vigencia_fiscal"] is False
+
+    r = await client.get("/v1/config/automatizaciones", headers=ADMIN)
+    assert r.json()["vigencia_fiscal"] is False
+    assert await _contar_bitacora(db, "editar_automatizaciones") == 1
+
+
+async def test_un_cliente_viejo_no_reenciende_la_alarma_que_el_admin_apago(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """El campo tiene default para no romper a un cliente anterior al contrato, y ese default
+    no debe convertirse en un reseteo silencioso de un interruptor apagado a propósito.
+
+    La pantalla real hace `{...autos, [clave]: valor}` sobre lo que devolvió el `GET`, así que
+    el valor viaja de ida y vuelta; esta prueba fija esa ruta, que es la que importa.
+    """
+    await _admin(db)
+    r = await client.get("/v1/config/automatizaciones", headers=ADMIN)
+    await client.put("/v1/config/automatizaciones", json={**r.json(), "vigencia_fiscal": False}, headers=ADMIN)
+
+    autos = (await client.get("/v1/config/automatizaciones", headers=ADMIN)).json()
+    r = await client.put("/v1/config/automatizaciones", json={**autos, "limpieza": False}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["vigencia_fiscal"] is False, "toggling otra automatización no debe reencender esta"

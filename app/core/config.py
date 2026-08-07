@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     # durante el alta inicial; una vez creado el admin, puede quitarse del entorno.
     bootstrap_admin_token: str = ""
 
+    # Token de la API SIE de Banxico para sincronizar el tipo de cambio FIX (serie SF43718).
+    # Gratuito y de datos públicos, pero es una credencial: va aquí, jamás incrustado en el
+    # código. Vacío = sincronización deshabilitada, y la alarma de vigencia lo dice en vez de
+    # fingir que no hace falta (ver `app/services/sincronizacion_fiscal.py`).
+    # Se obtiene en https://www.banxico.org.mx/SieAPIRest/service/v1/token
+    banxico_token: str = ""
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
