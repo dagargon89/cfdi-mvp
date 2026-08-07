@@ -1211,7 +1211,7 @@ export const apiMock: ApiClient = {
     if (!fila) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
     const enviado = importeNormalizado(exigeImporteCadena(input.valor));
     if (enviado === null || enviado !== importeNormalizado(fila.valor)) {
-      throw new ApiError(409, 'VALOR_CAMBIO', `El valor de \`${clave}\` cambió mientras revisabas: está en ${fila.valor} y confirmaste ${input.valor}. Vuelve a cargar la pantalla y revísalo otra vez antes de confirmar.`);
+      throw new ApiError(409, 'VALOR_CAMBIO', `El valor de \`${clave}\` cambió mientras revisabas: está en ${fila.valor} y confirmaste ${input.valor}. Vuelve a cargar la configuración y revísalo otra vez antes de confirmar.`);
     }
     // Idempotente: reconfirmar no reescribe quién lo revisó ni deja bitácora de un no-cambio.
     if (fila.confirmado_en !== null) return paramASalida(fila);
@@ -1282,10 +1282,10 @@ export const apiMock: ApiClient = {
     // Antes que las marcas: si apareció una duda, ese es el diagnóstico útil aunque además hayan
     // cambiado las marcas — "mira la advertencia nueva" dice más que "algo cambió".
     if (dudaNoVistaMock(fila, input.nota_revision_hash)) {
-      throw new ApiError(409, 'DUDA_NO_VISTA', `El tipo ${tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste (la agregó otra persona o una recarga de semillas). Vuelve a cargar la pantalla, lee la duda y confirma después: confirmar es responder por lo que se miró.`);
+      throw new ApiError(409, 'DUDA_NO_VISTA', `El tipo ${tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste (la agregó otra persona o una recarga de semillas). Vuelve a cargar la configuración, lee la duda y confirma después: confirmar es responder por lo que se miró.`);
     }
     if (marcasDifieren(fila, input)) {
-      throw new ApiError(409, 'MARCAS_CAMBIARON', `Las marcas del tipo ${tipo} cambiaron mientras las revisabas. Vuelve a cargar la pantalla y revísalas otra vez antes de confirmarlas.`);
+      throw new ApiError(409, 'MARCAS_CAMBIARON', `Las marcas del tipo ${tipo} cambiaron mientras las revisabas. Vuelve a cargar la configuración y revísalas otra vez antes de confirmarlas.`);
     }
     // Idempotente: reconfirmar no reescribe quién respondió por la revisión.
     if (fila.confirmado_en !== null) return marcaASalida(fila);
@@ -1371,9 +1371,11 @@ export const apiMock: ApiClient = {
     return {
       conceptos,
       departamentos,
-      // Un concepto sin clave no se puede clasificar (la clave va en la PK del mapeo), así que
-      // tampoco cuenta como pendiente: si contara, el marcador nunca bajaría a cero.
-      sin_clasificar: conceptos.filter((c) => c.categoria === null && c.clave !== null).length,
+      // Solo percepciones con clave. Sin clave no hay PK con la que mapear, y una deducción no
+      // puede ser aguinaldo: contarlas dejaba el marcador clavado en un número que solo bajaba
+      // capturando `NO_APLICA` donde no tocaba. Mismo criterio que `percepciones_sin_clasificar`
+      // en el backend — el mock miente sobre el backend si se separan.
+      sin_clasificar: conceptos.filter((c) => c.naturaleza === 'P' && c.categoria === null && c.clave !== null).length,
       sin_mapear: departamentos.filter((d) => d.centro_costo === null).length,
     };
   },

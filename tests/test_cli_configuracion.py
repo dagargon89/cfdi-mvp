@@ -44,7 +44,11 @@ de verdad decide. Ver `test_la_guarda_que_decide_esta_dentro_de_la_transaccion`.
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
 from datetime import date, datetime
+from pathlib import Path
 from decimal import Decimal
 from typing import Any
 
@@ -116,6 +120,11 @@ def _marca(tipo: str, *, nota: str | None = None, tope: bool = False) -> Catalog
         sujeto_a_tope_conjunto=tope,
         nota_revision=nota,
     )
+
+
+def _huella_marcas(fila: CatalogoPercepcionMarca) -> str:
+    """La huella de las seis marcas de una fila, tal como la muestra `estado --percepciones`."""
+    return cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))
 
 
 async def _bitacora(db: AsyncSession, accion: str) -> list[Bitacora]:
@@ -285,7 +294,10 @@ async def test_confirmar_una_marca_con_una_huella_vieja_no_confirma(db: AsyncSes
     fila.nota_revision = "Ojo: la exención cambió con la reforma de 2026."
     await db.commit()
 
-    codigo = await _correr(db, "confirmar-marca", "010", "--huella", str(huella_vieja), "--actor", ACTOR, "--si")
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--huella", str(huella_vieja),
+        "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si",
+    )
 
     assert codigo == 1
     db.expire_all()
@@ -297,11 +309,13 @@ async def test_confirmar_una_marca_con_la_huella_vigente_si_confirma(db: AsyncSe
     """La gemela: leer la duda de hoy y confirmar funciona sin fricción."""
     await _admin(db)
     nota = "Ojo: la exención cambió con la reforma de 2026."
-    db.add(_marca("010", nota=nota))
+    fila = _marca("010", nota=nota)
+    db.add(fila)
     await db.commit()
 
     codigo = await _correr(
-        db, "confirmar-marca", "010", "--huella", str(cfg.huella_de_nota(nota)), "--actor", ACTOR, "--si"
+        db, "confirmar-marca", "010", "--huella", str(cfg.huella_de_nota(nota)),
+        "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si",
     )
 
     assert codigo == 0
@@ -313,10 +327,13 @@ async def test_sin_duda_no_sirve_cuando_la_marca_si_tiene_una(db: AsyncSession) 
     """`--sin-duda` es una afirmación ("la marca que revisé no tenía ninguna"), no un atajo
     para saltarse la huella. Si la marca sí tiene duda, es mentira y se rechaza."""
     await _admin(db)
-    db.add(_marca("010", nota="Revisar el art. 93 fracción XIV."))
+    fila = _marca("010", nota="Revisar el art. 93 fracción XIV.")
+    db.add(fila)
     await db.commit()
 
-    codigo = await _correr(db, "confirmar-marca", "010", "--sin-duda", "--actor", ACTOR, "--si")
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--sin-duda", "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si"
+    )
 
     assert codigo == 1
     db.expire_all()
@@ -327,10 +344,13 @@ async def test_sin_duda_si_sirve_cuando_la_marca_no_tiene_ninguna(db: AsyncSessi
     """La gemela: 5 de las 44 marcas sembradas no traen duda, y la huella no puede volverlas
     más costosas de confirmar."""
     await _admin(db)
-    db.add(_marca("010", nota=None))
+    fila = _marca("010", nota=None)
+    db.add(fila)
     await db.commit()
 
-    codigo = await _correr(db, "confirmar-marca", "010", "--sin-duda", "--actor", ACTOR, "--si")
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--sin-duda", "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si"
+    )
 
     assert codigo == 0
     db.expire_all()
@@ -341,10 +361,11 @@ async def test_confirmar_una_marca_exige_decir_algo_sobre_la_duda(db: AsyncSessi
     """Sin `--huella` ni `--sin-duda` no hay default: este es el comando que activa un valor
     fiscal, y omitir el campo sería confirmar sin decir qué se tenía delante."""
     await _admin(db)
-    db.add(_marca("010", nota=None))
+    fila = _marca("010", nota=None)
+    db.add(fila)
     await db.commit()
 
-    codigo = await _correr(db, "confirmar-marca", "010", "--actor", ACTOR, "--si")
+    codigo = await _correr(db, "confirmar-marca", "010", "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si")
 
     assert codigo == 1
     db.expire_all()
@@ -640,7 +661,11 @@ async def test_responder_que_no_cancela_sin_escribir(db: AsyncSession, monkeypat
     await _admin(db)
     db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1)))
     await db.commit()
-    monkeypatch.setattr(cli, "pregunta", lambda *_a, **_k: False)
+
+    async def _dice_que_no(*_a: Any, **_k: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(cli, "pregunta", _dice_que_no)
 
     codigo = await _correr(db, "confirmar-valor", "--actor", ACTOR, "--valor", "UMA_DIARIA", "117.31", "2026-02-01")
 
@@ -961,7 +986,7 @@ _DUDA = "Verificar contra el art. 93 fracción XIV: la exención podría estar t
 
 
 async def test_los_comandos_generados_llevan_la_duda_encima(
-    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Teclear 64 caracteres por marca no lo hace nadie, pero el punto de la huella es que
     quien confirma **haya visto la duda**. La duda va impresa encima de su comando: no hay
@@ -969,7 +994,6 @@ async def test_los_comandos_generados_llevan_la_duda_encima(
     await _admin(db)
     db.add(_marca("010", nota=_DUDA))
     await db.commit()
-    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: True)
 
     assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
 
@@ -983,7 +1007,7 @@ async def test_los_comandos_generados_llevan_la_duda_encima(
 
 
 async def test_una_marca_ya_confirmada_no_sale_en_los_comandos(
-    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """La gemela del generador: solo se listan las pendientes. Si listara todas, la lista
     nunca bajaría y nadie sabría qué le falta."""
@@ -993,7 +1017,6 @@ async def test_una_marca_ya_confirmada_no_sale_en_los_comandos(
     fila.confirmado_en = datetime(2026, 8, 1, 9, 0, 0)
     db.add(fila)
     await db.commit()
-    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: True)
 
     assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
 
@@ -1002,61 +1025,35 @@ async def test_una_marca_ya_confirmada_no_sale_en_los_comandos(
     assert "0 MARCA(S) PENDIENTE(S)" in salida
 
 
-async def test_redirigida_la_salida_no_entrega_la_huella(
-    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+async def test_el_generador_no_finge_una_garantia_que_no_tiene(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """La otra mitad de la garantía, y la que cierra el atajo real: si la salida no va a una
-    terminal (`> confirmar.sh`, `| sh`) **no hay nadie leyendo**, así que nadie vio la duda.
-    Las marcas con duda salen sin `--huella` y el comando pegado falla a propósito.
+    """Una versión anterior escondía la huella cuando `sys.stdout.isatty()` era falso y decía
+    que así "una tubería no puede confirmar una marca con una duda". Era falso —`estado
+    --percepciones` las entrega sin comprobar nada, la huella es `sha256` de la duda que la
+    propia salida imprime, y `script -qc` fabrica un pty— y además **estorbaba a quien sí
+    lee**: `| less`, que es como se leen 39 marcas que no caben en pantalla, deja `isatty()` en
+    falso y borraba las huellas.
 
-    Bajo pytest la salida está capturada, que es justo el caso que se prueba.
+    Se retiró. Esta prueba fija que **no vuelva**: la salida es la misma vaya a donde vaya (bajo
+    pytest está capturada, o sea que no es una terminal), y el texto no promete lo que no puede
+    cumplir.
     """
     await _admin(db)
     db.add(_marca("010", nota=_DUDA))
     await db.commit()
-    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: False)
 
     assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
 
     salida = capsys.readouterr().out
-    assert f"# DUDA: {_DUDA}" in salida, "la duda sí se imprime; lo que no sale es la huella"
-    assert str(cfg.huella_de_nota(_DUDA)) not in salida
-    assert "SIN HUELLA" in salida
-    # La línea que se pegaría sale sin guarda ninguna: es lo que la hace fallar en la puerta.
-    (linea,) = [l for l in salida.splitlines() if l.startswith("python -m")]
-    assert linea == f"python -m app.scripts.administrar_configuracion confirmar-marca 010 --actor {ACTOR}"
-
-
-async def test_el_comando_incompleto_que_sale_redirigido_de_verdad_falla(db: AsyncSession) -> None:
-    """Y no basta con no imprimir la huella: el comando que queda tiene que **fallar**. Si
-    pasara sin ella, no habríamos cerrado nada."""
-    await _admin(db)
-    db.add(_marca("010", nota=_DUDA))
-    await db.commit()
-
-    codigo = await _correr(db, "confirmar-marca", "010", "--actor", ACTOR, "--si")
-
-    assert codigo == 1
-    db.expire_all()
-    assert await cfg.marcas_de_percepcion(db) == {}
-
-
-async def test_una_marca_sin_duda_sale_completa_aunque_este_redirigida(
-    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """La gemela de la regla de la terminal: donde no hay duda no hay nada que leer, así que
-    el comando sale completo con `--sin-duda`. Si también se degradara, la regla estaría
-    castigando a quien no tiene nada que revisar."""
-    await _admin(db)
-    db.add(_marca("010", nota=None))
-    await db.commit()
-    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: False)
-
-    assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
-
-    salida = capsys.readouterr().out
-    assert "--sin-duda" in salida
-    assert "SIN HUELLA" not in salida
+    assert str(cfg.huella_de_nota(_DUDA)) in salida, (
+        "la salida capturada no es una terminal, y aun así entrega la huella: sin esto volvería "
+        "la regla que castigaba a quien pagina la lista para leerla"
+    )
+    assert "no puede" not in salida.lower().split("# ---")[0].replace("no puede comprobarlo", ""), (
+        "la cabecera no puede afirmar que algo es imposible"
+    )
+    assert "no finge" in salida
 
 
 async def test_como_comandos_exige_percepciones(db: AsyncSession) -> None:
@@ -1088,3 +1085,244 @@ def test_un_importe_que_no_es_numero_se_rechaza() -> None:
     with pytest.raises(cli.ErrorDeUso):
         cli.importe("117,31", "el importe")
     assert cli.importe(" 117.31 ", "el importe") == Decimal("117.31")
+
+
+# --------------------------------------------------------------------------------------
+# 11. La guarda de las seis marcas, y las carreras que abre la propia pregunta
+# --------------------------------------------------------------------------------------
+
+
+async def test_con_si_hay_que_mandar_las_marcas_que_se_confirman(db: AsyncSession) -> None:
+    """El agujero que quedaba: el comando **se mandaba a sí mismo** las marcas, así que con
+    `--si` nadie comprobaba las seis. Escenario real: el lunes obtienes la huella de la duda de
+    `010`; el miércoles alguien pone `sujeto_a_tope_conjunto=True` por el `PUT` sin tocar la
+    nota, así que la huella sigue valiendo; el jueves confirmas y activas una bandera que nunca
+    viste. Por la pantalla eso es un `409 MARCAS_CAMBIARON`."""
+    await _admin(db)
+    db.add(_marca("010", nota=None))
+    await db.commit()
+
+    codigo = await _correr(db, "confirmar-marca", "010", "--sin-duda", "--actor", ACTOR, "--si")
+
+    assert codigo == 1
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+async def test_sin_si_las_marcas_salen_en_el_plan_y_las_compara_la_persona(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La gemela: sin `--si` la huella de las marcas es opcional porque el plan las imprime en
+    claro y hay que teclear "s" — ahí quien compara es la persona, igual que en la pantalla.
+    Exigirla también ahí sería fricción sin garantía nueva."""
+    await _admin(db)
+    db.add(_marca("010", nota=None, tope=True))
+    await db.commit()
+
+    async def _dice_que_si(*_a: Any, **_k: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "pregunta", _dice_que_si)
+
+    codigo = await _correr(db, "confirmar-marca", "010", "--sin-duda", "--actor", ACTOR)
+
+    assert codigo == 0
+    assert "tope conjunto art. 93  sí" in capsys.readouterr().out, "las seis tienen que verse antes de decidir"
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+
+async def test_una_huella_de_marcas_vieja_no_confirma(db: AsyncSession) -> None:
+    """El lunes/miércoles/jueves, ejercido: la huella de la duda sigue siendo válida (la nota no
+    se tocó) y aun así hay que rechazarlo, porque el tope cambió."""
+    await _admin(db)
+    fila = _marca("010", nota=_DUDA)
+    db.add(fila)
+    await db.commit()
+    huella_lunes = _huella_marcas(fila)
+
+    fila.sujeto_a_tope_conjunto = True  # el miércoles, por el PUT, sin tocar la nota
+    await db.commit()
+
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--huella", str(cfg.huella_de_nota(_DUDA)),
+        "--marcas", huella_lunes, "--actor", ACTOR, "--si",
+    )
+
+    assert codigo == 1
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}, "una bandera que nadie vio no puede quedar activa"
+
+
+async def test_la_huella_de_marcas_de_hoy_si_confirma(db: AsyncSession) -> None:
+    """La gemela de la anterior."""
+    await _admin(db)
+    fila = _marca("010", nota=None, tope=True)
+    db.add(fila)
+    await db.commit()
+
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--sin-duda", "--marcas", _huella_marcas(fila), "--actor", ACTOR, "--si"
+    )
+
+    assert codigo == 0
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+
+async def test_la_huella_de_marcas_no_incluye_la_nota(db: AsyncSession) -> None:
+    """Si la nota entrara en la huella de las marcas, **resolver una duda invalidaría una
+    revisión en vuelo** — lo contrario de la asimetría que `duda_no_vista` protege. Son dos
+    huellas porque son dos cosas que se mueven por separado."""
+    sin_nota = cfg.MarcasQueCalculan.de_fila(_marca("010", nota=None))
+    con_nota = cfg.MarcasQueCalculan.de_fila(_marca("010", nota=_DUDA))
+    assert cfg.huella_de_marcas(sin_nota) == cfg.huella_de_marcas(con_nota)
+    # Y la gemela: una marca que sí cambia, cambia la huella.
+    assert cfg.huella_de_marcas(sin_nota) != cfg.huella_de_marcas(
+        cfg.MarcasQueCalculan.de_fila(_marca("010", tope=True))
+    )
+
+
+async def test_configurar_empresa_no_pisa_lo_que_cambio_mientras_respondias(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La pregunta convierte una ventana de milisegundos en una de minutos. Y el candado **no**
+    se puede tomar antes de preguntar: una sesión abandonada en el `[s/N]:` bloquearía el `PUT`
+    de esa empresa hasta el timeout de InnoDB. Así que se relee dentro de la transacción y se
+    compara con el plan que se aprobó."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    db.add(ConfiguracionEmpresa(empresa_id=empresa_id, dias_aguinaldo=30))
+    await db.commit()
+
+    async def _mientras_responde(*_a: Any, **_k: Any) -> bool:
+        config = await db.get(ConfiguracionEmpresa, empresa_id)
+        assert config is not None
+        config.dias_aguinaldo = 15  # otro administrador, mientras la persona lee el plan
+        await db.commit()
+        return True
+
+    monkeypatch.setattr(cli, "pregunta", _mientras_responde)
+
+    codigo = await _correr(
+        db, "configurar-empresa", "--empresa-id", str(empresa_id), "--zona-salarial", "ZLFN", "--actor", ACTOR
+    )
+
+    assert codigo == 1
+    db.expire_all()
+    config = await db.get(ConfiguracionEmpresa, empresa_id)
+    assert config is not None
+    assert config.dias_aguinaldo == 15, "lo del otro se conserva"
+    assert config.zona_salarial is None, "y lo nuestro no se aplica sobre un plan que ya no describe lo que hay"
+
+
+async def test_configurar_empresa_si_nadie_toca_nada_guarda(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La gemela: sin ella, una comprobación que abortara siempre pasaría igual de verde."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    db.add(ConfiguracionEmpresa(empresa_id=empresa_id, dias_aguinaldo=30))
+    await db.commit()
+
+    async def _dice_que_si(*_a: Any, **_k: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "pregunta", _dice_que_si)
+
+    codigo = await _correr(
+        db, "configurar-empresa", "--empresa-id", str(empresa_id), "--zona-salarial", "ZLFN", "--actor", ACTOR
+    )
+
+    assert codigo == 0
+    db.expire_all()
+    config = await db.get(ConfiguracionEmpresa, empresa_id)
+    assert config is not None and config.zona_salarial is ZonaSalarial.ZLFN and config.dias_aguinaldo == 30
+
+
+async def test_clasificar_no_borra_lo_que_otro_clasifico_mientras_respondias(
+    db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`clasificar` reemplaza todo lo de la empresa, así que aplicar un plan viejo **borra** lo
+    que el otro acaba de guardar. El endpoint tiene la misma ventana y no la cierra; aquí sí,
+    porque aquí la abre nuestra propia pregunta."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    await _nomina(db, empresa_id, "88888888-8888-8888-8888-888888888881", "VENTAS")
+
+    async def _mientras_responde(*_a: Any, **_k: Any) -> bool:
+        db.add(
+            MapConceptoProvision(
+                empresa_id=empresa_id, naturaleza="P", tipo="001", clave="019",
+                categoria=CategoriaProvision.VACACIONES,
+            )
+        )
+        await db.commit()
+        return True
+
+    monkeypatch.setattr(cli, "pregunta", _mientras_responde)
+
+    codigo = await _correr(
+        db, "clasificar", "--empresa-id", str(empresa_id), "--concepto", "P/001/001", "NO_APLICA", "--actor", ACTOR
+    )
+
+    assert codigo == 1
+    db.expire_all()
+    categorias = await cfg.categorias_de_provision(db, empresa_id)
+    assert categorias == {("P", "001", "019"): CategoriaProvision.VACACIONES}, "lo del otro sigue ahí"
+
+
+# --------------------------------------------------------------------------------------
+# 12. Que la herramienta arranque de verdad: `main()`, `SessionLocal` y el motor real
+# --------------------------------------------------------------------------------------
+
+
+async def test_la_herramienta_arranca_de_verdad_contra_mysql(db: AsyncSession, mysql_url: str) -> None:
+    """Todas las demás pruebas entran por `ejecutar(db, ...)` con la sesión ya hecha, así que
+    `main()`, `asyncio.run` y `SessionLocal` —el motor de verdad, contra MySQL— no los ejercita
+    ninguna. Lo primero que descubriría la corrida real sería que el proceso ni arranca.
+
+    Se corre en un **subproceso**, que es la única forma de ejercitar `asyncio.run` desde una
+    prueba que ya vive en un bucle, y con un comando de **solo lectura**.
+    """
+    await _admin(db)
+    db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1)))
+    await db.commit()
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "app.scripts.administrar_configuracion", "estado"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "DATABASE_URL": mysql_url},
+        cwd=Path(__file__).resolve().parents[1],
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "UMA_DIARIA" in proc.stdout
+    assert "117.310000" in proc.stdout
+    assert "sin confirmar no calcula" in proc.stdout
+
+
+async def test_el_proceso_real_sale_con_error_cuando_el_comando_esta_mal(
+    db: AsyncSession, mysql_url: str
+) -> None:
+    """La gemela: el código de salida distinto de cero tiene que llegar hasta el shell. Un
+    `main()` que devolviera 0 pasara lo que pasara haría verde la prueba de arriba igual."""
+    await _admin(db)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "app.scripts.administrar_configuracion", "confirmar-valor",
+         "--actor", ACTOR, "--valor", "UMA_INVENTADA", "1.00", "2026-02-01", "--si"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "DATABASE_URL": mysql_url},
+        cwd=Path(__file__).resolve().parents[1],
+        timeout=120,
+    )
+
+    assert proc.returncode != 0
+    assert "no es una clave conocida" in proc.stderr

@@ -390,7 +390,10 @@ export interface DepartamentoObservado {
 }
 
 /** `sin_clasificar` es el marcador que la pantalla necesita para decir "te faltan N": mientras
- * no sea cero, B-08 no puede distinguir "no se pagó aguinaldo" de "sí se pagó y no sé dónde". */
+ * no sea cero, B-08 no puede distinguir "no se pagó aguinaldo" de "sí se pagó y no sé dónde".
+ *
+ * Cuenta **solo percepciones con clave**. Lo que B-08 concilia es cuánto se pagó ya de aguinaldo,
+ * vacaciones y prima vacacional, y eso son percepciones: una deducción no puede ser aguinaldo. */
 export interface ObservadosEmpresa {
   conceptos: ConceptoObservado[];
   departamentos: DepartamentoObservado[];

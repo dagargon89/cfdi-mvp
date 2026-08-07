@@ -59,6 +59,7 @@ silenciosa en un error al cargar, que es barato.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -820,6 +821,23 @@ class MarcasQueCalculan:
         )
 
 
+def huella_de_marcas(marcas: MarcasQueCalculan) -> str:
+    """Huella de las seis marcas que calculan, para poder exigirlas en una línea de comandos
+    sin teclear seis banderas.
+
+    Es el equivalente de mandar el importe en `confirmar_param_fiscal`: lo que se confirma es
+    *lo que se revisó*. `nota_revision` **no** entra —tiene su propia huella y su propia regla
+    asimétrica (ver `duda_no_vista`)—; meterlas en el mismo hash haría que resolver una duda
+    invalidara una revisión, que es justo lo contrario de lo que se quiere.
+
+    Se hashea la misma proyección canónica que va a la bitácora (`detalle_de_marcas`, con el
+    `Decimal` como texto y las claves ordenadas), para que dos procesos que lean la misma fila
+    produzcan siempre la misma huella.
+    """
+    canonico = json.dumps(detalle_de_marcas(marcas), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
+
+
 def marcas_difieren(fila: CatalogoPercepcionMarca, marcas: MarcasQueCalculan) -> bool:
     """Si las marcas que **calculan** cambiaron. Decide dos cosas: si la captura tiene que
     limpiar la confirmación, y si el confirmar se rechaza.
@@ -982,7 +1000,7 @@ async def confirmar_param_fiscal(
         # decimales con los que la columna `Numeric(18,6)` devolvió la cifra.
         raise ValorCambio(
             f"El valor de `{clave}` cambió mientras revisabas: está en {fila.valor} y confirmaste "
-            f"{valor}. Vuelve a leer el estado y revísalo otra vez antes de confirmar."
+            f"{valor}. Vuelve a cargar la configuración y revísalo otra vez antes de confirmar."
         )
 
     if fila.confirmado_en is not None:
@@ -1023,13 +1041,13 @@ async def confirmar_marca_percepcion(
     if duda_no_vista(fila, nota_revision_hash):
         raise DudaNoVista(
             f"El tipo {tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste "
-            "(la agregó otra persona o una recarga de semillas). Vuelve a leer el estado, lee la "
+            "(la agregó otra persona o una recarga de semillas). Vuelve a cargar la configuración, lee la "
             "duda y confirma después: confirmar es responder por lo que se miró."
         )
     if marcas_difieren(fila, marcas):
         raise MarcasCambiaron(
-            f"Las marcas del tipo {tipo} cambiaron mientras las revisabas. Vuelve a leer el estado "
-            "y revísalas otra vez antes de confirmarlas."
+            f"Las marcas del tipo {tipo} cambiaron mientras las revisabas. Vuelve a cargar la "
+            "configuración y revísalas otra vez antes de confirmarlas."
         )
     if fila.confirmado_en is not None:
         return fila, False

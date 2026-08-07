@@ -97,12 +97,20 @@ class CategoriaProvision(str, Enum):
     """A qué provisión contable corresponde un concepto de nómina de la organización.
 
     `NO_APLICA` no es un relleno: es lo que hace que la clasificación pueda estar
-    **completa**. B-08 necesita saber cuánto aguinaldo se pagó ya; con un solo concepto sin
-    clasificar, "aguinaldo pagado = 0" es indistinguible de "sí se pagó y no sé en cuál
-    concepto viene", y el informe no puede generarse. Cuando todos los conceptos tienen
-    categoría —incluidos los que explícitamente no son ninguna de las tres— ese cero pasa a
-    ser un hecho conocido. Sin esta opción, marcar "este concepto no aplica" sería
-    indistinguible de no haberlo revisado.
+    **completa**. B-08 necesita saber cuánto aguinaldo se pagó ya; con una sola **percepción**
+    sin clasificar, "aguinaldo pagado = 0" es indistinguible de "sí se pagó y no sé en cuál
+    concepto viene", y el informe no puede generarse. Cuando todas las percepciones tienen
+    categoría —incluidas las que explícitamente no son ninguna de las tres— ese cero pasa a
+    ser un hecho conocido. Sin esta opción, marcar "esta percepción no aplica" sería
+    indistinguible de no haberla revisado.
+
+    **"Todas" quiere decir todas las percepciones, no todos los conceptos**, y la precisión
+    importa porque la primera versión de este docstring decía lo segundo. Una deducción no
+    puede ser aguinaldo —el aguinaldo no se le descuenta a nadie— y `c_TipoOtroPago` son
+    subsidios, viáticos y reintegros: pedir `NO_APLICA` en las siete deducciones de una empresa
+    es trabajo sin sentido para bajar un contador que nunca debió contarlas. El criterio vive
+    en `configuracion_fiscal.percepciones_sin_clasificar`, que es donde está el argumento
+    completo; léelo antes de volver a ensancharlo aquí.
     """
 
     AGUINALDO = "AGUINALDO"

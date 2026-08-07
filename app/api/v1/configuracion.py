@@ -776,9 +776,12 @@ async def conceptos_observados(
     return ObservadosEmpresaOut(
         conceptos=conceptos,
         departamentos=departamentos,
-        # Un concepto sin clave no se puede clasificar (la clave va en la PK del mapeo), así
-        # que tampoco cuenta como pendiente: contarlo dejaría el marcador clavado en un número
-        # que nadie puede bajar a cero, y B-08 nunca podría generarse.
-        sin_clasificar=sum(1 for c in conceptos if c.categoria is None and c.clave is not None),
+        # **Solo percepciones.** Un concepto sin clave no se puede clasificar (la clave va en la
+        # PK del mapeo) y una deducción no puede ser aguinaldo —el aguinaldo no se le descuenta
+        # a nadie—, así que ninguno de los dos cuenta como pendiente: contarlos dejaría el
+        # marcador clavado en un número que solo baja capturando `NO_APLICA` en renglones que
+        # nunca debieron entrar. El criterio vive en `cfg.percepciones_sin_clasificar` y es el
+        # mismo que usa `app/scripts/administrar_configuracion.py`.
+        sin_clasificar=len(cfg.percepciones_sin_clasificar(observados)),
         sin_mapear=sum(1 for d in departamentos if d.centro_costo is None),
     )

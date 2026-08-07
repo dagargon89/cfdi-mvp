@@ -238,13 +238,20 @@ async def exige_actor(db: AsyncSession, correo: str, *, externo: bool) -> str:
     return limpio
 
 
-def pregunta(texto: str, *, si: bool) -> bool:
+async def pregunta(texto: str, *, si: bool) -> bool:
     """Confirmación interactiva. `--si` la salta (para un despliegue automatizado), y sin
     terminal **no** se asume que sí: un cron que se quedó sin `--si` tiene que fallar, no
     aplicar cambios que nadie miró.
 
     El default es **no**: cualquier cosa que no sea "s"/"si"/"sí" cancela, incluido un Enter
-    de más pegado desde otra ventana."""
+    de más pegado desde otra ventana.
+
+    Es `async` aunque no espere nada: leer de la entrada es bloqueante y aquí da igual (es una
+    terminal), pero así una prueba puede sustituirla por una corrutina que **escriba en la base
+    mientras la persona piensa**, que es el único modo de ejercitar de verdad las
+    comprobaciones de "cambió mientras respondías". Con una función normal habría que fingir
+    esa carrera desde fuera, y lo que se probaría sería el fingimiento.
+    """
     if si:
         print(f"{texto} -> sí (--si)")
         return True
@@ -440,77 +447,74 @@ async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool, como_coman
         if fila.nota_revision:
             print(f"      DUDA DECLARADA: {fila.nota_revision}")
             print(f"      huella de la duda: {cfg.huella_de_nota(fila.nota_revision)}")
+        print(f"      huella de las marcas: {cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))}")
         if fila.confirmado_en is not None:
             print(f"      confirmada   sí, por {fila.confirmado_por} el {fila.confirmado_en:%Y-%m-%d %H:%M} UTC")
         else:
             print("      confirmada   NO — sin confirmar no calcula ninguna exención")
 
 
-def _salida_a_terminal() -> bool:
-    """Si la salida va a una terminal, es decir: si hay alguien leyéndola.
-
-    Redirigida a un archivo o entubada a `sh`, no lo hay — y de eso depende si el generador
-    de comandos imprime la huella. Ver `_imprimir_comandos_de_marcas`."""
-    return sys.stdout.isatty()
-
-
 def _imprimir_comandos_de_marcas(
     filas: Sequence[CatalogoPercepcionMarca], descripciones: dict[str, str], *, actor: str
 ) -> None:
-    """Los comandos `confirmar-marca` de lo que falta, ya formados.
+    """Los comandos `confirmar-marca` de lo que falta, ya formados, **cada uno con su duda
+    impresa encima**.
 
-    Existe porque teclear 64 caracteres de huella por cada una de las 39 marcas con duda no lo
-    hace nadie, y una herramienta que en la práctica no se usa es una herramienta que no
-    existe. Pero el punto de la huella es que **quien confirma haya visto la duda**, y un
-    generador que escupe las líneas listas invita a pegarlas sin leer nada — que es
-    exactamente lo que la huella impide en la pantalla. Dos cosas lo conservan:
+    Existe porque teclear dos huellas de 64 caracteres por cada una de las 39 marcas no lo hace
+    nadie, y una herramienta que en la práctica no se usa es una herramienta que no existe.
 
-    1. **La duda va impresa encima de su comando**, completa. Al copiar la línea, el texto de
-       la advertencia queda en pantalla; no hay forma de llegar al comando sin pasar por ella.
-    2. **La huella solo se imprime si la salida va a una terminal.** Redirigido a un archivo o
-       entubado a `sh` no hay nadie leyendo, así que las marcas **con duda** salen sin
-       `--huella` y el comando pegado **falla** en la guarda. Una tubería no puede confirmar
-       una marca con una duda declarada, que es el caso que importa. Las que no tienen duda
-       salen completas con `--sin-duda` en los dos casos: no hay nada que leer.
+    Qué garantiza y qué no, dicho sin adornos
+    ------------------------------------------
+    La duda va **encima** de su comando, así que en el flujo normal —leer la salida, copiar una
+    línea— el texto de la advertencia pasa por delante de los ojos. Eso es una **garantía
+    advertida, no una física**: quien quiera saltársela puede, y no poco.
 
-    No se emite un script ejecutable a propósito (sin `#!`, sin `set -e`): es una lista de
-    comandos para pegar de uno en uno, y que no sea cómodo hacerlo en lote es parte del diseño.
+    Una versión anterior de esta función escondía la huella cuando `sys.stdout.isatty()` era
+    falso, y esto afirmaba que "una tubería no puede confirmar una marca con una duda". **Era
+    falso y se retiró.** Cuatro agujeros, todos triviales:
+
+    - `estado --percepciones` (sin `--como-comandos`) entrega las huellas sin comprobar nada:
+      un `awk` sobre esa salida las cosecha igual;
+    - la huella es `sha256(nota)` y la salida degradada imprimía la duda íntegra, así que dos
+      líneas de shell la reconstruyen;
+    - `script -qc` y `unbuffer` fabrican un pty y `isatty()` dice que sí;
+    - `GET /v1/configuracion/percepciones` las devuelve a cualquier cliente, y está la base.
+
+    Y mientras no detenía a nadie, **estorbaba a quien sí lee**: `| less` —la forma cuidadosa
+    de leer 39 marcas que no caben en pantalla— deja `isatty()` en falso, igual que `| tee`,
+    `tmux capture-pane` o `ssh host cmd > bitacora.log`. El equilibrio estaba al revés:
+    castigaba al lector cuidadoso y no frenaba al que automatiza. Peor todavía, decir que era
+    una garantía invitaba a confiar en ella, que es peor que no tenerla.
+
+    Retirarlo **no deja esta herramienta por debajo de la pantalla**: el `GET` también entrega
+    huellas a un cliente que no lee ninguna duda. La garantía real, en las dos superficies, es
+    que **la duda viaja pegada a lo que se confirma**, y que el `409`/`DudaNoVista` impide
+    confirmar contra una duda distinta de la vigente.
+
+    No se emite un script ejecutable a propósito (sin `#!`, sin `set -e`): es una lista para
+    pegar de uno en uno.
     """
     pendientes = [f for f in filas if f.confirmado_en is None]
     print(f"\nCOMANDOS PARA CONFIRMAR LAS {len(pendientes)} MARCA(S) PENDIENTE(S)\n")
     if not pendientes:
         print("  (ninguna pendiente)")
         return
-    hay_terminal = _salida_a_terminal()
     print("Esto NO es un script. Cada marca lleva su duda encima porque confirmar es responder")
-    print("por lo que se miró: lee la duda y pega su comando, de uno en uno.")
-    if not hay_terminal:
-        print()
-        print("La salida NO va a una terminal, así que la huella de las marcas con duda no se")
-        print("imprime: si nadie está leyendo, nadie vio la duda. Esos comandos van incompletos")
-        print("y fallarán a propósito. Vuelve a correr esto en una terminal para obtenerlas.")
+    print("por lo que se miró: léela y pega su comando, de uno en uno. Nada aquí te obliga a")
+    print("leerla — la herramienta no puede comprobarlo y no finge que sí.")
     for fila in pendientes:
         descripcion = descripciones.get(fila.tipo_percepcion) or "(sin descripción en el catálogo instalado)"
         print(f"\n# --- {fila.tipo_percepcion}  {descripcion} ---")
         if fila.nota_revision is None:
             print("# (sin duda declarada)")
-            guarda = " --sin-duda"
+            guarda = "--sin-duda"
         else:
             print(f"# DUDA: {fila.nota_revision}")
-            if hay_terminal:
-                guarda = f" --huella {cfg.huella_de_nota(fila.nota_revision)}"
-            else:
-                # El comando sale **sin la guarda**, no con un hueco comentado: así se puede
-                # pegar tal cual y falla en la puerta con su mensaje, en vez de romperse por
-                # una comilla o un `#` a media línea. Fallar es lo que se busca; fallar de
-                # forma inexplicable, no.
-                print("# SIN HUELLA: la salida no va a una terminal, así que nadie leyó esta duda.")
-                print("# Lee la duda de arriba, corre `estado --percepciones` en una terminal y añade")
-                print("# `--huella <la que muestre>`. Tal como está, el comando de abajo se niega.")
-                guarda = ""
+            guarda = f"--huella {cfg.huella_de_nota(fila.nota_revision)}"
         print(
             f"python -m app.scripts.administrar_configuracion confirmar-marca "
-            f"{fila.tipo_percepcion}{guarda} --actor {actor}"
+            f"{fila.tipo_percepcion} \\\n  {guarda} \\\n"
+            f"  --marcas {cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))} --actor {actor}"
         )
 
 
@@ -671,7 +675,7 @@ async def cmd_confirmar_valor(db: AsyncSession, args: argparse.Namespace) -> int
         return 0
 
     print("\nConfirmar ACTIVA el valor: a partir de aquí los informes calculan con él.")
-    if not pregunta("¿Continuar?", si=bool(args.si)):
+    if not await pregunta("¿Continuar?", si=bool(args.si)):
         print("Cancelado: no se escribió nada.")
         return 1
 
@@ -748,7 +752,7 @@ async def cmd_capturar_valor(db: AsyncSession, args: argparse.Namespace) -> int:
     # Se pregunta solo cuando se pisa algo. Capturar un tramo nuevo no destruye nada y la
     # puerta de escritura ya rechaza lo incoherente; obligar a un `--si` ahí sería ruido que
     # enseña a teclear `--si` sin leer, que es como se gasta esta misma puerta.
-    if previo is not None and not pregunta("\n¿Sobrescribir el tramo que ya existe?", si=bool(args.si)):
+    if previo is not None and not await pregunta("\n¿Sobrescribir el tramo que ya existe?", si=bool(args.si)):
         print("Cancelado: no se escribió nada.")
         return 1
 
@@ -799,18 +803,40 @@ async def cmd_capturar_valor(db: AsyncSession, args: argparse.Namespace) -> int:
 async def cmd_confirmar_marca(db: AsyncSession, args: argparse.Namespace) -> int:
     """Confirma las marcas de un tipo de percepción.
 
-    Dos guardas, y ninguna es decorativa:
+    Dos cosas se revisan al confirmar, y cada una tiene su guarda porque **se mueven por
+    separado**: la duda declarada y las seis marcas que calculan.
 
-    1. **La huella de la duda** se teclea a mano (`--huella`, o `--sin-duda` para afirmar que
-       la marca revisada no tenía ninguna). No se rellena sola con lo que este mismo proceso
-       acaba de leer: rellenarla convertiría "confirmo habiendo leído la advertencia" en
-       "confirmo lo que sea que diga ahora", que es exactamente lo que la huella impide.
-    2. **El juego de marcas** que se muestra es el que se manda a confirmar, y la puerta lo
-       vuelve a leer bajo candado y lo compara. Si algo cambió entre que se imprimió y que se
-       respondió, se rechaza en vez de confirmar otra cosa.
+    1. **La huella de la duda** (`--huella`, o `--sin-duda` para afirmar que la marca revisada
+       no tenía ninguna). Nunca se rellena sola con lo que este proceso acaba de leer:
+       rellenarla convertiría "confirmo habiendo leído la advertencia" en "confirmo lo que sea
+       que diga ahora".
+    2. **La huella de las seis marcas** (`--marcas`), y es **obligatoria con `--si`**. Sin
+       ella, el escenario que la pantalla responde con `409 MARCAS_CAMBIARON` pasaba aquí con
+       éxito: el lunes se lee la marca `010`, el miércoles alguien le pone
+       `sujeto_a_tope_conjunto=True` por el `PUT` **sin tocar la nota** —así que la huella de
+       la duda sigue siendo válida—, y el jueves `confirmar-marca --si` releía la fila, se
+       mandaba a sí mismo las marcas nuevas y activaba una bandera que quien confirmó nunca
+       vio. La huella la emite `estado --percepciones` junto a las marcas en claro.
+
+       Sin `--si` es opcional: el plan de abajo imprime las seis en claro y hay que teclear
+       "s", así que ahí quien compara es la persona — igual que en la pantalla. Con `--si` no
+       hay nadie mirando, y entonces tiene que compararlo el código.
+
+    El reparto de las dos comprobaciones, dicho con precisión: `--marcas` se compara **aquí**,
+    contra lo que se acaba de leer, y cubre la fila que quedó vieja entre dos sesiones; la
+    puerta del servicio vuelve a leer **bajo candado** dentro de la transacción y compara otra
+    vez, y eso cubre lo que cambie entre que se imprime el plan y que se escribe. Hacen falta
+    las dos: ninguna sustituye a la otra.
     """
     tipo: str = args.tipo.strip()
     actor = await exige_actor(db, args.actor, externo=bool(args.actor_externo))
+    if args.si and args.marcas is None:
+        raise ErrorDeUso(
+            "Con `--si` no hay nadie mirando el plan, así que las marcas que se confirman tienen que "
+            "venir en la línea: pasa `--marcas <huella>` con la que muestra `estado --percepciones`. "
+            "Sin eso, el comando se mandaría a sí mismo las marcas que encuentre hoy y activaría lo "
+            "que nadie revisó."
+        )
     if args.huella is None and not args.sin_duda:
         raise ErrorDeUso(
             "Falta la guarda de la duda: pasa `--huella <sha256>` con la huella que muestra "
@@ -829,6 +855,14 @@ async def cmd_confirmar_marca(db: AsyncSession, args: argparse.Namespace) -> int
         )
     descripcion = dict(catalogos.tipos_de("P")).get(tipo) or "(sin descripción en el catálogo instalado)"
     marcas = leida.marcas
+    huella_actual = cfg.huella_de_marcas(marcas)
+    if args.marcas is not None and args.marcas.strip() != huella_actual:
+        raise ErrorDeUso(
+            f"Las marcas del tipo {tipo} no son las que revisaste: mandaste la huella "
+            f"{args.marcas.strip()} y las de ahora dan {huella_actual}. Alguien las cambió mientras "
+            "tanto. Vuelve a leerlas con `estado --percepciones` y confirma después: confirmar es "
+            "responder por lo que se miró."
+        )
     print(f"CONFIRMAR la marca {tipo} — {descripcion}, a nombre de {actor}\n")
     print(f"  ingreso ordinario      {_si_no(marcas.es_ingreso_ordinario)}")
     print(f"  integra SBC            {_si_no(marcas.integra_sbc)}")
@@ -846,7 +880,7 @@ async def cmd_confirmar_marca(db: AsyncSession, args: argparse.Namespace) -> int
         return 0
 
     print("\nConfirmar ACTIVA estas marcas: B-03 empezará a calcular exenciones con ellas.")
-    if not pregunta("¿Continuar?", si=bool(args.si)):
+    if not await pregunta("¿Continuar?", si=bool(args.si)):
         print("Cancelado: no se escribió nada.")
         return 1
 
@@ -918,7 +952,11 @@ async def cmd_configurar_empresa(db: AsyncSession, args: argparse.Namespace) -> 
         if pedido is not None and borrado:
             raise ErrorDeUso(f"`--{nombre}` y `--sin-{nombre}` se contradicen: manda una sola.")
 
-    config = await db.get(ConfiguracionEmpresa, empresa.empresa_id, with_for_update=True)
+    # **Sin candado todavía.** Una sesión abandonada en el `[s/N]:` con un `FOR UPDATE` tomado
+    # bloquea el `PUT` de esa empresa hasta que salte el timeout de InnoDB, y el prompt no tiene
+    # límite de tiempo. Se lee suelto para pintar el plan y se vuelve a leer con candado ya
+    # dentro de la transacción, que es lo que hace `capturar-valor`.
+    config = await cfg.configuracion_de_empresa(db, empresa.empresa_id)
     nueva_zona = config.zona_salarial if config is not None else None
     nuevos_dias = config.dias_aguinaldo if config is not None else None
     nuevo_factor = config.factor_prima_vacacional if config is not None else None
@@ -968,12 +1006,21 @@ async def cmd_configurar_empresa(db: AsyncSession, args: argparse.Namespace) -> 
 
     if nueva_zona is None and antes is not None and antes["zona_salarial"]:
         print("\n  OJO: al quitar la zona salarial, B-10 deja de poder validar el salario mínimo.")
-    if not pregunta("\n¿Guardar?", si=bool(args.si)):
+    if not await pregunta("\n¿Guardar?", si=bool(args.si)):
         print("Cancelado: no se escribió nada.")
         return 1
 
     try:
+        # Ahora sí, con candado y ya sin nadie a quien esperar.
+        config = await db.get(ConfiguracionEmpresa, empresa.empresa_id, with_for_update=True)
+        if config is not None and cfg.detalle_de_config_empresa(config) != antes:
+            raise ErrorDeUso(
+                "La configuración de esta empresa cambió mientras respondías, así que el plan que "
+                "aprobaste ya no describe lo que hay. Vuelve a correrlo."
+            )
         if config is None:
+            if antes is not None:
+                raise ErrorDeUso("La configuración de esta empresa se borró mientras respondías. Vuelve a correrlo.")
             config = ConfiguracionEmpresa(empresa_id=empresa.empresa_id)
             db.add(config)
         config.zona_salarial = nueva_zona
@@ -1067,7 +1114,7 @@ async def cmd_clasificar(db: AsyncSession, args: argparse.Namespace) -> int:
         print("  (nada que cambiar: ya estaba todo así)")
         return 0
 
-    if not pregunta(f"\n¿Aplicar {cambios} cambio(s)?", si=bool(args.si)):
+    if not await pregunta(f"\n¿Aplicar {cambios} cambio(s)?", si=bool(args.si)):
         print("Cancelado: no se escribió nada.")
         return 1
 
@@ -1075,6 +1122,21 @@ async def cmd_clasificar(db: AsyncSession, args: argparse.Namespace) -> int:
     # la pantalla de bitácora enseñe los dos caminos con el mismo cuadro.
     anterior = _detalle_mapeos(previas_conceptos, previos_deptos)
     try:
+        # Se relee dentro de la transacción y se compara con el plan que se aprobó. Aquí no hay
+        # una fila que candar —el guardado reemplaza todo lo de la empresa— y la pregunta
+        # ensancha a minutos una ventana de milisegundos: sin esta comparación, lo que otro
+        # hubiera clasificado mientras tanto se perdería sin ruido, que es justo la pérdida
+        # silenciosa que este comando existe para evitar. El endpoint tiene la misma ventana y
+        # no la cierra; aquí sí, porque aquí la abre nuestra propia pregunta.
+        if (
+            await cfg.categorias_de_provision(db, empresa.empresa_id) != previas_conceptos
+            or await cfg.centro_de_costo(db, empresa.empresa_id) != previos_deptos
+        ):
+            raise ErrorDeUso(
+                "La clasificación de esta empresa cambió mientras respondías, así que el plan que "
+                "aprobaste ya no describe lo que hay (y aplicarlo borraría lo que hizo el otro). "
+                "Vuelve a correrlo."
+            )
         await db.execute(delete(MapDepartamento).where(MapDepartamento.empresa_id == empresa.empresa_id))
         await db.execute(delete(MapConceptoProvision).where(MapConceptoProvision.empresa_id == empresa.empresa_id))
         # Orden estable de inserción por clave natural: dos corridas de la **misma** empresa
@@ -1237,6 +1299,14 @@ def construir_parser() -> argparse.ArgumentParser:
     marca.add_argument("--huella", default=None, help="La huella de la duda, tal como la muestra `estado`.")
     marca.add_argument(
         "--sin-duda", action="store_true", help="Afirma que la marca revisada no tenía duda declarada."
+    )
+    marca.add_argument(
+        "--marcas",
+        default=None,
+        help=(
+            "Huella de las seis marcas que se confirman, tal como la muestra `estado --percepciones`. "
+            "Obligatoria con --si: sin nadie mirando el plan, es lo único que impide activar lo que no se revisó."
+        ),
     )
     _agregar_actor(marca)
 

@@ -272,7 +272,14 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
   if (isLoading || cargandoGuardados) return <p className="text-text-muted text-[13px]">Cargando lo que la nómina de esta empresa emitió…</p>;
   if (!observados) return null;
 
-  const clasificables = observados.conceptos.filter((c) => c.clave !== null);
+  // **Solo percepciones.** Lo que B-08 concilia es cuánto se pagó ya de aguinaldo, vacaciones y
+  // prima vacacional, y eso son percepciones por definición: una deducción no puede ser aguinaldo
+  // —el aguinaldo no se le descuenta a nadie— y `c_TipoOtroPago` son subsidios, viáticos y
+  // reintegros. Contarlas dejaba el marcador clavado en un número que solo bajaba capturando
+  // `NO_APLICA` en renglones que nunca debieron entrar: trabajo sin sentido. El criterio es el
+  // mismo que `percepciones_sin_clasificar` en el backend y en la herramienta de terminal; si lo
+  // cambias aquí, cámbialo en los tres o volverán a decir cosas distintas el mismo día.
+  const clasificables = observados.conceptos.filter((c) => c.naturaleza === 'P' && c.clave !== null);
   const sinClasificarAhora = clasificables.filter((c) => !categorias[claveDeConcepto(c)]).length;
   const sinMapearAhora = observados.departamentos.filter((d) => !centros[d.departamento_texto]?.trim()).length;
   const sinClave = observados.conceptos.filter((c) => c.clave === null);
@@ -302,16 +309,17 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
             <span className="text-pretty">
               {sinClasificarAhora === 0 ? (
                 <>
-                  Los {clasificables.length} conceptos con clave están clasificados. Con la clasificación completa, el
+                  Las {clasificables.length} percepciones con clave están clasificadas. Con la clasificación completa, el
                   informe de provisión de pasivo laboral (B-08) puede generarse: sabe que un aguinaldo pagado de cero es
                   un hecho y no un hueco.
                 </>
               ) : (
                 <>
-                  Te faltan <strong>{sinClasificarAhora}</strong> de {clasificables.length} conceptos por clasificar.
-                  Hasta que no quede ninguno, <strong>B-08 (provisión de pasivo laboral) no se puede generar</strong>: con
-                  un solo concepto sin revisar, "no se pagó aguinaldo" es indistinguible de "sí se pagó y no sé en cuál
-                  concepto viene".
+                  Te faltan <strong>{sinClasificarAhora}</strong> de {clasificables.length} percepciones por clasificar.
+                  Hasta que no quede ninguna, <strong>B-08 (provisión de pasivo laboral) no se puede generar</strong>: con
+                  una sola percepción sin revisar, "no se pagó aguinaldo" es indistinguible de "sí se pagó y no sé en cuál
+                  concepto viene". Las deducciones y los otros pagos no cuentan: no puede haberse pagado aguinaldo en un
+                  descuento.
                 </>
               )}
             </span>
@@ -432,6 +440,9 @@ function FilaConcepto({
   onCambiar: (v: CategoriaProvision | '') => void;
 }) {
   const sinClave = concepto.clave === null;
+  // Solo las percepciones se clasifican; ver el comentario de `clasificables`. Ofrecer
+  // "Aguinaldo" en el renglón de una deducción era la invitación de verdad a capturar tonterías.
+  const esPercepcion = concepto.naturaleza === 'P';
   return (
     <tr className="border-t border-border">
       <td className="px-3 py-2 text-[13px] font-medium">{concepto.concepto ?? '(sin descripción)'}</td>
@@ -444,6 +455,11 @@ function FilaConcepto({
       <td className="px-3 py-2">
         {sinClave ? (
           <span className="text-[12px] text-text-muted">Sin clave: no se puede clasificar</span>
+        ) : !esPercepcion ? (
+          <span className="text-[12px] text-text-muted">
+            No participa: solo las percepciones se clasifican
+            {valor ? ` (guardado: ${CATEGORIAS.find((c) => c.valor === valor)?.etiqueta ?? valor})` : ''}
+          </span>
         ) : (
           <select
             aria-label={`Categoría de ${concepto.concepto ?? claveDeConcepto(concepto)}`}

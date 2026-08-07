@@ -1256,8 +1256,13 @@ async def test_conceptos_observados_enumera_lo_que_la_nomina_emitio(client, db: 
     assert por_depto["ADMON"]["comprobantes"] == 1
     assert por_depto["VENTAS"]["centro_costo"] is None
 
-    # Los contadores que la pantalla usa para decir "te faltan N".
-    assert cuerpo["sin_clasificar"] == 3
+    # Los contadores que la pantalla usa para decir "te faltan N". `sin_clasificar` cuenta
+    # **solo percepciones**: la deducción `D/001/IMSS` está aquí y no suma. Una deducción no
+    # puede ser aguinaldo —el aguinaldo no se le descuenta a nadie—, así que contarla dejaría
+    # el marcador clavado en un número que solo baja capturando `NO_APLICA` donde no toca. El
+    # criterio vive en `cfg.percepciones_sin_clasificar`, junto al argumento completo.
+    assert cuerpo["sin_clasificar"] == 2
+    assert ("D", "001", "IMSS") in por_clave, "la deducción sí se lista; lo que no hace es contar"
     assert cuerpo["sin_mapear"] == 2
 
 
