@@ -877,6 +877,282 @@ async def test_sin_uma_anual_el_tope_conjunto_avisa_que_no_lo_evaluo(
     assert faltantes[0].severidad == "alta"
 
 
+async def test_una_marca_sujeta_al_tope_conjunto_sin_confirmar_avisa_aunque_no_se_imprima(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """**Tercera vía del mismo error, y la razón de que el aviso no cuelgue de las filas.**
+
+    El alcance del tope conjunto se calcula con las marcas **confirmadas**, y eso está bien:
+    calcular con una marca sin confirmar violaría el invariante. Pero *decidir si hay que
+    avisar* no necesita la marca confirmada — es el mismo razonamiento que ya falló dos veces
+    en este módulo. Aquí `034` está sujeta al tope, sin confirmar y pagada **fuera del rango**,
+    así que no imprime fila: si el aviso viviera en `MARCA_SIN_CONFIRMAR` (que se alimenta de
+    las filas impresas) el informe se quedaría mudo mientras la suma real (50 000) pasa de 1
+    UMA anual.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [{"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True}],
+        confirmadas=True,
+    )
+    # `034` se carga después y se deja SIN confirmar.
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [{"tipo": "034", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True}],
+        confirmadas=False,
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="e5e5e5e5-e5e5-e5e5-e5e5-e5e5e5e5e5e1",
+        fecha_pago=date(2026, 6, 30),
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "30000.00")],
+        total_percepciones="30000.00",
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="e5e5e5e5-e5e5-e5e5-e5e5-e5e5e5e5e5e2",
+        fecha_pago=date(2026, 1, 31),
+        percepciones=[("034", "034", "Utiles escolares", "0.00", "20000.00")],
+        total_percepciones="20000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    avisos = _de_clave(resultado, "TOPE_CONJUNTO_SIN_EVALUAR")
+    assert len(avisos) == 1
+    assert avisos[0].severidad == "alta"
+    assert avisos[0].ambito == "ejercicio:2026"
+    assert "034" in avisos[0].mensaje
+
+
+async def test_con_nada_confirmado_el_tope_conjunto_avisa_igual(db: AsyncSession, tmp_path: Path) -> None:
+    """El estado de producción de hoy: 44 marcas, ninguna confirmada. El tipo sujeto al tope
+    se pagó fuera del rango, así que tampoco imprime fila."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "001", "base": "NINGUNA", "integra_sbc": True},
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+        confirmadas=False,
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="f5f5f5f5-f5f5-f5f5-f5f5-f5f5f5f5f5f1",
+        fecha_pago=date(2026, 1, 31),
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "60000.00")],
+        total_percepciones="60000.00",
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="f5f5f5f5-f5f5-f5f5-f5f5-f5f5f5f5f5f2",
+        fecha_pago=date(2026, 6, 30),
+        percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+        total_percepciones="8000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(_de_clave(resultado, "TOPE_CONJUNTO_SIN_EVALUAR")) == 1
+
+
+async def test_el_filtro_por_tipo_no_esconde_el_aviso_del_tope_conjunto(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Misma vía, por el filtro en vez de por el rango."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "001", "base": "NINGUNA", "integra_sbc": True},
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+        confirmadas=False,
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="a6a6a6a6-a6a6-a6a6-a6a6-a6a6a6a6a6a6",
+        percepciones=[
+            ("001", "001", "Sueldo", "8000.00", "0.00"),
+            ("029", "029", "Vales de despensa", "0.00", "60000.00"),
+        ],
+        total_percepciones="68000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p(tipo_percepcion="001"))
+
+    assert len(resultado.filas) == 1
+    assert len(_de_clave(resultado, "TOPE_CONJUNTO_SIN_EVALUAR")) == 1
+
+
+async def test_con_todo_confirmado_no_hay_aviso_de_tope_conjunto_sin_evaluar(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Gemela negativa: el aviso es sobre lo que **no** se pudo evaluar. Si todo está
+    confirmado, el tope se evalúa y el aviso sobra."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db, tmp_path, [{"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True}]
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="b6b6b6b6-b6b6-b6b6-b6b6-b6b6b6b6b6b6",
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "60000.00")],
+        total_percepciones="60000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert "TOPE_CONJUNTO_SIN_EVALUAR" not in _claves(resultado)
+    assert len(_de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")) == 1
+
+
+async def test_una_marca_sujeta_al_tope_sin_importes_no_genera_ruido(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Gemela negativa del aviso: solo se avisa de lo que de verdad quedó sin sumar. Una
+    bandera que sale siempre no la lee nadie.
+
+    **El `029` se paga, pero íntegramente gravado.** Es a propósito: la primera versión de esta
+    prueba no lo incluía en absoluto, y entonces el tipo ni siquiera aparecía en el acumulado —
+    quitar la condición `exento > 0` no cambiaba nada y la prueba sobrevivía a esa mutación sin
+    proteger la condición que dice proteger. Con un renglón presente y en cero, la única forma
+    de que no salga el aviso es que la condición esté.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "001", "base": "NINGUNA", "integra_sbc": True},
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+        confirmadas=False,
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="c6c6c6c6-c6c6-c6c6-c6c6-c6c6c6c6c6c6",
+        percepciones=[
+            ("001", "001", "Sueldo", "8000.00", "0.00"),
+            ("029", "029", "Vales de despensa", "5000.00", "0.00"),
+        ],
+        total_percepciones="13000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert "TOPE_CONJUNTO_SIN_EVALUAR" not in _claves(resultado)
+
+
+async def test_un_empleado_sin_filas_en_el_rango_no_se_pierde_del_tope_conjunto(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Cuarta vía: el empleado cuyos pagos de previsión social caen **todos** fuera del rango.
+
+    No lleva bandera propia —el informe no habla de él, no hay ninguna fila suya que mirar—
+    pero tampoco desaparece: se cuenta en una bandera colapsada por ejercicio que dice cuántos
+    son y que basta ampliar el rango. Callarlo sería el mismo silencio que costó C2.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "001", "base": "NINGUNA", "integra_sbc": True},
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+    )
+    # Este empleado sí sale en el informe y no excede nada.
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="d6d6d6d6-d6d6-d6d6-d6d6-d6d6d6d6d6d1",
+        rfc_receptor="XAXX010101000",
+        fecha_pago=date(2026, 6, 30),
+        percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+        total_percepciones="8000.00",
+    )
+    # Este excede el tope conjunto, pero todos sus pagos caen fuera del rango del informe.
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="d6d6d6d6-d6d6-d6d6-d6d6-d6d6d6d6d6d2",
+        rfc_receptor="XEXX010101000",
+        fecha_pago=date(2026, 1, 31),
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "60000.00")],
+        total_percepciones="60000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert [f[_columna(resultado, "RFC empleado")] for f in resultado.filas] == ["XAXX010101000"]
+    # Nadie del informe excede: ninguna bandera individual.
+    assert "TOPE_CONJUNTO_EXCEDIDO" not in _claves(resultado)
+    fuera = _de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO_FUERA_DEL_INFORME")
+    assert len(fuera) == 1
+    assert fuera[0].ambito == "ejercicio:2026"
+    assert "1" in fuera[0].mensaje
+
+
+async def test_la_marca_sin_confirmar_avisa_de_su_tope_conjunto(db: AsyncSession, tmp_path: Path) -> None:
+    """La frase que distingue una marca sin confirmar cualquiera de una sujeta al tope
+    conjunto: en la segunda, lo que no se evalúa no es solo su tope por tipo —inexcedible con
+    `PORCENTAJE 100`— sino la única comprobación que puede detectar el exceso."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+            {"tipo": "005", "base": "PORCENTAJE", "factor": "100"},
+        ],
+        confirmadas=False,
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="e6e6e6e6-e6e6-e6e6-e6e6-e6e6e6e6e6e6",
+        percepciones=[
+            ("029", "029", "Vales de despensa", "0.00", "1000.00"),
+            ("005", "031", "Fondo ahorro", "0.00", "1000.00"),
+        ],
+        total_percepciones="2000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    por_ambito = {b.ambito: b for b in _de_clave(resultado, "MARCA_SIN_CONFIRMAR")}
+    assert "tope conjunto" in por_ambito["tipo:029"].mensaje
+    # Y su gemela negativa: el 005 está exceptuado, así que la frase no debe salir.
+    assert "tope conjunto" not in por_ambito["tipo:005"].mensaje
+
+
 async def test_el_tope_conjunto_no_dispara_por_debajo_de_una_uma_anual(db: AsyncSession, tmp_path: Path) -> None:
     """Gemela negativa del tope conjunto."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")

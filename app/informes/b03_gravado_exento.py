@@ -22,6 +22,14 @@ hacer, distinguiendo los tres estados:
 - **Ausente** → columna vacía y bandera que dice qué capturar (`FALTA_UMA`, `FALTA_MARCA`,
   `FALTA_ZONA_SALARIAL`).
 
+**El invariante gobierna los cálculos, no las advertencias**, y confundir las dos cosas costó
+tres defectos seguidos en este módulo, los tres del mismo tipo: apagar en silencio una
+comprobación por faltar un dato **que esa comprobación no usa**. La regla general, escrita
+aquí para que no haya una cuarta: antes de condicionar algo a que un valor esté confirmado,
+pregúntate si ese algo *usa* el valor. Sumar importes exentos contra `UMA_ANUAL` no usa
+`factor_exencion`; decidir si hay que avisar no usa nada. Ver
+`tipos_que_podrian_estar_sujetos_al_tope_conjunto`.
+
 **Una bandera por causa, con el conteo de filas afectadas; nunca una por fila.** Es la
 lección del colapso de banderas de la fase 2 (`universo_nomina._banderas_de_no_verificado`):
 si faltan la UMA y 300 filas la necesitan, una hoja `Banderas` con 300 avisos idénticos
@@ -100,7 +108,7 @@ del sistema está en `app.informes.excel`.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -684,19 +692,89 @@ def _bandera_de_exencion_excedida(
 
 
 def tipos_sujetos_al_tope_conjunto(config: _Configuracion) -> set[str]:
-    """Los tipos con `sujeto_a_tope_conjunto` entre las marcas **confirmadas**.
+    """Los tipos con `sujeto_a_tope_conjunto` entre las marcas **confirmadas**: los que
+    **calculan**.
 
-    Es lo que decide el alcance del tope conjunto, y sale del dato: la columna que la tarea 3
-    agregó justo para que esto no fuera una lista escrita en el programa (§2.12). Los
-    exceptuados por el último párrafo del art. 93 (jubilaciones, gastos médicos, funeral,
-    fondo de ahorro…) simplemente no traen la marca, así que la lista de exceptuados tampoco
-    vive en el código.
+    El alcance sale del dato, no de una lista escrita en el programa (§2.12): es la columna
+    que la tarea 3 agregó justo para eso. Los exceptuados por el último párrafo del art. 93
+    (jubilaciones, gastos médicos, funeral, fondo de ahorro…) simplemente no traen la marca,
+    así que la lista de exceptuados tampoco vive en el código.
 
-    Se expone (sin guion bajo) porque `consultar` la necesita **antes** de la consulta
-    agregada: la suma del tope conjunto tiene que cubrir estos tipos aunque ninguno aparezca
-    en las filas impresas.
+    Solo lo confirmado, porque de aquí sale un **cálculo**. Para decidir si hay que **avisar**,
+    ver `tipos_que_podrian_estar_sujetos_al_tope_conjunto`.
     """
     return {tipo for tipo, marca in config.marcas.items() if marca.sujeto_a_tope_conjunto}
+
+
+def tipos_que_podrian_estar_sujetos_al_tope_conjunto(config: _Configuracion) -> set[str]:
+    """Los tipos con `sujeto_a_tope_conjunto` entre las marcas confirmadas **y las
+    propuestas**: los que hay que **mirar para saber si el aviso hace falta**.
+
+    **Este es el mismo error de razonamiento que ya costó dos defectos en este módulo, cerrado
+    en su forma general:** "un valor sin confirmar no calcula" gobierna los *cálculos*, no las
+    *advertencias*. Decidir si hay que avisar de que el tope conjunto no se pudo evaluar no
+    necesita la marca confirmada — de hecho es imposible saberlo sin mirar lo propuesto, y con
+    el catálogo de hoy (44 marcas, ninguna confirmada) mirar solo lo confirmado deja el aviso
+    permanentemente apagado.
+
+    Lo añadido por esta función **nunca entra en una suma ni en una comparación**: solo decide
+    si se emite `TOPE_CONJUNTO_SIN_EVALUAR`. Es la misma forma que ya tenían `FALTA_UMA_ANUAL`
+    y `FALTA_UMA`: la ausencia se reporta, no se rellena.
+
+    Se expone (sin guion bajo) porque `consultar` la necesita **antes** de la consulta
+    agregada, para que el acumulado traiga también los importes de estos tipos.
+    """
+    return {
+        tipo
+        for tipo, marca in (*config.marcas.items(), *config.marcas_propuestas.items())
+        if marca.sujeto_a_tope_conjunto
+    }
+
+
+def _avisos_de_tope_conjunto_sin_evaluar(
+    config: _Configuracion, acumulados: dict[tuple[str, str, int], _Acumulado]
+) -> list[Bandera]:
+    """`TOPE_CONJUNTO_SIN_EVALUAR`: hay importes exentos bajo un tipo que **podría** estar
+    sujeto al tope conjunto y cuya marca nadie ha confirmado, así que la suma del art. 93 salió
+    incompleta o no salió.
+
+    **No cuelga de ninguna fila impresa**, a propósito: el tipo sin confirmar puede haberse
+    pagado fuera del rango o quedar excluido por el filtro `tipo_percepcion`, y en los dos
+    casos el informe se quedaba mudo mientras la suma real del ejercicio pasaba de 1 UMA anual.
+    Su ámbito es el ejercicio, como el de `FALTA_UMA_ANUAL`.
+
+    **Solo se avisa de lo que de verdad quedó sin sumar:** hace falta que ese tipo tenga
+    importe exento en el ejercicio. Una marca sujeta al tope y sin confirmar bajo la que nadie
+    cobró un peso no deja nada sin evaluar, y una bandera que sale siempre no la lee nadie.
+    """
+    sin_confirmar = tipos_que_podrian_estar_sujetos_al_tope_conjunto(config) - tipos_sujetos_al_tope_conjunto(config)
+    if not sin_confirmar:
+        return []
+
+    por_ejercicio: dict[int, set[str]] = defaultdict(set)
+    for (_rfc, tipo, ejercicio), acumulado in acumulados.items():
+        if tipo in sin_confirmar and acumulado.exento > _CERO:
+            por_ejercicio[ejercicio].add(tipo)
+
+    banderas: list[Bandera] = []
+    for ejercicio in sorted(por_ejercicio):
+        tipos = sorted(por_ejercicio[ejercicio])
+        banderas.append(
+            Bandera(
+                clave="TOPE_CONJUNTO_SIN_EVALUAR",
+                severidad="alta",
+                ambito=f"ejercicio:{ejercicio}",
+                mensaje=(
+                    f"En {ejercicio} se pagaron importes exentos bajo el/los tipo(s) {', '.join(tipos)}, que están "
+                    "marcados como sujetos al tope conjunto de previsión social del artículo 93 de la LISR, y esas "
+                    "marcas todavía no están confirmadas: la suma del tope conjunto se calculó **sin ellos** o no "
+                    "se calculó. Esos tipos llevan la exención en bruto, así que su tope por tipo no puede "
+                    "detectar nada y el tope conjunto es la única comprobación que los cubre. Confirma esas marcas "
+                    "en Configuración › Fiscal › Marcas de percepción y vuelve a generar el informe."
+                ),
+            )
+        )
+    return banderas
 
 
 def _banderas_de_tope_conjunto(
@@ -724,9 +802,23 @@ def _banderas_de_tope_conjunto(
        los presentes en las filas impresas — es el mismo arreglo que ya llevaba B-03.R2 para
        los importes, aplicado ahora al conjunto de tipos.
 
-    `empleados` son los `(rfc_receptor, ejercicio)` de las filas impresas: el informe habla de
-    esos trabajadores. Lo que se amplía es qué tipos y qué fechas entran en su suma, no de
-    quién se opina.
+    3. **Ni siquiera *avisar* depende de la marca confirmada.** El alcance del cálculo sí sale
+       de lo confirmado —calcular con una marca sin revisar violaría el invariante—, pero
+       saber que hay algo sin evaluar no. Como hoy no hay ninguna marca confirmada, mirar solo
+       lo confirmado dejaba el aviso apagado **siempre**, y lo único que lo compensaba era una
+       frase dentro de `MARCA_SIN_CONFIRMAR`, que se alimenta de las filas impresas: mudo otra
+       vez si el tipo se pagó fuera del rango o lo excluyó el filtro. Por eso
+       `TOPE_CONJUNTO_SIN_EVALUAR` se decide con
+       `tipos_que_podrian_estar_sujetos_al_tope_conjunto` —confirmadas **y** propuestas— y no
+       cuelga de ninguna fila.
+
+    **`empleados` y la cuarta vía.** `empleados` son los `(rfc_receptor, ejercicio)` de las
+    filas impresas, y de ellos habla el informe: llevan bandera propia. Un empleado cuyos pagos
+    de previsión social caen **todos** fuera del rango es un caso distinto —el informe no lo
+    cubre, no hay ninguna fila suya que mirar— pero callarlo sería el mismo silencio que costó
+    el punto 2, así que **se cuenta en una bandera colapsada por ejercicio** que dice cuántos
+    son y que basta ampliar el rango. La suma que los detecta ya está en `acumulados`, que no
+    filtra por empleado: cerrar esta vía no cuesta ninguna consulta más.
 
     **Es una bandera de revisión, no un recálculo de ISR**, y por eso lleva **clave propia** y
     no `EXENCION_EXCEDIDA`: aquel es un exceso comprobable contra un tope de la ley y este es
@@ -738,27 +830,30 @@ def _banderas_de_tope_conjunto(
     negativo en un ingreso alto es el hallazgo caro. Pero quien filtra la hoja `Banderas`
     tiene que poder separarlos por clave, no leyendo la prosa del mensaje.
     """
-    banderas: list[Bandera] = []
+    banderas: list[Bandera] = list(_avisos_de_tope_conjunto_sin_evaluar(config, acumulados))
+
     tipos_con_tope = tipos_sujetos_al_tope_conjunto(config)
     if not tipos_con_tope:
         return banderas
 
-    por_empleado: dict[tuple[str, int], Decimal] = {}
-    for rfc, ejercicio in empleados:
-        exento = sum(
-            (acumulados[(rfc, tipo, ejercicio)].exento for tipo in tipos_con_tope if (rfc, tipo, ejercicio) in acumulados),
-            _CERO,
-        )
-        if exento > _CERO:
-            por_empleado[(rfc, ejercicio)] = exento
+    # Sobre TODOS los empleados del acumulado, no solo los del informe: la separación entre
+    # "lleva bandera propia" y "se cuenta en el resumen" se hace después, con `empleados`.
+    por_empleado: dict[tuple[str, int], Decimal] = defaultdict(lambda: _CERO)
+    for (rfc, tipo, ejercicio), acumulado in acumulados.items():
+        if tipo in tipos_con_tope and acumulado.exento > _CERO:
+            por_empleado[(rfc, ejercicio)] += acumulado.exento
 
     ejercicios_sin_uma_anual: set[int] = set()
+    excedidos_fuera: Counter[int] = Counter()
     for (rfc, ejercicio), exento in sorted(por_empleado.items()):
         tope = config.uma_anual.get(ejercicio)
         if tope is None:
             ejercicios_sin_uma_anual.add(ejercicio)
             continue
         if exento <= tope + _TOLERANCIA:
+            continue
+        if (rfc, ejercicio) not in empleados:
+            excedidos_fuera[ejercicio] += 1
             continue
         banderas.append(
             Bandera(
@@ -773,6 +868,20 @@ def _banderas_de_tope_conjunto(
                     "limitación aplica cuando los ingresos por salarios más la previsión social exceden de 7 UMA "
                     "anuales y tiene un piso propio; este informe no evalúa esas dos condiciones —necesitan la "
                     "base salarial anual completa del trabajador—, así que confirma el caso antes de corregir."
+                ),
+            )
+        )
+
+    for ejercicio, cuantos in sorted(excedidos_fuera.items()):
+        banderas.append(
+            Bandera(
+                clave="TOPE_CONJUNTO_EXCEDIDO_FUERA_DEL_INFORME",
+                severidad="media",
+                ambito=f"ejercicio:{ejercicio}",
+                mensaje=(
+                    f"{cuantos} empleado(s) más exceden el tope conjunto de previsión social de {ejercicio}, pero "
+                    "todos sus pagos de esos tipos caen fuera del rango de este informe, así que no tienen ninguna "
+                    "fila aquí y no llevan bandera propia. Amplía el rango al ejercicio completo para verlos."
                 ),
             )
         )
@@ -877,12 +986,19 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     fechas.update(date(ejercicio, 12, 31) for ejercicio in ejercicios)
 
     config = await _configuracion(db, empresa_id, fechas, ejercicios)
-    # El acumulado cubre los tipos de las filas impresas **y** todos los sujetos al tope
-    # conjunto, aunque ninguno de estos aparezca en el rango o lo excluya `tipo_percepcion`:
-    # el tope conjunto es una suma *entre* tipos y un vale pagado en enero consume la misma
-    # UMA anual que uno de junio. Sigue siendo una sola consulta.
+    # El acumulado cubre los tipos de las filas impresas **y** todos los que podrían estar
+    # sujetos al tope conjunto —confirmados o solo propuestos—, aunque ninguno aparezca en el
+    # rango o lo excluya `tipo_percepcion`: el tope conjunto es una suma *entre* tipos y un
+    # vale pagado en enero consume la misma UMA anual que uno de junio. Los propuestos entran
+    # para poder **avisar** de que la suma quedó incompleta, nunca para sumarse. Sigue siendo
+    # una sola consulta.
     acumulados = await _acumulado_anual(
-        db, empresa_id, rfc_empresa, ejercicios, tipos | tipos_sujetos_al_tope_conjunto(config), p.incluir_cancelados
+        db,
+        empresa_id,
+        rfc_empresa,
+        ejercicios,
+        tipos | tipos_que_podrian_estar_sujetos_al_tope_conjunto(config),
+        p.incluir_cancelados,
     )
 
     banderas: list[Bandera] = list(banderas_fuera)
@@ -1045,7 +1161,10 @@ def _tope_anual(
     if marca.base_exencion is BaseExencion.PORCENTAJE:
         return factor * total_anual / _CIEN
     cierre = date(ejercicio, 12, 31)
-    valor = config.uma.get(cierre) if marca.base_exencion is BaseExencion.UMA_DIAS else config.salario_minimo.get(cierre)
+    if marca.base_exencion is BaseExencion.UMA_DIAS:
+        valor = config.uma.get(cierre)
+    else:
+        valor = config.salario_minimo.get(cierre)
     return None if valor is None else factor * valor
 
 
