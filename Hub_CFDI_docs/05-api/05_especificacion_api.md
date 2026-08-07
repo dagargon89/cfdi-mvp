@@ -238,7 +238,17 @@ pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe p
 hay tramo con esa `vigencia_desde`. Bitácora.
 
 ### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
-`GET` → lista de `{tipo_percepcion, descripcion_sat, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, confirmado, confirmado_por, confirmado_en}`.
+`GET` → `{ "marcas": [ {tipo_percepcion, descripcion_sat, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, nota_revision_hash, confirmado, confirmado_por, confirmado_en} ], "claves_sin_marcas": ["002", …] }`.
+
+`claves_sin_marcas` son las claves de `c_TipoPercepcion` que **todavía no tienen ninguna marca
+capturada**, y espeja `claves_sin_valor` de `/fiscal`. Existe para que el **denominador sea
+autoritativo**: sin él, el cliente necesita su propia copia del catálogo del SAT para saber qué
+tarjetas existen —y por tanto para el contador "0 de 44" y para el tercer estado, "sin marcas
+capturadas"—. `descripcion_sat` no basta: solo etiqueta filas que **ya existen**, no puede hablar
+de un tipo que no tiene fila. Con este campo la copia del cliente sobra y desaparece una clase
+entera de deriva: al subir la versión de `satcfdi` la lista del servidor crece y la del cliente no.
+Si el catálogo embebido no se puede leer llega **vacía** (misma lectura que `descripcion_sat`,
+falla abierto); la señal autoritativa de esa avería es la alerta `CATALOGO_ILEGIBLE` de `/fiscal`.
 `PUT /{tipo}` body: los **seis** campos de marca **más `nota_revision`**, todos obligatorios (la nota
 admite `null`). `base_exencion: NINGUNA` exige `factor_exencion: null` y prohíbe
 `sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor presente y positivo (**422** si no).
@@ -273,10 +283,35 @@ huérfana confirmable mientras la `015` real sigue sin calcular — silencioso e
 catálogo no se puede leer, **503 `CATALOGO_SAT_ILEGIBLE`**: no se escribe sin poder validar.
 
 ### POST /v1/configuracion/percepciones/{tipo}/confirmar — Activar las marcas de un tipo *(admin)*
-Body: las **seis marcas que calculan**, sin `nota_revision` — confirmar no es editar; quien resuelve la
-duda la borra con un `PUT`, que es el otro acto. **409 `MARCAS_CAMBIARON`** si difiere de lo
-almacenado. Sin este método la puerta de confirmación de esta tabla sería una puerta tapiada: la captura
-nunca confirma, así que ninguna marca podría llegar a calcular. Bitácora.
+Body: las **seis marcas que calculan** más **`nota_revision_hash`**, sin el texto de la nota — confirmar
+no es editar; quien resuelve la duda la borra con un `PUT`, que es el otro acto. **409
+`MARCAS_CAMBIARON`** si las marcas diferen de lo almacenado. Sin este método la puerta de confirmación de
+esta tabla sería una puerta tapiada: la captura nunca confirma, así que ninguna marca podría llegar a
+calcular. Bitácora.
+
+**409 `DUDA_NO_VISTA`** si la marca tiene hoy una duda cuya huella no es la que mandó el cliente. Cierra
+la forma **concurrente** de justo lo que la puerta existe para impedir: A abre `010` sin duda, B le agrega
+una por `PUT` (u otra persona, o una recarga de semillas), A pulsa Confirmar — las seis marcas no
+cambiaron, así que antes esto daba `200` y la marca quedaba confirmada **con una duda que nadie vio**.
+
+Es **la huella y no el texto** porque la razón por la que `nota_revision` está fuera de la comparación de
+marcas sigue siendo buena: obligar a reenviar verbatim 800 caracteres de prosa produciría un `409` por una
+diferencia de espacios en blanco. Y es un **valor opaco que emite el servidor** (`nota_revision_hash` del
+`GET`) y el cliente devuelve tal cual: si el cliente lo calculara tendría que reproducir la normalización
+byte a byte, y cualquier discrepancia sería un `409` inexplicable — el mismo fallo que evitamos al
+rechazar el redondeo silencioso de los importes. No hay que interpretarlo ni compararlo en el cliente.
+
+La comprobación es **asimétrica, exactamente como la que limpia la confirmación en el `PUT`**: si la duda
+**aparece o cambia**, `409`; si la duda **se resolvió** entre que se pintó la pantalla y el clic, pasa —
+quien revisó lo hizo contra *más* información de la que hay hoy, y resolver una duda no invalida una
+revisión. Sin esa asimetría, resolver una duda invalidaría las confirmaciones en vuelo y la pantalla
+devolvería `409` a alguien que hizo exactamente lo correcto, que es como se le enseña a la gente a no
+resolver dudas.
+
+`nota_revision_hash` **no lleva default**, por la misma razón que `sujeto_a_tope_conjunto` y
+`nota_revision`: este es el cuerpo que activa un valor fiscal, y con un default un cliente que ni menciona
+el campo confirmaría sin decir qué duda tenía delante. `null` no es una omisión: afirma "la marca que
+revisé no tenía duda declarada", y es lo que mandan las 5 de las 44 que no traen ninguna.
 
 ### GET·PUT /v1/empresas/{empresa_id}/configuracion — Política laboral *(GET consulta+ · PUT operador+)*
 Body/respuesta: `{ "zona_salarial": "GENERAL"|"ZLFN"|null, "dias_aguinaldo": int|null, "factor_prima_vacacional": "0.2500"|null }`.
@@ -402,12 +437,21 @@ export interface MarcasPercepcion { es_ingreso_ordinario: boolean; base_exencion
                                     factor_exencion: string | null; integra_sbc: boolean;
                                     es_provisionable: boolean; sujeto_a_tope_conjunto: boolean }
 export interface MarcaPercepcionIn extends MarcasPercepcion { nota_revision: string | null }
-// `descripcion_sat` sale del mismo `c_TipoPercepcion` de `satcfdi` que valida la escritura; con
-// él, la copia del catálogo que el cliente llevaba (`catalogoTipoPercepcion.ts`) sobra.
+// Cuerpo del confirmar: las seis marcas MÁS la huella de la duda que se tenía delante. Opaca —
+// se copia de `MarcaPercepcion.nota_revision_hash` y se devuelve tal cual, nunca se calcula ni
+// se compara en el cliente. Sin default: `null` afirma "no había duda", omitirlo es 422.
+export interface MarcaPercepcionConfirmarIn extends MarcasPercepcion { nota_revision_hash: string | null }
+// `descripcion_sat` sale del mismo `c_TipoPercepcion` de `satcfdi` que valida la escritura.
+// `nota_revision_hash` es la huella opaca que hay que devolver al confirmar (ver §8bis).
 export interface MarcaPercepcion extends MarcasPercepcion { tipo_percepcion: string;
                                     descripcion_sat: string | null;
-                                    nota_revision: string | null; confirmado: boolean;
+                                    nota_revision: string | null; nota_revision_hash: string | null;
+                                    confirmado: boolean;
                                     confirmado_por: string | null; confirmado_en: string | null }
+// El GET de percepciones devuelve un OBJETO, no una lista: `claves_sin_marcas` es el resto del
+// catálogo del SAT y hace autoritativo el denominador del "0 de 44". Con él, la copia del
+// catálogo que el cliente llevaba (`catalogoTipoPercepcion.ts`) se puede BORRAR.
+export interface CatalogoPercepciones { marcas: MarcaPercepcion[]; claves_sin_marcas: string[] }
 export interface ConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null;
                                         dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
 export type ConfiguracionEmpresaIn = Omit<ConfiguracionEmpresa, 'empresa_id'>;

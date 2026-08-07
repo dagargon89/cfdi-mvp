@@ -508,6 +508,30 @@ class MarcaPercepcionIn(MarcasPercepcion):
         return limpio or None
 
 
+class MarcaPercepcionConfirmarIn(MarcasPercepcion):
+    """Cuerpo del `POST .../confirmar`: las seis marcas que calculan **más la huella de la duda**.
+
+    La huella cierra la versión concurrente de justo lo que la puerta de confirmación existe
+    para impedir. `_difieren` excluye `nota_revision` a propósito —obligar a reenviar 800
+    caracteres de prosa verbatim produciría un `409` por un espacio en blanco—, así que sin
+    este campo la secuencia "A abre `001` sin duda → B le agrega una por `PUT` → A pulsa
+    Confirmar" pasaba con `200`: las seis marcas no cambiaron y la duda **nunca se vio**.
+
+    Es **la huella, no el texto**: conserva la garantía sin la fragilidad de comparar prosa
+    larga. Y es un **valor opaco que el servidor emite** (`MarcaPercepcionOut.nota_revision_hash`)
+    y el cliente devuelve tal cual: si el cliente tuviera que calcularlo, tendría que reproducir
+    exactamente la normalización y la codificación del servidor, y cualquier discrepancia sería
+    un `409` inexplicable — el mismo fallo que evitamos al rechazar el redondeo silencioso.
+
+    **Obligatorio aunque admita `null`**, igual que `sujeto_a_tope_conjunto` y `nota_revision`
+    en el `PUT`: este es el cuerpo que activa un valor fiscal, y un default dejaría que un
+    cliente que ni menciona el campo confirmara sin haber mirado la duda. `null` significa "la
+    marca que revisé no tenía duda declarada", que es una afirmación, no una omisión.
+    """
+
+    nota_revision_hash: str | None
+
+
 class MarcaPercepcionOut(BaseModel):
     tipo_percepcion: str
     # La descripción del catálogo `c_TipoPercepcion` del SAT ("Becas para trabajadores y/o
@@ -525,9 +549,38 @@ class MarcaPercepcionOut(BaseModel):
     # La duda declarada, para que la pantalla la enseñe al lado del botón de confirmar. 39 de
     # los 44 tipos sembrados traen una; sin ella en la respuesta, confirmar sería a ciegas.
     nota_revision: str | None
+    # Huella de `nota_revision`, que el cliente devuelve tal cual en `POST .../confirmar` para
+    # demostrar **qué duda tenía delante**. Opaca: no se calcula ni se interpreta en el cliente,
+    # solo se echa de vuelta. `null` cuando no hay duda declarada. Ver `MarcaPercepcionConfirmarIn`.
+    nota_revision_hash: str | None
     confirmado: bool
     confirmado_por: str | None
     confirmado_en: str | None
+
+
+class CatalogoPercepcionesOut(BaseModel):
+    """Las marcas capturadas **más las claves del catálogo del SAT que no tienen ninguna**.
+
+    Espeja `ConfiguracionFiscalOut` (`parametros` + `claves_sin_valor`) y por la misma razón:
+    la ausencia tiene que ser un dato del servidor, no algo que el cliente deduzca.
+
+    `claves_sin_marcas` es lo que permite borrar la copia del catálogo del SAT que el cliente
+    llevaba. Esa copia no servía solo para describir: era **la lista que decide qué tarjetas
+    existen**, y por tanto el denominador del contador "0 de 44" y la definición del tercer
+    estado ("sin marcas capturadas"). `descripcion_sat` solo etiqueta filas que ya existen, así
+    que no podía hablarle al cliente de un tipo que no tiene fila — con él, la copia seguía
+    haciendo falta y la desincronización solo cambiaba de sitio. Con este campo el denominador
+    es autoritativo y desaparece una clase entera de deriva: al subir la versión de `satcfdi`
+    la lista del servidor crece y la del cliente no.
+
+    **Si el catálogo de `satcfdi` no se puede leer, llega vacía.** Es la misma lectura que
+    `descripcion_sat` y falla abierto por la misma doctrina (leer degradado sí, escribir a
+    ciegas no: el `PUT` responde 503). La señal autoritativa de esa avería es la alerta
+    `CATALOGO_ILEGIBLE` de `GET /v1/configuracion/fiscal`, que la misma pantalla ya consulta.
+    """
+
+    marcas: list[MarcaPercepcionOut]
+    claves_sin_marcas: list[str]
 
 
 class ConfiguracionEmpresaIn(BaseModel):

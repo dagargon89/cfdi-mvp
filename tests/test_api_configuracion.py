@@ -61,6 +61,15 @@ def _param(
     )
 
 
+def _confirmar(marcas: dict[str, object], *, huella: str | None = None) -> dict[str, object]:
+    """Cuerpo del `POST .../confirmar`: las seis marcas **más la huella de la duda que se vio**.
+
+    `huella=None` no es una omisión: afirma "la marca que revisé no tenía duda declarada". Por
+    eso el campo es obligatorio en el esquema — ver `MarcaPercepcionConfirmarIn`.
+    """
+    return {**marcas, "nota_revision_hash": huella}
+
+
 async def _contar_bitacora(db: AsyncSession, accion: str) -> int:
     return (await db.scalar(select(func.count()).select_from(Bitacora).where(Bitacora.accion == accion))) or 0
 
@@ -439,14 +448,16 @@ async def test_percepciones_capturar_no_confirma_y_confirmar_las_activa(client, 
 
     r = await client.post(
         "/v1/configuracion/percepciones/002/confirmar",
-        json={
-            "es_ingreso_ordinario": False,
-            "base_exencion": "UMA_DIAS",
-            "factor_exencion": "30.0000",
-            "integra_sbc": True,
-            "es_provisionable": True,
-            "sujeto_a_tope_conjunto": False,
-        },
+        json=_confirmar(
+            {
+                "es_ingreso_ordinario": False,
+                "base_exencion": "UMA_DIAS",
+                "factor_exencion": "30.0000",
+                "integra_sbc": True,
+                "es_provisionable": True,
+                "sujeto_a_tope_conjunto": False,
+            }
+        ),
         headers=ADMIN,
     )
     assert r.status_code == 200, r.text
@@ -474,14 +485,16 @@ async def test_confirmar_una_marca_que_cambio_da_409(client, db: AsyncSession) -
 
     r = await client.post(
         "/v1/configuracion/percepciones/022/confirmar",
-        json={
-            "es_ingreso_ordinario": False,
-            "base_exencion": "UMA_DIAS",
-            "factor_exencion": "30.0000",  # el revisor vio 30, la tabla dice 90
-            "integra_sbc": False,
-            "es_provisionable": False,
-            "sujeto_a_tope_conjunto": False,
-        },
+        json=_confirmar(
+            {
+                "es_ingreso_ordinario": False,
+                "base_exencion": "UMA_DIAS",
+                "factor_exencion": "30.0000",  # el revisor vio 30, la tabla dice 90
+                "integra_sbc": False,
+                "es_provisionable": False,
+                "sujeto_a_tope_conjunto": False,
+            }
+        ),
         headers=ADMIN,
     )
     assert r.status_code == 409, r.text
@@ -941,14 +954,16 @@ async def test_confirmar_un_tipo_inventado_tambien_se_rechaza(client, db: AsyncS
 
     r = await client.post(
         "/v1/configuracion/percepciones/ZZZ/confirmar",
-        json={
-            "es_ingreso_ordinario": True,
-            "base_exencion": "NINGUNA",
-            "factor_exencion": None,
-            "integra_sbc": True,
-            "es_provisionable": False,
-            "sujeto_a_tope_conjunto": False,
-        },
+        json=_confirmar(
+            {
+                "es_ingreso_ordinario": True,
+                "base_exencion": "NINGUNA",
+                "factor_exencion": None,
+                "integra_sbc": True,
+                "es_provisionable": False,
+                "sujeto_a_tope_conjunto": False,
+            }
+        ),
         headers=ADMIN,
     )
     assert r.status_code == 422, r.text
@@ -1000,7 +1015,7 @@ async def test_el_tope_conjunto_viaja_en_las_dos_direcciones(client, db: AsyncSe
 
     r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
     assert r.status_code == 200, r.text
-    assert {m["tipo_percepcion"]: m["sujeto_a_tope_conjunto"] for m in r.json()} == {"015": True}
+    assert {m["tipo_percepcion"]: m["sujeto_a_tope_conjunto"] for m in r.json()["marcas"]} == {"015": True}
 
 
 async def test_el_cuerpo_que_omite_el_tope_no_se_acepta(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
@@ -1027,7 +1042,7 @@ async def test_confirmar_sin_ver_el_tope_da_409(client, db: AsyncSession) -> Non
 
     r = await client.post(
         "/v1/configuracion/percepciones/015/confirmar",
-        json=_marca_015(sujeto_a_tope_conjunto=False),
+        json=_confirmar(_marca_015(sujeto_a_tope_conjunto=False)),
         headers=ADMIN,
     )
     assert r.status_code == 409, r.text
@@ -1040,7 +1055,7 @@ async def test_confirmar_sin_ver_el_tope_da_409(client, db: AsyncSession) -> Non
 async def test_el_tope_queda_en_la_bitacora_al_capturar_y_al_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
     await _admin(db)
     await client.put("/v1/configuracion/percepciones/015", json=_captura_015(), headers=ADMIN)
-    r = await client.post("/v1/configuracion/percepciones/015/confirmar", json=_marca_015(), headers=ADMIN)
+    r = await client.post("/v1/configuracion/percepciones/015/confirmar", json=_confirmar(_marca_015()), headers=ADMIN)
     assert r.status_code == 200, r.text
 
     captura = await db.scalar(select(Bitacora).where(Bitacora.accion == "capturar_marca_percepcion"))
@@ -1109,7 +1124,7 @@ async def test_get_percepciones_devuelve_las_marcas_con_su_estado(client, db: As
 
     r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
     assert r.status_code == 200, r.text
-    por_tipo = {m["tipo_percepcion"]: m for m in r.json()}
+    por_tipo = {m["tipo_percepcion"]: m for m in r.json()["marcas"]}
     assert list(por_tipo) == ["002", "029"], "vienen ordenadas por clave, como texto"
     assert por_tipo["002"]["factor_exencion"] == "30.0000"
     assert por_tipo["002"]["confirmado"] is True
@@ -1360,7 +1375,7 @@ async def test_la_nota_de_revision_viaja_en_la_respuesta(client, db: AsyncSessio
 
     r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
     assert r.status_code == 200, r.text
-    assert r.json()[0]["nota_revision"] == _DUDA
+    assert r.json()["marcas"][0]["nota_revision"] == _DUDA
 
     db.expire_all()
     fila = await db.get(CatalogoPercepcionMarca, "010")
@@ -1412,8 +1427,14 @@ async def _confirmar_010(client, db: AsyncSession, *, con_nota: str | None) -> N
         "/v1/configuracion/percepciones/010", json={**_MARCAS_010, "nota_revision": con_nota}, headers=ADMIN
     )
     assert r.status_code == 200, r.text
-    # El cuerpo del confirmar son las seis marcas, sin la nota: confirmar no es editar.
-    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=_MARCAS_010, headers=ADMIN)
+    # El cuerpo del confirmar son las seis marcas **y la huella de la duda**, nunca su texto:
+    # confirmar no es editar, pero sí es responder por lo que se miró. La huella se devuelve tal
+    # cual como la emitió el servidor, que es lo que hace el cliente real.
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=r.json()["nota_revision_hash"]),
+        headers=ADMIN,
+    )
     assert r.status_code == 200, r.text
     assert r.json()["confirmado"] is True
     db.expire_all()
@@ -1488,9 +1509,13 @@ async def test_la_nota_no_estorba_al_confirmar(client, db: AsyncSession) -> None
     diferencia de espacios en blanco. Que la duda se **vea** al confirmar lo garantiza el
     `GET`, que la devuelve."""
     await _admin(db)
-    await _nota_de_010(client, _DUDA)
+    con_duda = await _nota_de_010(client, _DUDA)
 
-    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=_MARCAS_010, headers=ADMIN)
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=con_duda["nota_revision_hash"]),
+        headers=ADMIN,
+    )
     assert r.status_code == 200, r.text
     assert r.json()["confirmado"] is True
     assert r.json()["nota_revision"] == _DUDA, "la marca se confirma con su duda a la vista, no sin ella"
@@ -1507,8 +1532,9 @@ async def test_las_39_dudas_sembradas_llegan_al_endpoint(client, db: AsyncSessio
 
     r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
     assert r.status_code == 200, r.text
-    marcas = r.json()
+    marcas = r.json()["marcas"]
     assert len(marcas) == 44
+    assert r.json()["claves_sin_marcas"] == [], "la semilla cubre el catálogo completo"
     con_nota = [m for m in marcas if m["nota_revision"]]
     assert len(con_nota) == 39
     assert all(m["confirmado"] is False for m in marcas), "sembrar propone, no activa"
@@ -1646,7 +1672,7 @@ async def test_get_percepciones_trae_la_descripcion_del_catalogo_del_sat(client,
 
     r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
     assert r.status_code == 200, r.text
-    fila = next(m for m in r.json() if m["tipo_percepcion"] == "001")
+    fila = next(m for m in r.json()["marcas"] if m["tipo_percepcion"] == "001")
     assert fila["descripcion_sat"] == "Sueldos, Salarios Rayas y Jornales"
 
 
@@ -1683,3 +1709,197 @@ async def test_un_cliente_viejo_no_reenciende_la_alarma_que_el_admin_apago(clien
     r = await client.put("/v1/config/automatizaciones", json={**autos, "limpieza": False}, headers=ADMIN)
     assert r.status_code == 200, r.text
     assert r.json()["vigencia_fiscal"] is False, "toggling otra automatización no debe reencender esta"
+
+
+# --------------------------------------------------------------------------------------
+# La huella de la duda: no se puede confirmar una marca sin haber visto su advertencia
+# --------------------------------------------------------------------------------------
+
+
+async def test_no_se_puede_confirmar_una_marca_cuya_duda_aparecio_despues(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """El escenario exacto, que es la forma **concurrente** de lo que la pantalla existe para
+    impedir: A abre `010` sin duda, B le agrega una por `PUT`, A pulsa Confirmar.
+
+    Antes de la huella esto daba `200`: las seis marcas no cambiaron, `_difieren` excluye
+    `nota_revision` a propósito, y la marca quedaba confirmada con una duda que nadie vio.
+    """
+    await _admin(db)
+    sin_duda = await _nota_de_010(client, None)
+    assert sin_duda["nota_revision_hash"] is None, "sin duda declarada no hay huella"
+
+    # B (otro admin, un script o una recarga de semillas) agrega la duda mientras A la mira.
+    await _nota_de_010(client, _DUDA)
+
+    # A confirma con lo que tenía en pantalla: las seis marcas y ninguna huella.
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=sin_duda["nota_revision_hash"]),
+        headers=ADMIN,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["codigo"] == "DUDA_NO_VISTA"
+
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}, "una duda no vista no puede acabar confirmada"
+
+
+async def test_confirmar_con_la_huella_correcta_pasa(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La otra cara: recargar, leer la duda y confirmar funciona sin fricción."""
+    await _admin(db)
+    con_duda = await _nota_de_010(client, _DUDA)
+
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=con_duda["nota_revision_hash"]),
+        headers=ADMIN,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+
+
+async def test_una_duda_reescrita_tambien_exige_volver_a_leerla(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """No solo "apareció una duda": **cambió**. Una duda distinta es información que quien
+    revisó no tenía delante, igual que en `_duda_nueva`."""
+    await _admin(db)
+    primera = await _nota_de_010(client, _DUDA)
+    await _nota_de_010(client, _DUDA + " Y además revisa el art. 93 fracción XIII.")
+
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=primera["nota_revision_hash"]),
+        headers=ADMIN,
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["codigo"] == "DUDA_NO_VISTA"
+
+
+async def test_una_marca_sin_duda_se_confirma_sin_friccion(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """5 de las 44 marcas sembradas no tienen duda. La huella no puede volverlas más costosas
+    de confirmar: `null` es la afirmación "no había duda", y coincide."""
+    await _admin(db)
+    await _nota_de_010(client, None)
+
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar", json=_confirmar(_MARCAS_010), headers=ADMIN
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+
+
+async def test_si_la_duda_se_resolvio_la_confirmacion_en_vuelo_sigue_valiendo(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La asimetría, idéntica a la de `_duda_nueva` y por el mismo argumento: A revisó **con**
+    la duda delante y B la resolvió mientras tanto. A revisó contra *más* información de la que
+    hay hoy, así que su confirmación vale.
+
+    Sin esta asimetría, resolver una duda invalidaría las confirmaciones en vuelo y la pantalla
+    devolvería 409 a alguien que hizo exactamente lo correcto — que es como se le enseña a la
+    gente a no resolver dudas.
+    """
+    await _admin(db)
+    con_duda = await _nota_de_010(client, _DUDA)
+    await _nota_de_010(client, None)  # B la resuelve
+
+    r = await client.post(
+        "/v1/configuracion/percepciones/010/confirmar",
+        json=_confirmar(_MARCAS_010, huella=con_duda["nota_revision_hash"]),
+        headers=ADMIN,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+
+
+async def test_la_huella_es_obligatoria_en_el_cuerpo_de_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Sin default, como `sujeto_a_tope_conjunto` y `nota_revision`, y por la misma razón: este
+    es el cuerpo que activa un valor fiscal, y un cliente que ni menciona el campo estaría
+    confirmando sin decir qué duda tenía delante. Un 422 es barato."""
+    await _admin(db)
+    await _nota_de_010(client, _DUDA)
+
+    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=_MARCAS_010, headers=ADMIN)
+    assert r.status_code == 422, r.text
+    assert "nota_revision_hash" in r.text
+
+
+async def test_la_huella_no_expone_el_texto_de_la_duda(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Es una huella, no el texto: eso es lo que evita el 409 por un espacio en blanco en 800
+    caracteres de prosa, que es la razón por la que `_difieren` excluye la nota."""
+    from app.api.v1.configuracion import huella_de_nota
+
+    await _admin(db)
+    marca = await _nota_de_010(client, _DUDA)
+    huella = marca["nota_revision_hash"]
+
+    assert isinstance(huella, str) and len(huella) == 64, "SHA-256 en hexadecimal"
+    assert _DUDA[:20] not in huella
+    assert huella == huella_de_nota(_DUDA)
+    # La normalización del `PUT` («   » es la misma intención que `null`) llega a la huella.
+    assert huella_de_nota(None) is None
+
+
+# --------------------------------------------------------------------------------------
+# `claves_sin_marcas`: el catálogo del SAT lo sirve el servidor, no una copia en el cliente
+# --------------------------------------------------------------------------------------
+
+
+async def test_get_percepciones_dice_que_claves_del_sat_no_tienen_marcas(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Espeja `claves_sin_valor` de `/fiscal` y hace **autoritativo** el denominador del "0 de 44".
+
+    Sin este campo el cliente necesita su propia copia del catálogo del SAT para saber qué
+    tarjetas existen —`descripcion_sat` solo etiqueta filas que ya existen, no puede hablar de
+    un tipo que no tiene fila—, y esa copia se desincroniza en cuanto sube la versión de
+    `satcfdi`: la lista blanca del servidor crece y la del cliente no.
+    """
+    from app.informes import catalogos
+
+    await _admin(db)
+    db.add(
+        CatalogoPercepcionMarca(
+            tipo_percepcion="001",
+            es_ingreso_ordinario=True,
+            base_exencion=BaseExencion.NINGUNA,
+            factor_exencion=None,
+            integra_sbc=True,
+            es_provisionable=False,
+            sujeto_a_tope_conjunto=False,
+            nota_revision=None,
+        )
+    )
+    await db.commit()
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    cuerpo = r.json()
+
+    del_sat = {clave for clave, _ in catalogos.tipos_de("P")}
+    assert len(del_sat) == 44
+    assert [m["tipo_percepcion"] for m in cuerpo["marcas"]] == ["001"]
+    # El denominador completo sale del servidor: capturadas + faltantes == el catálogo entero.
+    assert len(cuerpo["marcas"]) + len(cuerpo["claves_sin_marcas"]) == 44
+    assert "001" not in cuerpo["claves_sin_marcas"]
+    assert "015" in cuerpo["claves_sin_marcas"]
+    assert cuerpo["claves_sin_marcas"] == sorted(cuerpo["claves_sin_marcas"]), "ordenadas por clave, como texto"
+
+
+async def test_claves_sin_marcas_llega_vacia_si_el_catalogo_no_se_puede_leer(  # type: ignore[no-untyped-def]
+    client, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decisión, no accidente: es la misma lectura que `descripcion_sat` y **falla abierto**,
+    igual que B-01 se genera sin columnas de catálogo. La señal autoritativa de esa avería es
+    la alerta `CATALOGO_ILEGIBLE` de `GET /fiscal`, que la misma pantalla ya consulta; leer
+    degradado y escribir a ciegas siguen siendo riesgos distintos (el `PUT` responde 503).
+    """
+    from app.informes import catalogos
+
+    await _admin(db)
+    catalogos._tipos_de_cache.cache_clear()
+
+    def _catalogo_roto(_tabla: str) -> dict[object, object]:
+        raise OSError("database disk image is malformed")
+
+    monkeypatch.setattr(catalogos, "_select_all", lambda: _catalogo_roto)
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, "leer no aborta por un catálogo ilegible"
+    assert r.json()["claves_sin_marcas"] == []
+
+    catalogos._tipos_de_cache.cache_clear()

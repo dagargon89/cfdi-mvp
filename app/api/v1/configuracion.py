@@ -41,6 +41,7 @@ no protege nada y le deja un informe degradado que no puede explicarse.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -52,6 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
 from app.api.v1.schemas import (
     AlertaVigenciaOut,
+    CatalogoPercepcionesOut,
     ConceptoObservadoOut,
     ConfiguracionEmpresaIn,
     ConfiguracionEmpresaOut,
@@ -61,6 +63,7 @@ from app.api.v1.schemas import (
     MapDepartamentoOut,
     MapeosEmpresaIn,
     MapeosEmpresaOut,
+    MarcaPercepcionConfirmarIn,
     MarcaPercepcionIn,
     MarcaPercepcionOut,
     MarcasPercepcion,
@@ -134,10 +137,29 @@ def _descripcion_percepcion(tipo: str) -> str | None:
     return dict(catalogos.tipos_de("P")).get(tipo)
 
 
+def huella_de_nota(nota: str | None) -> str | None:
+    """Huella de una duda declarada, para que confirmar pueda exigir **haberla visto**.
+
+    SHA-256 del texto en UTF-8, o `None` si no hay duda. Es un valor **opaco**: lo emite el
+    `GET` y el cliente lo devuelve tal cual en el `POST .../confirmar`. Nadie fuera de este
+    módulo tiene que saber qué algoritmo es, y ese es el punto — si el cliente lo calculara,
+    tendría que reproducir la normalización byte a byte y cualquier diferencia sería un `409`
+    que no se podría explicar.
+
+    Se hashea el texto **ya normalizado** tal como está en la base (`_normaliza_nota` en el
+    `PUT` y `_texto` en el cargador ya recortan espacios y convierten el vacío en `None`), así
+    que la misma duda siempre produce la misma huella.
+    """
+    if nota is None:
+        return None
+    return hashlib.sha256(nota.encode("utf-8")).hexdigest()
+
+
 def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
     return MarcaPercepcionOut(
         tipo_percepcion=fila.tipo_percepcion,
         descripcion_sat=_descripcion_percepcion(fila.tipo_percepcion),
+        nota_revision_hash=huella_de_nota(fila.nota_revision),
         es_ingreso_ordinario=fila.es_ingreso_ordinario,
         base_exencion=fila.base_exencion.value,
         factor_exencion=fila.factor_exencion,
@@ -430,6 +452,35 @@ def _duda_nueva(fila: CatalogoPercepcionMarca, body: MarcaPercepcionIn) -> bool:
     return body.nota_revision is not None and body.nota_revision != fila.nota_revision
 
 
+def _duda_no_vista(fila: CatalogoPercepcionMarca, huella_enviada: str | None) -> bool:
+    """Si quien confirma **no tenía delante la duda que la marca tiene ahora**.
+
+    Es el hueco que `_difieren` deja abierto a propósito, en su forma concurrente: A abre `001`
+    sin duda, B le agrega una por `PUT` (o la agrega una recarga de semilla), A pulsa Confirmar
+    → las seis marcas no cambiaron → `200`, confirmado, con una duda que nunca vio. Justo lo
+    que la pantalla existe para impedir.
+
+    **Se compara la huella y no el texto.** La razón por la que `_difieren` excluye
+    `nota_revision` sigue siendo buena y no cambia: obligar a reenviar 800 caracteres de prosa
+    verbatim produciría un `409` por un espacio en blanco. La huella conserva la garantía sin
+    esa fragilidad.
+
+    **Asimétrica, exactamente como `_duda_nueva`, y por el mismo argumento:**
+
+    - la marca tiene duda ahora y la huella no coincide (o no vino) → `409`: se estaría
+      confirmando sin haber visto la advertencia vigente;
+    - la marca **no** tiene duda ahora → pasa, venga la huella que venga. Quien revisó lo hizo
+      con una duda que desde entonces alguien resolvió, es decir contra *más* información de la
+      que hay hoy. Resolver una duda no invalida una revisión; que aparezca una, sí.
+
+    Sin esa asimetría, resolver una duda invalidaría las confirmaciones en vuelo y la pantalla
+    devolvería `409` a alguien que hizo exactamente lo correcto.
+    """
+    if fila.nota_revision is None:
+        return False
+    return huella_enviada != huella_de_nota(fila.nota_revision)
+
+
 # --------------------------------------------------------------------------------------
 # catalogo_percepcion_marca (§3.1)
 # --------------------------------------------------------------------------------------
@@ -460,14 +511,26 @@ def _exige_tipo_del_sat(tipo: str) -> None:
         ) from exc
 
 
-@router.get("/percepciones", response_model=list[MarcaPercepcionOut])
+@router.get("/percepciones", response_model=CatalogoPercepcionesOut)
 async def listar_percepciones(
     admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)
-) -> list[MarcaPercepcionOut]:
-    filas = await db.scalars(
-        select(CatalogoPercepcionMarca).order_by(CatalogoPercepcionMarca.tipo_percepcion)
+) -> CatalogoPercepcionesOut:
+    """Las marcas capturadas **y las claves del catálogo del SAT que todavía no tienen ninguna**.
+
+    `claves_sin_marcas` espeja `claves_sin_valor` de `/fiscal` y hace autoritativo el
+    denominador del "0 de 44": sin él, el cliente necesita su propia copia del catálogo del SAT
+    para saber qué tarjetas existen, y esa copia se desincroniza en cuanto sube la versión de
+    `satcfdi`. Ver `CatalogoPercepcionesOut` para el argumento completo y para qué pasa cuando
+    el catálogo no se puede leer.
+    """
+    filas = list(
+        (await db.scalars(select(CatalogoPercepcionMarca).order_by(CatalogoPercepcionMarca.tipo_percepcion))).all()
     )
-    return [_marca_a_salida(fila) for fila in filas]
+    con_marcas = {fila.tipo_percepcion for fila in filas}
+    return CatalogoPercepcionesOut(
+        marcas=[_marca_a_salida(fila) for fila in filas],
+        claves_sin_marcas=sorted(clave for clave, _ in catalogos.tipos_de("P") if clave not in con_marcas),
+    )
 
 
 @router.put("/percepciones/{tipo}", response_model=MarcaPercepcionOut)
@@ -525,7 +588,7 @@ async def guardar_percepcion(
 @router.post("/percepciones/{tipo}/confirmar", response_model=MarcaPercepcionOut)
 async def confirmar_percepcion(
     tipo: str,
-    body: MarcasPercepcion,
+    body: MarcaPercepcionConfirmarIn,
     admin: Usuario = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MarcaPercepcionOut:
@@ -537,14 +600,30 @@ async def confirmar_percepcion(
     juego completo de marcas —no solo el tipo— por la misma razón que los importes: lo que se
     confirma es *lo que se revisó*, y si cambió entre la pantalla y el clic, se rechaza con 409.
 
-    El cuerpo son las seis marcas que calculan (`MarcasPercepcion`), **sin `nota_revision`**:
-    confirmar no es editar. Quien resuelve la duda al revisarla la borra o la reescribe con un
-    `PUT`, que es el acto de capturar — los dos actos siguen separados también aquí.
+    El cuerpo son las seis marcas que calculan, **sin el texto de `nota_revision`** pero **con
+    su huella**: confirmar no es editar —quien resuelve la duda la borra o la reescribe con un
+    `PUT`, que es el otro acto—, pero sí es afirmar que se miró lo que se activa, y la duda es
+    parte de eso. Ver `_duda_no_vista` para el caso concurrente que cierra la huella y
+    `MarcaPercepcionConfirmarIn` para por qué es la huella y no el texto.
     """
     _exige_tipo_del_sat(tipo)
     fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
     if fila is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    # Antes que `_difieren`: si apareció una duda, ese es el diagnóstico útil aunque además
+    # hayan cambiado las marcas — "mira la advertencia nueva" dice más que "algo cambió".
+    if _duda_no_vista(fila, body.nota_revision_hash):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "codigo": "DUDA_NO_VISTA",
+                "mensaje": (
+                    f"El tipo {tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste "
+                    "(la agregó otra persona o una recarga de semillas). Vuelve a cargar la pantalla, lee la "
+                    "duda y confirma después: confirmar es responder por lo que se miró."
+                ),
+            },
+        )
     if _difieren(fila, body):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
