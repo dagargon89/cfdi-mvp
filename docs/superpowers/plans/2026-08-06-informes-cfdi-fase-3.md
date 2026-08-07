@@ -1078,6 +1078,30 @@ git add app/informes/ tests/ && git commit -m "feat(informes): agregar B-03 (des
 
 ---
 
+### Task 7b: `multiplicador_no_derivable` como dato
+
+**Files:** `app/models/configuracion_fiscal.py`, una migración nueva, `app/services/configuracion_fiscal.py`, `config/fiscal/catalogo_percepcion.yaml`, `config/fiscal/README.md`, `app/api/v1/configuracion.py`, `app/api/v1/schemas.py`, `apps/web` (la sección de marcas), doc 05 §8bis, y `app/informes/b03_gravado_exento.py`.
+
+**Por qué existe, y es la tercera vez en esta fase.** El cálculo del tope necesita saber qué tipos tienen un factor cuyo multiplicador **no viene en el CFDI** ("90 UMA por año de servicio", "15 UMA diarias", "1 UMA por domingo": el comprobante no trae los años de servicio ni el número de domingos). Son nueve tipos, y **hoy no son distinguibles de ninguna columna**: la información vive en comentarios y en la prosa del README.
+
+Es exactamente el mismo defecto que ya se corrigió dos veces —`sujeto_a_tope_conjunto` y `nota_revision`— y la lección general vale la pena escribirla: **si el cálculo lo necesita, o si quien confirma tiene que verlo, tiene que ser una columna.** Un comentario no se carga y una lista en el programa viola el §2.12.
+
+**Lo que reemplaza.** B-03 usa hoy `nota_revision` como aproximación: una marca con duda abierta no calcula tope. Funciona y falla del lado seguro, pero tiene dos defectos que su autor declaró: es **más conservadora de la cuenta** (39 de 44 marcas traen nota, solo nueve por este motivo, así que tipos perfectamente calculables salen vacíos) y **se desactiva sin querer** si alguien resuelve la nota sin corregir el modelo.
+
+**El alcance completo, y por qué no se puede hacer a medias.** Hacerlo solo en el plano de datos reintroduce el defecto que ya costó una ronda: un campo que afecta el cálculo pero que no viaja en la respuesta del endpoint permite **confirmar sin verlo**. Así que la columna va acompañada de su exposición en los dos endpoints de marcas, de `_difieren`, de la bitácora, y de la pantalla.
+
+- [ ] **Step 1:** columna en el modelo, con su justificación en el docstring, y migración (corre el ciclo `upgrade` → `downgrade -1` → `upgrade` **de verdad**).
+- [ ] **Step 2:** el cargador la lee y la escribe, y entra en la detección de cambios que limpia la confirmación.
+- [ ] **Step 3:** sembrarla para los nueve tipos, citando en el YAML **qué multiplicador falta** en cada uno.
+- [ ] **Step 4:** exponerla en `MarcaPercepcionIn`/`Out`, en `_difieren` y en la bitácora; doc 05 §8bis.
+- [ ] **Step 5:** la pantalla la muestra y la deja editar, junto a las otras marcas.
+- [ ] **Step 6:** B-03 la usa **en lugar de** `nota_revision`, y su prueba correspondiente pasa a afirmar la columna. Verifica por mutación que un tipo con la bandera puesta deja el tope vacío y uno sin ella lo calcula.
+- [ ] **Step 7:** `.venv/bin/mypy --strict app` limpio y commit.
+
+**Recarga de semilla:** esta tarea sí necesita `alembic upgrade head` y recargar `catalogo_percepcion.yaml` sobre la base de desarrollo. **Deja el conteo de confirmadas como lo encuentres** y dilo en el informe.
+
+---
+
 ### Task 8: Desbloquear la columna 11 de B-05 y las dos validaciones de SBC de B-10
 
 **Files:**
