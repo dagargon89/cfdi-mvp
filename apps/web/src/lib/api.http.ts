@@ -4,7 +4,7 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, Automatizaciones, BitacoraEntrada, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
+import type { ApiClient, Automatizaciones, BitacoraEntrada, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -127,6 +127,9 @@ type ApiClientHttpSubset = Pick<
   | 'listarConfiguracionFiscal'
   | 'capturarParametroFiscal'
   | 'confirmarParametroFiscal'
+  | 'listarMarcasPercepcion'
+  | 'guardarMarcaPercepcion'
+  | 'confirmarMarcaPercepcion'
   | 'obtenerConfiguracionEmpresa'
   | 'guardarConfiguracionEmpresa'
   | 'obtenerMapeosEmpresa'
@@ -275,6 +278,16 @@ export const apiHttp: ApiClientHttpSubset = {
 
   confirmarParametroFiscal: (clave, input) =>
     request<ParametroFiscal>(`/v1/configuracion/fiscal/${encodeURIComponent(clave)}/confirmar`, { method: 'POST', body: JSON.stringify(input) }),
+
+  // Marcas del art. 93. `factor_exencion` viaja como cadena en las dos direcciones, por lo mismo
+  // que `valor`: un número JSON pasa por `float` y el backend lo rechaza con 422.
+  listarMarcasPercepcion: () => request<MarcaPercepcion[]>('/v1/configuracion/percepciones'),
+
+  guardarMarcaPercepcion: (tipo, input) =>
+    request<MarcaPercepcion>(`/v1/configuracion/percepciones/${encodeURIComponent(tipo)}`, { method: 'PUT', body: JSON.stringify(input) }),
+
+  confirmarMarcaPercepcion: (tipo, input) =>
+    request<MarcaPercepcion>(`/v1/configuracion/percepciones/${encodeURIComponent(tipo)}/confirmar`, { method: 'POST', body: JSON.stringify(input) }),
 
   obtenerConfiguracionEmpresa: (empresaId) => request<ConfiguracionEmpresa>(`/v1/empresas/${empresaId}/configuracion`),
 

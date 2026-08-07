@@ -198,6 +198,55 @@ export interface ParametroFiscalIn {
   ejercicio?: number | null;
 }
 
+/** Sobre qué se calcula el tramo exento de un tipo de percepción (doc 05 §8bis). */
+export type BaseExencion = 'UMA_DIAS' | 'SM_DIAS' | 'PORCENTAJE' | 'NINGUNA';
+
+/** Las **seis marcas que calculan** de un tipo de percepción: el cuerpo de
+ * `confirmarMarcaPercepcion` y la parte de `guardarMarcaPercepcion` que provoca el 409.
+ *
+ * `factor_exencion` es **cadena o nula**, como todos los importes del contrato, y su unidad la
+ * decide `base_exencion`:
+ * - `UMA_DIAS` → número de días de UMA exentos ("15" = 15 días de UMA);
+ * - `SM_DIAS` → número de días de salario mínimo exentos;
+ * - `PORCENTAJE` → **porcentaje en escala 0-100, no una fracción**: "100" es el cien por ciento
+ *   y "50" es la mitad. La convención la fija la semilla `config/fiscal/catalogo_percepcion.yaml`
+ *   y quien consuma el campo tiene que respetarla — leer "100" como "100 veces" multiplicaría por
+ *   cien la exención de seis tipos de previsión social;
+ * - `NINGUNA` → **nulo obligatorio** (gravado íntegro).
+ *
+ * `sujeto_a_tope_conjunto` **no lleva default a propósito** (422 si se omite): es el mismo cuerpo
+ * con el que se confirma, y un default de `false` dejaría activar una marca de previsión social
+ * sin el tope conjunto del art. 93 a la vista. Con `base_exencion: NINGUNA` tiene que ir en
+ * `false` — no hay exención que topar. */
+export interface MarcasPercepcion {
+  es_ingreso_ordinario: boolean;
+  base_exencion: BaseExencion;
+  factor_exencion: string | null;
+  integra_sbc: boolean;
+  es_provisionable: boolean;
+  sujeto_a_tope_conjunto: boolean;
+}
+
+/** Cuerpo del `PUT`: las seis marcas **más la duda declarada**. `nota_revision` es obligatoria
+ * aunque admita `null` (422 si se omite): con un default, un `PUT` que corrige un factor borraría
+ * en silencio una duda que alguien derivó contra la LISR. Borrarla tiene que costar mandar
+ * `null`. Y si la nota **aparece o cambia**, la confirmación de la marca se limpia. */
+export interface MarcaPercepcionIn extends MarcasPercepcion {
+  nota_revision: string | null;
+}
+
+/** Una fila de `catalogo_percepcion_marca`. `nota_revision` es **la duda declarada** de ese tipo:
+ * qué la genera y qué habría que verificar antes de confirmarlo (39 de las 44 marcas sembradas
+ * traen una). Viaja aquí para que se vea al lado del botón de confirmar — sin ella, confirmar
+ * sería a ciegas, que es justo lo que el invariante existe para impedir. */
+export interface MarcaPercepcion extends MarcasPercepcion {
+  tipo_percepcion: string;
+  nota_revision: string | null;
+  confirmado: boolean;
+  confirmado_por: string | null;
+  confirmado_en: string | null;
+}
+
 export type ZonaSalarial = 'GENERAL' | 'ZLFN';
 
 /** Política laboral de una organización. Los tres campos viajan siempre, incluso nulos: "no
@@ -364,6 +413,18 @@ export interface ApiClient {
   /** Confirma **el valor que se está confirmando**: si no coincide con el almacenado el servidor
    * responde 409 `VALOR_CAMBIO` (la propuesta cambió entre que se pintó la pantalla y el clic). */
   confirmarParametroFiscal(clave: string, input: { vigencia_desde: string; valor: string }): Promise<ParametroFiscal>;
+  /* Marcas de exención por tipo de percepción (art. 93 LISR) — solo administrador. `{tipo}` se
+   * valida contra `c_TipoPercepcion` del catálogo embebido de `satcfdi`: **422
+   * `TIPO_PERCEPCION_INVALIDO`** si no existe, y **503 `CATALOGO_SAT_ILEGIBLE`** —transitorio— si
+   * el catálogo no se puede leer, en el `PUT` y en el `confirmar`: no se escribe sin poder
+   * validar. */
+  listarMarcasPercepcion(): Promise<MarcaPercepcion[]>;
+  /** Captura o corrige las marcas de un tipo. **No confirma**, y limpia la confirmación anterior
+   * si alguna de las seis marcas cambió o si la duda declarada apareció o cambió. */
+  guardarMarcaPercepcion(tipo: string, input: MarcaPercepcionIn): Promise<MarcaPercepcion>;
+  /** Confirma **las marcas que se están confirmando** (las seis, sin la nota): si no coinciden con
+   * lo almacenado el servidor responde 409 `MARCAS_CAMBIARON`. Idempotente. */
+  confirmarMarcaPercepcion(tipo: string, input: MarcasPercepcion): Promise<MarcaPercepcion>;
   obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
   guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
   obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;

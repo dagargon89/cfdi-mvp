@@ -12,8 +12,12 @@
 // julio (commit 1845a68), con razón. Aquí cada valor se presenta por lo que significa —"Unidad de
 // Medida y Actualización (UMA) diaria", no `UMA_DIARIA`—, con su vigencia en fechas legibles, su
 // fuente como liga, y **qué se degrada** mientras no esté confirmado.
+//
+// La pestaña tiene **dos secciones y un solo invariante**: los valores de `param_fiscal` (aquí) y
+// las marcas de exención del art. 93 (`MarcasPercepcionSection`). Comparten los tres estados, el
+// chip y el formato de fechas — ver `fiscalComun.ts` y `ChipEstadoFiscal.tsx`.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, AlertTriangle, CheckCircle2, ExternalLink, History } from 'lucide-react';
+import { AlertTriangle, ExternalLink, History } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
@@ -21,6 +25,9 @@ import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError } from '@/lib/api';
 import type { ParametroFiscal } from '@/lib/api';
 import { api } from '@/lib/client';
+import { ChipEstadoFiscal } from './ChipEstadoFiscal';
+import { MarcasPercepcionSection } from './MarcasPercepcionSection';
+import { fechaHoraLegible, fechaLegible, type EstadoFiscal } from './fiscalComun';
 
 // --- catálogo de presentación ---------------------------------------------------------------
 // El backend manda la clave; el significado en español llano vive aquí. `siFalta` es lo que se
@@ -111,25 +118,7 @@ const ORIGEN_TEXTO: Record<string, string> = {
 };
 
 // --- formato ---------------------------------------------------------------------------------
-const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
-
-/** "2026-02-01" → "1 de febrero de 2026". Parte la cadena a mano: `new Date('2026-02-01')` la
- * interpreta como UTC y en un huso negativo (el nuestro) mostraría el día anterior. */
-function fechaLegible(iso: string): string {
-  const [a, m, d] = iso.slice(0, 10).split('-').map(Number);
-  if (!a || !m || !d) return iso;
-  return `${d} de ${MESES[m - 1]} de ${a}`;
-}
-
-/** Las marcas de tiempo (`confirmado_en`, `sincronizado_en`) llegan **sin zona y en UTC** —así son
- * todas las columnas `DateTime` del proyecto—, así que hay que decírselo al navegador antes de
- * darles formato: sin la `Z`, un "2026-08-07 00:40" de UTC se leía como local y la pantalla decía
- * que el valor se confirmó el 7 de agosto cuando aquí eran las 18:40 del 6. */
-function fechaHoraLegible(isoUtc: string): string {
-  const d = new Date(`${isoUtc.replace(' ', 'T').replace(/Z$/, '')}Z`);
-  if (Number.isNaN(d.getTime())) return fechaLegible(isoUtc);
-  return `${d.getDate()} de ${MESES[d.getMonth()]} de ${d.getFullYear()} a las ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
+// `fechaLegible` y `fechaHoraLegible` viven en `fiscalComun.ts`: las usan las dos secciones.
 
 function hoyISO(): string {
   const d = new Date();
@@ -154,22 +143,16 @@ function importeLegible(valor: string): string {
 }
 
 // --- chip de estado ---------------------------------------------------------------------------
-// Doc 08: el color comunica estado pero nunca es el único indicador — siempre texto e ícono.
-type Estado = 'confirmado' | 'propuesto' | 'ausente';
-
-const ESTADO_CHIP: Record<Estado, { texto: string; fg: string; bg: string; Icon: typeof CheckCircle2 }> = {
-  confirmado: { texto: 'Confirmado · calcula', fg: 'text-success', bg: 'bg-success-soft', Icon: CheckCircle2 },
-  propuesto: { texto: 'Propuesto · sin confirmar', fg: 'text-warning', bg: 'bg-warning-soft', Icon: AlertTriangle },
-  ausente: { texto: 'Sin capturar', fg: 'text-danger', bg: 'bg-danger-soft', Icon: AlertCircle },
+// El chip vive en `ChipEstadoFiscal.tsx` (lo comparten las dos secciones). Aquí solo los textos:
+// lo que se confirma en esta sección es un importe.
+const TEXTO_ESTADO: Record<EstadoFiscal, string> = {
+  confirmado: 'Confirmado · calcula',
+  propuesto: 'Propuesto · sin confirmar',
+  ausente: 'Sin capturar',
 };
 
-function ChipEstado({ estado }: { estado: Estado }) {
-  const { texto, fg, bg, Icon } = ESTADO_CHIP[estado];
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold whitespace-nowrap ${fg} ${bg}`}>
-      <Icon className="size-3.5" aria-hidden /> {texto}
-    </span>
-  );
+function ChipEstado({ estado }: { estado: EstadoFiscal }) {
+  return <ChipEstadoFiscal estado={estado} texto={TEXTO_ESTADO[estado]} />;
 }
 
 // --- pantalla ---------------------------------------------------------------------------------
@@ -312,6 +295,13 @@ export function ConfiguracionFiscalPage() {
           }}
         />
       )}
+
+      {/* La segunda mitad del mismo invariante: las marcas de exención del art. 93. Va debajo
+          porque depende de la primera — las exenciones se calculan con la UMA y el salario mínimo
+          confirmados de arriba. */}
+      <div className="border-t border-border pt-4 mt-2">
+        <MarcasPercepcionSection />
+      </div>
     </div>
   );
 }
@@ -332,7 +322,7 @@ function TarjetaClave({
   const [verHistoria, setVerHistoria] = useState(false);
   const f = ficha(clave);
   const actual = tramos[0] ?? null;
-  const estado: Estado = actual === null ? 'ausente' : actual.confirmado ? 'confirmado' : 'propuesto';
+  const estado: EstadoFiscal = actual === null ? 'ausente' : actual.confirmado ? 'confirmado' : 'propuesto';
   const anteriores = tramos.slice(1);
   const hoy = hoyISO();
 

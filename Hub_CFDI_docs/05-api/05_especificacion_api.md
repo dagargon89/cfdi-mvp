@@ -339,6 +339,18 @@ export interface ParametroFiscal { clave: string; ejercicio: number; valor: stri
 export interface ConfiguracionFiscal { parametros: ParametroFiscal[]; claves_sin_valor: string[] }
 export interface ParametroFiscalIn { valor: string; vigencia_desde: string; vigencia_hasta?: string | null;
                                      fuente: string; ejercicio?: number | null }
+// Marcas de exención del art. 93 (§8bis). `factor_exencion` es CADENA o nula, como todos los
+// importes, y su unidad la decide `base_exencion`; con `PORCENTAJE` está en **escala 0-100, no como
+// fracción** ("100" = el cien por ciento). `sujeto_a_tope_conjunto` y `nota_revision` NO llevan
+// default: omitirlos es 422 (§8bis explica por qué cada uno).
+export type BaseExencion = 'UMA_DIAS' | 'SM_DIAS' | 'PORCENTAJE' | 'NINGUNA';
+export interface MarcasPercepcion { es_ingreso_ordinario: boolean; base_exencion: BaseExencion;
+                                    factor_exencion: string | null; integra_sbc: boolean;
+                                    es_provisionable: boolean; sujeto_a_tope_conjunto: boolean }
+export interface MarcaPercepcionIn extends MarcasPercepcion { nota_revision: string | null }
+export interface MarcaPercepcion extends MarcasPercepcion { tipo_percepcion: string;
+                                    nota_revision: string | null; confirmado: boolean;
+                                    confirmado_por: string | null; confirmado_en: string | null }
 export interface ConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null;
                                         dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
 export type ConfiguracionEmpresaIn = Omit<ConfiguracionEmpresa, 'empresa_id'>;
@@ -394,6 +406,11 @@ export interface ApiClient {
   listarConfiguracionFiscal(): Promise<ConfiguracionFiscal>;
   capturarParametroFiscal(clave: string, input: ParametroFiscalIn): Promise<ParametroFiscal>;
   confirmarParametroFiscal(clave: string, input: { vigencia_desde: string; valor: string }): Promise<ParametroFiscal>;
+  // Marcas del art. 93, solo admin. 422 TIPO_PERCEPCION_INVALIDO si `{tipo}` no está en
+  // `c_TipoPercepcion`; 503 CATALOGO_SAT_ILEGIBLE —transitorio— si no se puede leer el catálogo.
+  listarMarcasPercepcion(): Promise<MarcaPercepcion[]>;
+  guardarMarcaPercepcion(tipo: string, input: MarcaPercepcionIn): Promise<MarcaPercepcion>;
+  confirmarMarcaPercepcion(tipo: string, input: MarcasPercepcion): Promise<MarcaPercepcion>;
   obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
   guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
   obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
@@ -402,11 +419,18 @@ export interface ApiClient {
 }
 ```
 
-**No hay métodos para `catalogo_percepcion_marca`** (§8bis los expone como endpoints), y no es un olvido: las
-44 marcas se sembraron con **39 dudas declaradas** (`config/fiscal/README.md` §5.3) que **no viajan en la
-respuesta** de `GET /v1/configuracion/percepciones`. Una pantalla que ofreciera "Confirmar" sobre esas
-filas dejaría confirmar a ciegas justo lo que el invariante existe para impedir. Cuando se construya, la
-duda tiene que llegar primero al contrato.
+**Los métodos de `catalogo_percepcion_marca` se añadieron en una segunda vuelta (2026-08-06)**, no en la
+primera, y la razón importa: las 44 marcas se sembraron con **39 dudas declaradas**
+(`config/fiscal/README.md` §5.3) que hasta la ronda 2 de la tarea 4 vivían en comentarios del YAML y **no
+viajaban en la respuesta**. Una pantalla que ofreciera "Confirmar" sobre esas filas habría dejado confirmar
+a ciegas justo lo que el invariante existe para impedir. Hoy `nota_revision` es columna y viaja en el `GET`,
+así que la duda puede estar donde tiene que estar —al lado del botón— y la pantalla ya se puede construir.
+
+**La descripción del tipo no viaja en el contrato.** `GET /v1/configuracion/percepciones` devuelve la clave
+(`015`) pero no "Becas para trabajadores y/o hijos", y quien confirma necesita las dos. Hoy lo resuelve una
+copia del catálogo en el cliente (`apps/web/src/features/admin/catalogoTipoPercepcion.ts`), enumerada del
+mismo `c_TipoPercepcion` de `satcfdi` que valida el servidor. Si algún día se añade `descripcion_sat` a
+`MarcaPercepcionOut`, esa copia sobra.
 
 Campos `escenarioDemo`/`simVencidaDemo` de `subirEfirma`/`crearDescarga` son exclusivos de
 `VITE_DEMO_CONTROLS` (fuerzan la respuesta del backend simulado para la sesión de validación) — no

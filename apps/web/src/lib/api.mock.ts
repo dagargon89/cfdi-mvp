@@ -9,6 +9,7 @@ import { ApiError } from './api';
 import type {
   ApiClient,
   Automatizaciones,
+  BaseExencion,
   BitacoraEntrada,
   CategoriaProvision,
   Comprobante,
@@ -26,6 +27,9 @@ import type {
   InformeCatalogo,
   Job,
   MapeosEmpresa,
+  MarcaPercepcion,
+  MarcaPercepcionIn,
+  MarcasPercepcion,
   MetadataPreview,
   NotificacionDestino,
   ObservadosEmpresa,
@@ -64,6 +68,12 @@ interface DbConfig { clave: string; ejercicio_fiscal: string; valor: string | nu
 interface DbParamFiscal {
   clave: string; ejercicio: number; valor: string; vigencia_desde: string; vigencia_hasta: string | null;
   origen: OrigenValor; fuente: string; sincronizado_en: string | null;
+  confirmado_por: string | null; confirmado_en: string | null;
+}
+interface DbMarcaPercepcion {
+  tipo_percepcion: string; es_ingreso_ordinario: boolean; base_exencion: BaseExencion;
+  factor_exencion: string | null; integra_sbc: boolean; es_provisionable: boolean;
+  sujeto_a_tope_conjunto: boolean; nota_revision: string | null;
   confirmado_por: string | null; confirmado_en: string | null;
 }
 interface DbConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null; dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
@@ -145,6 +155,61 @@ const db = {
       sincronizado_en: null, confirmado_por: null, confirmado_en: null,
     },
   ] as DbParamFiscal[],
+  // Marcas del art. 93 (doc 05 §8bis). **Un subconjunto de los 44 tipos a propósito**: los que
+  // faltan son el tercer estado —tipo del catálogo del SAT del que no hay ni marcas capturadas— y
+  // sin él la pantalla no se podría ver completa sin backend. Los valores son los de la semilla
+  // real (`config/fiscal/catalogo_percepcion.yaml`), incluidas sus dudas declaradas.
+  //
+  // Hay **una marca con nota y una sin ella** en cada estado que importa, y **una confirmada**
+  // ('021') que en la base real no existe: con 0 de 44 confirmadas no habría forma de ver el chip
+  // verde ni el texto de "quién respondió por esto" sin escribir en producción.
+  catalogo_percepcion_marca: [
+    {
+      tipo_percepcion: '001', es_ingreso_ordinario: true, base_exencion: 'NINGUNA', factor_exencion: null,
+      integra_sbc: true, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      nota_revision: null, confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '002', es_ingreso_ordinario: true, base_exencion: 'UMA_DIAS', factor_exencion: '30.0000',
+      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false,
+      nota_revision: null, confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '005', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      nota_revision: 'las dos marcas son condicionales y las condiciones no vienen en el CFDI (aportación pareja, tope del 13%, número de retiros al año). Si el fondo no cumple, el concepto es gravado Y integra al SBC: las dos marcas cambian a la vez.',
+      confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '015', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true,
+      nota_revision: 'está SUJETA AL TOPE CONJUNTO de previsión social del penúltimo párrafo del art. 93 (no está en la lista de exceptuados). `PORCENTAJE 100` es la exención en bruto; quien calcule tiene que aplicarle el tope de 1 UMA anual junto con los demás conceptos de previsión social del mismo trabajador, o exentará de más.',
+      confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '019', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '50.0000',
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      nota_revision: 'el renglón captura SOLO el 50% del caso general y se pierden tres cosas que el modelo no puede expresar: (a) el 100% para quien gana el salario mínimo, (b) el tope de 5 UMA por semana, (c) que solo aplica dentro del límite de horas de la LFT. El `integra_sbc: false` supone que las horas extra están dentro de los márgenes legales.',
+      confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '021', es_ingreso_ordinario: true, base_exencion: 'UMA_DIAS', factor_exencion: '15.0000',
+      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false,
+      nota_revision: null, confirmado_por: 'dgarcia@planjuarez.org', confirmado_en: '2026-08-05 09:20:00',
+    },
+    {
+      tipo_percepcion: '025', es_ingreso_ordinario: false, base_exencion: 'UMA_DIAS', factor_exencion: '90.0000',
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      nota_revision: 'el factor es "90 UMA por cada AÑO DE SERVICIO" (art. 93-XIII) y los años de servicio no vienen en el CFDI de nómina.',
+      confirmado_por: null, confirmado_en: null,
+    },
+    {
+      tipo_percepcion: '029', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true,
+      nota_revision: 'está SUJETA AL TOPE CONJUNTO de previsión social del penúltimo párrafo del art. 93. Además, el art. 27-VI de la LSS excluye los vales de despensa del SBC solo hasta el 40% de la UMA; el excedente sí integra, y este campo es booleano y no puede expresar un tope.',
+      confirmado_por: null, confirmado_en: null,
+    },
+  ] as DbMarcaPercepcion[],
   configuracion_empresa: [] as DbConfiguracionEmpresa[],
   map_departamento: [] as DbMapDepartamento[],
   map_concepto_provision: [] as DbMapConceptoProvision[],
@@ -363,6 +428,121 @@ function paramASalida(fila: DbParamFiscal): ParametroFiscal {
     origen: fila.origen, fuente: fila.fuente, sincronizado_en: fila.sincronizado_en,
     confirmado: fila.confirmado_en !== null, confirmado_por: fila.confirmado_por, confirmado_en: fila.confirmado_en,
   };
+}
+
+// --- marcas del art. 93: también las reglas reales ---------------------------------------------
+// Las 44 claves de `c_TipoPercepcion` (la misma lista blanca que `exige_tipo_percepcion_conocido`
+// comprueba en el servidor). Sin ella el mock aceptaría `150` por `015` y la pantalla se diseñaría
+// creyendo que el backend también lo acepta.
+const TIPOS_PERCEPCION_MOCK = [
+  '001', '002', '003', '004', '005', '006', '009', '010', '011', '012', '013', '014', '015',
+  '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031',
+  '032', '033', '034', '035', '036', '037', '038', '039', '044', '045', '046', '047', '048',
+  '049', '050', '051', '052', '053',
+];
+const DECIMALES_FACTOR = 4;
+
+function exigeTipoPercepcionMock(tipo: string): void {
+  if (!TIPOS_PERCEPCION_MOCK.includes(tipo)) {
+    throw new ApiError(422, 'TIPO_PERCEPCION_INVALIDO', `'${tipo}' no está en el catálogo \`c_TipoPercepcion\` del SAT (44 claves). Una marca sobre un tipo inventado se confirma sin ruido y después no la lee nadie nunca.`);
+  }
+}
+
+/** Las validaciones del esquema `MarcasPercepcion` de Pydantic, incluidas **las dos que no llevan
+ * default**: `sujeto_a_tope_conjunto` siempre, y `nota_revision` en el `PUT`. Un campo omitido no
+ * es "el valor de por omisión", es un 422 — y el mensaje imita el que arma `aApiError` con el
+ * `detail` de FastAPI para que la pantalla se pruebe contra el texto que va a recibir de verdad. */
+function exigeMarcasValidas(body: Partial<MarcasPercepcion>, conNota: boolean): void {
+  const faltantes: string[] = [];
+  if (typeof body.es_ingreso_ordinario !== 'boolean') faltantes.push('es_ingreso_ordinario');
+  if (typeof body.base_exencion !== 'string') faltantes.push('base_exencion');
+  if (typeof body.integra_sbc !== 'boolean') faltantes.push('integra_sbc');
+  if (typeof body.es_provisionable !== 'boolean') faltantes.push('es_provisionable');
+  // Sin default a propósito (doc 05 §8bis): con uno, capturar una marca sujeta al tope conjunto la
+  // crearía en `false` en silencio y B-03 exentaría de más.
+  if (typeof body.sujeto_a_tope_conjunto !== 'boolean') faltantes.push('sujeto_a_tope_conjunto');
+  if (conNota && !('nota_revision' in body)) faltantes.push('nota_revision');
+  if (faltantes.length > 0) {
+    throw new ApiError(422, 'DATOS_INVALIDOS', faltantes.map((c) => `${c}: Field required`).join(' · '));
+  }
+
+  const base = body.base_exencion as BaseExencion;
+  if (!['UMA_DIAS', 'SM_DIAS', 'PORCENTAJE', 'NINGUNA'].includes(base)) {
+    throw new ApiError(422, 'DATOS_INVALIDOS', `base_exencion: '${base}' no es una base de exención válida.`);
+  }
+  const factor = body.factor_exencion ?? null;
+  if (base === 'NINGUNA') {
+    if (factor !== null) throw new ApiError(422, 'DATOS_INVALIDOS', 'Value error, con `base_exencion: NINGUNA` no puede haber `factor_exencion`.');
+    if (body.sujeto_a_tope_conjunto) {
+      throw new ApiError(422, 'DATOS_INVALIDOS', 'Value error, `sujeto_a_tope_conjunto: true` no tiene sentido con `base_exencion: NINGUNA` — o el tipo sí tiene exención y falta capturarla, o la marca del tope sobra.');
+    }
+    return;
+  }
+  if (factor === null) throw new ApiError(422, 'DATOS_INVALIDOS', `Value error, \`base_exencion: ${base}\` exige un \`factor_exencion\`.`);
+  const normalizado = importeNormalizado(exigeImporteCadena(factor));
+  if (normalizado === null) throw new ApiError(422, 'DATOS_INVALIDOS', `factor_exencion: '${factor}' no es un número válido.`);
+  if (normalizado.startsWith('-') || normalizado === '0') {
+    throw new ApiError(422, 'DATOS_INVALIDOS', 'factor_exencion: Input should be greater than 0');
+  }
+  if (Number(normalizado) >= 100000) throw new ApiError(422, 'DATOS_INVALIDOS', 'factor_exencion: Input should be less than 100000');
+  const decimales = normalizado.includes('.') ? normalizado.split('.')[1].length : 0;
+  if (decimales > DECIMALES_FACTOR) {
+    throw new ApiError(422, 'DATOS_INVALIDOS', `factor_exencion: Decimal input should have no more than ${DECIMALES_FACTOR} decimal places`);
+  }
+}
+
+/** `_difieren` del backend: solo las **seis marcas que calculan**. La nota queda fuera (no viaja
+ * en el cuerpo de confirmar y su efecto es asimétrico — ver `dudaNuevaMock`). */
+function marcasDifieren(fila: DbMarcaPercepcion, body: MarcasPercepcion): boolean {
+  const factorFila = fila.factor_exencion === null ? null : importeNormalizado(fila.factor_exencion);
+  const factorBody = body.factor_exencion === null ? null : importeNormalizado(body.factor_exencion);
+  return (
+    fila.es_ingreso_ordinario !== body.es_ingreso_ordinario ||
+    fila.base_exencion !== body.base_exencion ||
+    factorFila !== factorBody ||
+    fila.integra_sbc !== body.integra_sbc ||
+    fila.es_provisionable !== body.es_provisionable ||
+    fila.sujeto_a_tope_conjunto !== body.sujeto_a_tope_conjunto
+  );
+}
+
+/** `_duda_nueva` del backend, con su asimetría: la duda que **aparece o cambia** limpia la
+ * confirmación; la que **desaparece**, no. Quien confirmó no tenía delante la duda nueva. */
+function dudaNuevaMock(fila: DbMarcaPercepcion, nota: string | null): boolean {
+  return nota !== null && nota !== fila.nota_revision;
+}
+
+/** "" y "   " son la misma intención que `null` y se guardan igual, o el `GET` devolvería a veces
+ * `""` y a veces `null` para el mismo estado. */
+function normalizaNota(nota: string | null): string | null {
+  return nota === null ? null : nota.trim() || null;
+}
+
+function marcaASalida(fila: DbMarcaPercepcion): MarcaPercepcion {
+  return {
+    tipo_percepcion: fila.tipo_percepcion,
+    es_ingreso_ordinario: fila.es_ingreso_ordinario,
+    base_exencion: fila.base_exencion,
+    factor_exencion: fila.factor_exencion,
+    integra_sbc: fila.integra_sbc,
+    es_provisionable: fila.es_provisionable,
+    sujeto_a_tope_conjunto: fila.sujeto_a_tope_conjunto,
+    nota_revision: fila.nota_revision,
+    confirmado: fila.confirmado_en !== null,
+    confirmado_por: fila.confirmado_por,
+    confirmado_en: fila.confirmado_en,
+  };
+}
+
+/** La columna es `Numeric(9,4)`: el servidor devuelve siempre la escala real ("15.0000"), no lo
+ * que se tecleó. Sin esto, capturar "15" y volver a leer daría "15" y la pantalla se diseñaría
+ * contra una escala que el backend no produce. */
+function escalaFactor(valor: string | null): string | null {
+  if (valor === null) return null;
+  const n = importeNormalizado(valor);
+  if (n === null) return valor;
+  const [enteros, decimales = ''] = n.split('.');
+  return `${enteros}.${decimales.padEnd(DECIMALES_FACTOR, '0').slice(0, DECIMALES_FACTOR)}`;
 }
 
 function requireAdminMock(accion: string): DbUsuario {
@@ -834,6 +1014,65 @@ export const apiMock: ApiClient = {
     fila.confirmado_en = stamp();
     logBitacora(u.correo, 'confirmar_param_fiscal', `param_fiscal:${clave}@${input.vigencia_desde}`, { clave, valor: fila.valor });
     return paramASalida(fila);
+  },
+
+  async listarMarcasPercepcion(): Promise<MarcaPercepcion[]> {
+    requireAdminMock('ver las marcas de exención');
+    return [...db.catalogo_percepcion_marca]
+      .sort((a, b) => a.tipo_percepcion.localeCompare(b.tipo_percepcion))
+      .map(marcaASalida);
+  },
+
+  async guardarMarcaPercepcion(tipo, input: MarcaPercepcionIn): Promise<MarcaPercepcion> {
+    const u = requireAdminMock('capturar las marcas de un tipo de percepción');
+    exigeTipoPercepcionMock(tipo);
+    exigeMarcasValidas(input, true);
+    const nota = normalizaNota(input.nota_revision);
+    const factor = escalaFactor(input.factor_exencion);
+
+    let fila = db.catalogo_percepcion_marca.find((m) => m.tipo_percepcion === tipo);
+    if (!fila) {
+      fila = {
+        tipo_percepcion: tipo, es_ingreso_ordinario: input.es_ingreso_ordinario,
+        base_exencion: input.base_exencion, factor_exencion: factor, integra_sbc: input.integra_sbc,
+        es_provisionable: input.es_provisionable, sujeto_a_tope_conjunto: input.sujeto_a_tope_conjunto,
+        nota_revision: nota, confirmado_por: null, confirmado_en: null,
+      };
+      db.catalogo_percepcion_marca.push(fila);
+    } else {
+      // Capturar no confirma, y **una duda nueva devuelve la marca a la cola de revisión aunque
+      // las seis marcas no se muevan**: quien la confirmó no tenía esa duda delante.
+      if (marcasDifieren(fila, { ...input, factor_exencion: factor }) || dudaNuevaMock(fila, nota)) {
+        fila.confirmado_por = null;
+        fila.confirmado_en = null;
+      }
+      fila.es_ingreso_ordinario = input.es_ingreso_ordinario;
+      fila.base_exencion = input.base_exencion;
+      fila.factor_exencion = factor;
+      fila.integra_sbc = input.integra_sbc;
+      fila.es_provisionable = input.es_provisionable;
+      fila.sujeto_a_tope_conjunto = input.sujeto_a_tope_conjunto;
+      fila.nota_revision = nota;
+    }
+    logBitacora(u.correo, 'capturar_marca_percepcion', `catalogo_percepcion_marca:${tipo}`, { tipo_percepcion: tipo });
+    return marcaASalida(fila);
+  },
+
+  async confirmarMarcaPercepcion(tipo, input: MarcasPercepcion): Promise<MarcaPercepcion> {
+    const u = requireAdminMock('confirmar las marcas de un tipo de percepción');
+    exigeTipoPercepcionMock(tipo);
+    exigeMarcasValidas(input, false);
+    const fila = db.catalogo_percepcion_marca.find((m) => m.tipo_percepcion === tipo);
+    if (!fila) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
+    if (marcasDifieren(fila, input)) {
+      throw new ApiError(409, 'MARCAS_CAMBIARON', `Las marcas del tipo ${tipo} cambiaron mientras las revisabas. Vuelve a cargar la pantalla y revísalas otra vez antes de confirmarlas.`);
+    }
+    // Idempotente: reconfirmar no reescribe quién respondió por la revisión.
+    if (fila.confirmado_en !== null) return marcaASalida(fila);
+    fila.confirmado_por = u.correo;
+    fila.confirmado_en = stamp();
+    logBitacora(u.correo, 'confirmar_marca_percepcion', `catalogo_percepcion_marca:${tipo}`, { tipo_percepcion: tipo });
+    return marcaASalida(fila);
   },
 
   async obtenerConfiguracionEmpresa(empresaId): Promise<ConfiguracionEmpresa> {
