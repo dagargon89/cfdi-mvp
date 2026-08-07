@@ -35,6 +35,16 @@ const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: 
     consecuencia: 'Dejará de revisarse si un comprobante fue cancelado tras emitirse; su estatus podría quedar desactualizado.',
   },
   {
+    // Quinto interruptor, añadido con la alarma de vigencia fiscal (doc 05 §8bis). Es el único que
+    // el backend acepta omitido en el `PUT` —llegó después del contrato congelado—, pero la
+    // pantalla manda siempre los cinco (`{...autos, [clave]: valor}` sobre lo que devolvió el
+    // `GET`), así que el default nunca reenciende lo que un administrador apagó.
+    key: 'vigencia_fiscal',
+    nombre: 'Alarma de vigencia fiscal',
+    queHace: 'Revisa a diario si la UMA, los salarios mínimos y el tipo de cambio están al día, y baja el tipo de cambio del día de Banxico para que lo confirmes.',
+    consecuencia: 'Dejarás de recibir el aviso cuando un valor fiscal caduque (la UMA cambia cada 1 de febrero y el salario mínimo cada 1 de enero) y el tipo de cambio dejará de actualizarse solo; tendrás que revisarlo por tu cuenta.',
+  },
+  {
     key: 'limpieza',
     nombre: 'Limpieza automática de almacenamiento',
     queHace: 'Libera disco a diario borrando archivos temporales: exports de descarga masiva viejos y paquetes crudos del SAT ya indexados. Nunca borra tus XML fiscales.',

@@ -47,9 +47,20 @@ export function App() {
                       <Route path="config" element={<ConfigBitacoraPage />} />
                       <Route path="bitacora" element={<ConfigBitacoraPage />} />
                       <Route path="correo" element={<ConfigBitacoraPage />} />
-                      {/* La configuración fiscal es política federal: aplica a todas las empresas
-                          y el backend la restringe a admin (require_admin). La de cada empresa es
-                          política laboral suya y vive en /e/:id/configuracion, abierta a operador. */}
+                    </Route>
+                    {/* La configuración fiscal es política federal: aplica a todas las empresas y
+                        el backend la restringe a admin (require_admin). La de cada empresa es
+                        política laboral suya y vive en /e/:id/configuracion, abierta a operador.
+                        Va en su propio guardián porque **el motivo del bloqueo es distinto** y hay
+                        que decirlo: quien llega aquí sin ser admin necesita saber que lo que aquí
+                        se captura es federal y a dónde ir por lo suyo. Hornear ese texto en el
+                        guardián compartido se lo mostraba también a quien abre /admin/bitacora. */}
+                    <Route
+                      path="admin"
+                      element={
+                        <RequireAdmin mensaje="La configuración fiscal (UMA, salarios mínimos, tipo de cambio) es la misma para todas las empresas de esta instalación, así que solo un administrador la captura y la confirma. La configuración de tu organización —zona salarial, aguinaldo, prima vacacional y la clasificación de sus conceptos de nómina— sí está a tu alcance, en Empresa → Configuración." />
+                      }
+                    >
                       <Route path="fiscal" element={<ConfigBitacoraPage />} />
                     </Route>
                   </Route>

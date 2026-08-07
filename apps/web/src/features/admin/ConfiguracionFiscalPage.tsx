@@ -17,13 +17,13 @@
 // las marcas de exención del art. 93 (`MarcasPercepcionSection`). Comparten los tres estados, el
 // chip y el formato de fechas — ver `fiscalComun.ts` y `ChipEstadoFiscal.tsx`.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ExternalLink, History } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CalendarClock, CheckCircle2, ExternalLink, History, Wrench } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError } from '@/lib/api';
-import type { ParametroFiscal } from '@/lib/api';
+import type { AlertaVigencia, MotivoAlertaVigencia, ParametroFiscal } from '@/lib/api';
 import { api } from '@/lib/client';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
 import { MarcasPercepcionSection } from './MarcasPercepcionSection';
@@ -155,6 +155,118 @@ function ChipEstado({ estado }: { estado: EstadoFiscal }) {
   return <ChipEstadoFiscal estado={estado} texto={TEXTO_ESTADO[estado]} />;
 }
 
+// --- la alarma de vigencia ---------------------------------------------------------------------
+// Seis motivos que **no se presentan igual a propósito**. Tres hablan de un valor y piden acciones
+// distintas —capturar / un clic / actualizar el ejercicio—; los otros tres no hablan de ningún
+// valor sino de la maquinaria que los mantiene al día. Mezclarlos haría que la alerta mintiera: un
+// catálogo que no se puede abrir no es un valor "ausente" ni pide ir a capturar nada, y quien lo
+// leyera en la misma lista buscaría una cifra que no existe.
+//
+// Por eso van en dos bloques con encabezado propio, y los de maquinaria en tono neutro: casi
+// siempre son "falta configurar o actualizar algo en el servidor", no "el sistema está averiado".
+
+const MOTIVOS_DE_VALOR: MotivoAlertaVigencia[] = ['AUSENTE', 'SIN_CONFIRMAR', 'CADUCADO'];
+
+const PRESENTACION_ALERTA: Record<MotivoAlertaVigencia, { etiqueta: string; fg: string; bg: string; Icon: typeof AlertTriangle }> = {
+  AUSENTE: { etiqueta: 'Falta capturarlo', fg: 'text-danger', bg: 'bg-danger-soft', Icon: AlertCircle },
+  SIN_CONFIRMAR: { etiqueta: 'Es un clic: falta confirmarlo', fg: 'text-warning', bg: 'bg-warning-soft', Icon: AlertTriangle },
+  CADUCADO: { etiqueta: 'Caducado: es de un ejercicio anterior', fg: 'text-danger', bg: 'bg-danger-soft', Icon: CalendarClock },
+  CATALOGO_ILEGIBLE: { etiqueta: 'No se puede leer el catálogo del SAT', fg: 'text-info', bg: 'bg-info-soft', Icon: Wrench },
+  LIBRERIA_DESACTUALIZADA: { etiqueta: 'La librería del SAT lleva más de un año', fg: 'text-info', bg: 'bg-info-soft', Icon: Wrench },
+  SINCRONIZACION_FALLIDA: { etiqueta: 'La sincronización automática no corrió', fg: 'text-info', bg: 'bg-info-soft', Icon: Wrench },
+};
+
+/** El `detalle` del servidor trae los identificadores entre acentos graves (`` `UMA_DIARIA` ``).
+ * Se pintan en monoespaciada (doc 08) en vez de mostrar los acentos crudos. */
+function DetalleAlerta({ texto }: { texto: string }) {
+  return (
+    <>
+      {texto.split('`').map((parte, i) =>
+        i % 2 === 1 ? (
+          <code key={i} className="font-mono text-[12px]">{parte}</code>
+        ) : (
+          <span key={i}>{parte}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+function FilaAlerta({ alerta, hayTarjeta }: { alerta: AlertaVigencia; hayTarjeta: boolean }) {
+  const { etiqueta, fg, bg, Icon } = PRESENTACION_ALERTA[alerta.motivo];
+  const nombre = CATALOGO[alerta.clave]?.nombre;
+  return (
+    <li className="flex flex-col gap-1 py-2.5 first:pt-0 last:pb-0">
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Doc 08: el color nunca es el único indicador — chip con texto e ícono. */}
+        <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-semibold whitespace-nowrap ${fg} ${bg}`}>
+          <Icon className="size-3.5" aria-hidden /> {etiqueta}
+        </span>
+        {nombre ? <span className="text-[13px] font-semibold">{nombre}</span> : null}
+        <code className="font-mono text-[12px] text-text-muted">{alerta.clave}</code>
+        {hayTarjeta && (
+          <a href={`#param-${alerta.clave}`} className="text-[12px] font-semibold text-primary">
+            Ir al valor
+          </a>
+        )}
+      </div>
+      <p className="m-0 text-[13px] text-text-muted text-pretty max-w-[80ch]">
+        <DetalleAlerta texto={alerta.detalle} />
+      </p>
+    </li>
+  );
+}
+
+function AlarmaDeVigencia({ alertas, claves }: { alertas: AlertaVigencia[]; claves: string[] }) {
+  const deValor = alertas.filter((a) => MOTIVOS_DE_VALOR.includes(a.motivo));
+  const deMaquinaria = alertas.filter((a) => !MOTIVOS_DE_VALOR.includes(a.motivo));
+
+  return (
+    <div className="flex flex-col gap-3">
+      {deValor.length > 0 ? (
+        <section role="status" className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-1">
+          <h4 className="m-0 text-[14px] font-semibold">Qué necesita tu atención hoy</h4>
+          <p className="m-0 text-[12px] text-text-muted text-pretty max-w-[80ch]">
+            Se revisa cada vez que abres esta pantalla, contra el calendario: <strong>la UMA cambia el 1 de febrero</strong>{' '}
+            y <strong>el salario mínimo el 1 de enero</strong>. Por eso el sistema sabe que un valor caducó sin consultar
+            ninguna página — y un valor confirmado del año pasado sigue calculando aunque esté mal, que es lo que esta
+            lista existe para que no pase.
+          </p>
+          <ul className="list-none p-0 m-0 mt-1 flex flex-col divide-y divide-border">
+            {deValor.map((a) => (
+              <FilaAlerta key={`${a.clave}-${a.motivo}`} alerta={a} hayTarjeta={claves.includes(a.clave)} />
+            ))}
+          </ul>
+        </section>
+      ) : (
+        <p className="m-0 text-[13px] text-success flex items-center gap-1.5">
+          <CheckCircle2 className="size-4 shrink-0" aria-hidden />
+          Ningún valor fiscal está caducado ni esperando confirmación.
+        </p>
+      )}
+
+      {deMaquinaria.length > 0 && (
+        <section role="status" className="bg-surface-alt border border-border rounded-lg p-4 flex flex-col gap-1">
+          <h4 className="m-0 text-[14px] font-semibold flex items-center gap-1.5">
+            <Wrench className="size-4 shrink-0 text-text-muted" aria-hidden />
+            Revisiones del sistema
+          </h4>
+          <p className="m-0 text-[12px] text-text-muted text-pretty max-w-[80ch]">
+            Esto <strong>no habla de ningún valor fiscal</strong>: es la maquinaria que los mantiene al día. No hay nada
+            que capturar ni que confirmar aquí, y ningún informe se detiene por esto — normalmente es algo que falta
+            configurar o actualizar en el servidor, y lo resuelve quien administra la instalación.
+          </p>
+          <ul className="list-none p-0 m-0 mt-1 flex flex-col divide-y divide-border">
+            {deMaquinaria.map((a) => (
+              <FilaAlerta key={`${a.clave}-${a.motivo}`} alerta={a} hayTarjeta={false} />
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
 // --- pantalla ---------------------------------------------------------------------------------
 
 interface EnCaptura {
@@ -258,6 +370,11 @@ export function ConfiguracionFiscalPage() {
         </p>
       </div>
 
+      {/* La alarma de vigencia (doc 05 §8bis), lo primero después de la explicación: es lo que hay
+          que hacer hoy. Va antes de las tarjetas porque una tarjeta dice cómo está un valor, y
+          esto dice cuál de todos te está esperando. */}
+      <AlarmaDeVigencia alertas={data?.alertas ?? []} claves={claves} />
+
       {conflicto && (
         <div role="alert" className="bg-warning-soft text-warning rounded-md px-3 py-2.5 text-[13px] flex items-start gap-2">
           <AlertTriangle className="size-4 shrink-0 mt-0.5" aria-hidden />
@@ -274,7 +391,9 @@ export function ConfiguracionFiscalPage() {
                 key={clave}
                 clave={clave}
                 tramos={porClave.get(clave) ?? []}
-                confirmando={confirmar.isPending}
+                // Solo la tarjeta en la que se hizo clic: con el `isPending` compartido, confirmar
+                // un valor ponía las seis en estado de carga.
+                confirmando={confirmar.isPending && confirmar.variables?.clave === clave}
                 onConfirmar={(p) => confirmar.mutate(p)}
                 onCapturar={(tramo) => { setConflicto(null); setEnCaptura({ clave, tramo }); }}
               />
@@ -327,7 +446,9 @@ function TarjetaClave({
   const hoy = hoyISO();
 
   return (
-    <article className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-3">
+    // El `id` es el destino de "Ir al valor" de la alarma de arriba: la alerta dice qué pasa y
+    // esta tarjeta es donde se arregla.
+    <article id={`param-${clave}`} className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-3 scroll-mt-4">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <h5 className="m-0 text-[14px] font-semibold">{f.nombre}</h5>

@@ -509,9 +509,11 @@ export interface ApiClient {
   confirmarParametroFiscal(clave: string, input: { vigencia_desde: string; valor: string }): Promise<ParametroFiscal>;
   // Marcas del art. 93, solo admin. 422 TIPO_PERCEPCION_INVALIDO si `{tipo}` no está en
   // `c_TipoPercepcion`; 503 CATALOGO_SAT_ILEGIBLE —transitorio— si no se puede leer el catálogo.
-  listarMarcasPercepcion(): Promise<MarcaPercepcion[]>;
+  // El GET devuelve un OBJETO (marcas + claves_sin_marcas) y el confirmar pide la huella de la
+  // duda: 409 DUDA_NO_VISTA si la marca tiene hoy una duda que no es la que el cliente vio.
+  listarMarcasPercepcion(): Promise<CatalogoPercepciones>;
   guardarMarcaPercepcion(tipo: string, input: MarcaPercepcionIn): Promise<MarcaPercepcion>;
-  confirmarMarcaPercepcion(tipo: string, input: MarcasPercepcion): Promise<MarcaPercepcion>;
+  confirmarMarcaPercepcion(tipo: string, input: MarcaPercepcionConfirmarIn): Promise<MarcaPercepcion>;
   obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
   guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
   obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
@@ -527,11 +529,14 @@ viajaban en la respuesta**. Una pantalla que ofreciera "Confirmar" sobre esas fi
 a ciegas justo lo que el invariante existe para impedir. Hoy `nota_revision` es columna y viaja en el `GET`,
 así que la duda puede estar donde tiene que estar —al lado del botón— y la pantalla ya se puede construir.
 
-**La descripción del tipo no viaja en el contrato.** `GET /v1/configuracion/percepciones` devuelve la clave
-(`015`) pero no "Becas para trabajadores y/o hijos", y quien confirma necesita las dos. Hoy lo resuelve una
-copia del catálogo en el cliente (`apps/web/src/features/admin/catalogoTipoPercepcion.ts`), enumerada del
-mismo `c_TipoPercepcion` de `satcfdi` que valida el servidor. Si algún día se añade `descripcion_sat` a
-`MarcaPercepcionOut`, esa copia sobra.
+**La copia del catálogo del SAT que llevaba el cliente ya no existe.** Vivía en
+`apps/web/src/features/admin/catalogoTipoPercepcion.ts` y hacía dos cosas: describir la clave (`015` →
+"Becas para trabajadores y/o hijos", que quien confirma necesita ver) y **decidir qué tarjetas existen** —el
+denominador del "0 de 44" y el tercer estado, "sin marcas capturadas"—. `descripcion_sat` resolvió lo
+primero y `claves_sin_marcas` lo segundo, así que la copia se borró (2026-08-06) y con ella la deriva: al
+subir la versión de `satcfdi` la lista del servidor crece y ya no hay ninguna del cliente que se quede
+atrás. Efecto secundario conocido: un tipo **sin ninguna fila** se pinta solo con su clave, porque
+`claves_sin_marcas` no lleva descripción.
 
 Campos `escenarioDemo`/`simVencidaDemo` de `subirEfirma`/`crearDescarga` son exclusivos de
 `VITE_DEMO_CONTROLS` (fuerzan la respuesta del backend simulado para la sesión de validación) — no

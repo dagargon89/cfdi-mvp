@@ -4,7 +4,7 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, Automatizaciones, BitacoraEntrada, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
+import type { ApiClient, Automatizaciones, BitacoraEntrada, CatalogoPercepciones, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -281,11 +281,18 @@ export const apiHttp: ApiClientHttpSubset = {
 
   // Marcas del art. 93. `factor_exencion` viaja como cadena en las dos direcciones, por lo mismo
   // que `valor`: un número JSON pasa por `float` y el backend lo rechaza con 422.
-  listarMarcasPercepcion: () => request<MarcaPercepcion[]>('/v1/configuracion/percepciones'),
+  //
+  // El `GET` devuelve un **objeto** `{marcas, claves_sin_marcas}`, no una lista: el denominador
+  // del "0 de 44" y el tercer estado ("sin marcas capturadas") los pone el servidor, y por eso el
+  // cliente ya no lleva su copia del catálogo del SAT.
+  listarMarcasPercepcion: () => request<CatalogoPercepciones>('/v1/configuracion/percepciones'),
 
   guardarMarcaPercepcion: (tipo, input) =>
     request<MarcaPercepcion>(`/v1/configuracion/percepciones/${encodeURIComponent(tipo)}`, { method: 'PUT', body: JSON.stringify(input) }),
 
+  // El cuerpo lleva `nota_revision_hash`: la huella **opaca** que el `GET` emitió, devuelta tal
+  // cual. No se calcula aquí (ver `MarcaPercepcionConfirmarIn`); 409 `DUDA_NO_VISTA` si la duda
+  // de hoy no es la que el cliente tenía delante.
   confirmarMarcaPercepcion: (tipo, input) =>
     request<MarcaPercepcion>(`/v1/configuracion/percepciones/${encodeURIComponent(tipo)}/confirmar`, { method: 'POST', body: JSON.stringify(input) }),
 

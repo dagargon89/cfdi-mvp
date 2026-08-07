@@ -123,11 +123,16 @@ function PoliticaLaboral({ empresaId, puedeMutar }: { empresaId: number; puedeMu
       {data && faltantes.length > 0 && (
         <div role="status" className="bg-warning-soft text-warning rounded-md px-3 py-2.5 text-[13px] flex items-start gap-2">
           <AlertTriangle className="size-4 shrink-0 mt-0.5" aria-hidden />
+          {/* Las dos cifras de los mínimos vivían escritas aquí, en la única pantalla cuya tesis
+              es que no hay valor por omisión razonable. Coincidían hoy y el 1 de enero mentirían
+              sin que nada las actualizara — y las de verdad están en Configuración → Fiscal, que
+              esta pantalla no puede leer (es de admin). Mejor decir el hecho, que no caduca, que
+              una cifra que sí. */}
           <span className="text-pretty">
             Falta {faltantes.join(', ')}. Mientras tanto: <strong>sin zona salarial, B-10 no evalúa si un salario quedó
-            por debajo del mínimo</strong> — el mínimo de la Zona Libre de la Frontera Norte (440.87 en 2026) es muy
-            distinto del general (315.04), así que dar por hecho el general convertiría incumplimientos reales en
-            "todo en orden". Sin días de aguinaldo ni factor de prima, la provisión de pasivo laboral no se puede estimar.
+            por debajo del mínimo</strong> — el mínimo de la Zona Libre de la Frontera Norte es bastante más alto que el
+            general, así que dar por hecho el general convertiría incumplimientos reales en "todo en orden". Sin días de
+            aguinaldo ni factor de prima, la provisión de pasivo laboral no se puede estimar.
           </span>
         </div>
       )}
@@ -205,6 +210,16 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
     queryKey: ['conceptos-observados', empresaId],
     queryFn: () => api.obtenerConceptosObservados(empresaId),
   });
+  // **Lo que ya está guardado**, que no es lo mismo que lo observado. El `PUT` reemplaza las dos
+  // listas completas, así que reconstruirlas solo desde `conceptos-observados` borraba en silencio
+  // cualquier renglón almacenado cuya clave natural no apareciera ahí: un concepto que la nómina
+  // dejó de emitir, un departamento que cambió de nombre, o cualquier fila que alguien haya
+  // capturado por API. Guardar la clasificación no puede tener el efecto colateral de olvidar lo
+  // que no se estaba mirando.
+  const { data: guardados, isLoading: cargandoGuardados, isError: errorGuardados } = useQuery({
+    queryKey: ['mapeos-empresa', empresaId],
+    queryFn: () => api.obtenerMapeosEmpresa(empresaId),
+  });
 
   // Estado editable de las dos listas. La categoría vive por concepto y el centro de costo por
   // departamento; el `PUT` reemplaza las dos completas, así que se mandan siempre juntas.
@@ -220,30 +235,41 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
 
   const guardar = useMutation({
     mutationFn: () => {
+      // Se parte de **lo almacenado** y encima se aplican los cambios de esta pantalla. Los
+      // renglones que no se están editando —los que no aparecen en `conceptos-observados`— viajan
+      // igual, así que el reemplazo total del `PUT` deja de ser una pérdida silenciosa.
+      const departamentos = new Map((guardados?.departamentos ?? []).map((d) => [d.departamento_texto, d.centro_costo]));
+      for (const [texto, centro] of Object.entries(centros)) {
+        if (centro.trim() === '') departamentos.delete(texto); // vaciar el campo sí es desagrupar
+        else departamentos.set(texto, centro.trim());
+      }
+
+      const conceptos = new Map(
+        (guardados?.conceptos_provision ?? []).map((c) => [claveDeConcepto(c), c] as const),
+      );
+      for (const c of observados?.conceptos ?? []) {
+        if (c.clave === null) continue; // sin clave no hay PK: no se puede clasificar
+        const clave = claveDeConcepto(c);
+        const categoria = categorias[clave];
+        if (!categoria) conceptos.delete(clave); // volver a "— Sin clasificar —" sí borra
+        else conceptos.set(clave, { naturaleza: c.naturaleza, tipo: c.tipo, clave: c.clave, categoria });
+      }
+
       const cuerpo: MapeosEmpresa = {
-        departamentos: Object.entries(centros)
-          .filter(([, centro]) => centro.trim() !== '')
-          .map(([departamento_texto, centro_costo]) => ({ departamento_texto, centro_costo: centro_costo.trim() })),
-        conceptos_provision: (observados?.conceptos ?? [])
-          .filter((c) => c.clave !== null && categorias[claveDeConcepto(c)])
-          .map((c) => ({
-            naturaleza: c.naturaleza,
-            tipo: c.tipo,
-            clave: c.clave as string,
-            categoria: categorias[claveDeConcepto(c)] as CategoriaProvision,
-          })),
+        departamentos: [...departamentos].map(([departamento_texto, centro_costo]) => ({ departamento_texto, centro_costo })),
+        conceptos_provision: [...conceptos.values()],
       };
       return api.guardarMapeosEmpresa(empresaId, cuerpo);
     },
-    onSuccess: () => {
+    onSuccess: (fila) => {
+      qc.setQueryData(['mapeos-empresa', empresaId], fila);
       void qc.invalidateQueries({ queryKey: ['conceptos-observados', empresaId] });
-      void qc.invalidateQueries({ queryKey: ['mapeos-empresa', empresaId] });
       toast('Clasificación guardada', 'ok');
     },
     onError: (e) => setError(e instanceof ApiError ? e.message : 'No se pudo guardar la clasificación.'),
   });
 
-  if (isLoading) return <p className="text-text-muted text-[13px]">Cargando lo que la nómina de esta empresa emitió…</p>;
+  if (isLoading || cargandoGuardados) return <p className="text-text-muted text-[13px]">Cargando lo que la nómina de esta empresa emitió…</p>;
   if (!observados) return null;
 
   const clasificables = observados.conceptos.filter((c) => c.clave !== null);
@@ -373,7 +399,17 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
 
       {error && <div role="alert" className="bg-danger-soft text-danger rounded-md px-2.5 py-2 text-[13px] text-pretty">{error}</div>}
 
-      {puedeMutar && (observados.conceptos.length > 0 || observados.departamentos.length > 0) && (
+      {/* Sin saber qué hay guardado no se puede guardar: el `PUT` reemplaza las dos listas
+          completas, así que mandarlas armadas solo con lo que se ve borraría lo que no se ve. */}
+      {errorGuardados && (
+        <div role="alert" className="bg-warning-soft text-warning rounded-md px-2.5 py-2 text-[13px] text-pretty">
+          No se pudo leer la clasificación que ya estaba guardada, así que no se puede guardar ahora: al guardar se
+          reemplaza la lista completa, y hacerlo a ciegas borraría los renglones que hoy no aparecen en esta pantalla.
+          Vuelve a cargarla en un momento.
+        </div>
+      )}
+
+      {puedeMutar && !errorGuardados && (observados.conceptos.length > 0 || observados.departamentos.length > 0) && (
         <div className="flex justify-end">
           <Button type="button" loading={guardar.isPending} disabled={guardar.isPending} onClick={() => { setError(null); guardar.mutate(); }}>
             Guardar clasificación

@@ -23,11 +23,19 @@ import { Modal } from '@/components/ui/Modal';
 import { Switch } from '@/components/ui/Switch';
 import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError } from '@/lib/api';
-import type { BaseExencion, MarcaPercepcion, MarcasPercepcion } from '@/lib/api';
+import type { BaseExencion, MarcaPercepcion, MarcaPercepcionConfirmarIn } from '@/lib/api';
 import { api } from '@/lib/client';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
-import { TIPOS_PERCEPCION_SAT, descripcionTipoPercepcion } from './catalogoTipoPercepcion';
 import { fechaHoraLegible, type EstadoFiscal } from './fiscalComun';
+
+/** Cómo nombrar un tipo en un mensaje. La descripción la manda el servidor (`descripcion_sat`,
+ * del mismo `c_TipoPercepcion` que valida la escritura); un tipo **sin fila** no tiene ninguna,
+ * porque `claves_sin_marcas` solo trae la clave. Antes esto lo resolvía una copia del catálogo en
+ * el cliente: se borró, porque además de describir decidía qué tarjetas existen —y por tanto el
+ * denominador del "0 de 44"—, y se quedaba vieja al subir la versión de `satcfdi`. */
+function nombreDelTipo(tipo: string, marca: MarcaPercepcion | null): string {
+  return marca?.descripcion_sat ? `${tipo} · ${marca.descripcion_sat}` : tipo;
+}
 
 // --- presentación de las marcas ----------------------------------------------------------------
 
@@ -64,6 +72,20 @@ function factorLegible(valor: string): string {
   if (!valor.includes('.')) return valor;
   const recortado = valor.replace(/0+$/, '').replace(/\.$/, '');
   return recortado === '' ? valor : recortado;
+}
+
+/** La misma cifra escrita de dos maneras ("100", "100.00", "0100") es **un solo valor** para el
+ * servidor, que compara `Decimal`. Esta normalización existe solo para no avisar de un cambio que
+ * no lo es; nunca pasa por `Number` (el contrato prohíbe que un importe toque un `float`) y no
+ * decide nada fiscal: lo que se guarda es lo que se tecleó, y lo valida el backend. */
+function factorNormalizado(valor: string | null): string | null {
+  if (valor === null) return null;
+  const t = valor.trim();
+  if (t === '' || !/^\d+(\.\d*)?$|^\.\d+$/.test(t)) return t || null;
+  const [enteros = '', decimales = ''] = t.split('.');
+  const e = enteros.replace(/^0+(?=\d)/, '') || '0';
+  const d = decimales.replace(/0+$/, '');
+  return d ? `${e}.${d}` : e;
 }
 
 function SiNo({ valor }: { valor: boolean }) {
@@ -103,7 +125,7 @@ export function MarcasPercepcionSection() {
   const [enCaptura, setEnCaptura] = useState<{ tipo: string; marca: MarcaPercepcion | null } | null>(null);
   const [aviso, setAviso] = useState<Aviso | null>(null);
 
-  const { data: marcas, isLoading, isError, error } = useQuery({
+  const { data: catalogo, isLoading, isError, error } = useQuery({
     queryKey: ['marcas-percepcion'],
     queryFn: () => api.listarMarcasPercepcion(),
   });
@@ -111,24 +133,38 @@ export function MarcasPercepcionSection() {
   const tiposUsados = useTiposUsadosPorLaNomina();
 
   const confirmar = useMutation({
-    mutationFn: ({ tipo, marcas: m }: { tipo: string; marcas: MarcasPercepcion }) => api.confirmarMarcaPercepcion(tipo, m),
+    mutationFn: ({ tipo, marcas: m }: { tipo: string; nombre: string; marcas: MarcaPercepcionConfirmarIn }) =>
+      api.confirmarMarcaPercepcion(tipo, m),
     onSuccess: (fila) => {
       setAviso(null);
       void qc.invalidateQueries({ queryKey: ['marcas-percepcion'] });
       toast(`Tipo ${fila.tipo_percepcion} confirmado. B-03 ya calcula la exención de este tipo con estas marcas.`, 'ok');
     },
-    onError: (e, { tipo }) => {
+    onError: (e, { nombre }) => {
       const manejado = avisoDeErrorDeCatalogo(e, setAviso);
       if (manejado) return;
-      // El 409 no es un error del usuario: las marcas cambiaron entre que se pintó la pantalla y el
-      // clic. Se refresca y se explica, igual que el `VALOR_CAMBIO` de la sección de arriba —
-      // mostrar el mensaje crudo dejaría a la persona sin saber qué hacer.
+      // Los dos 409 **no son errores del usuario**: algo cambió entre que se pintó la pantalla y
+      // el clic. Se refresca y se explica, igual que el `VALOR_CAMBIO` de la sección de arriba —
+      // mostrar el mensaje crudo dejaría a la persona sin saber qué hacer. Se distinguen porque
+      // piden cosas distintas: uno manda a revisar las marcas, el otro a **leer la duda**.
+      if (e instanceof ApiError && e.codigo === 'DUDA_NO_VISTA') {
+        void qc.invalidateQueries({ queryKey: ['marcas-percepcion'] });
+        setAviso({
+          tono: 'warning',
+          texto:
+            `No se confirmó nada: el tipo ${nombre} tiene ahora una duda declarada que no estaba a la vista cuando lo ` +
+            'revisabas (la agregó otra persona o una recarga de semillas). Ya volvimos a cargar la pantalla: léela y ' +
+            'confirma después, porque confirmar es responder por lo que se miró. Si la duda se hubiera resuelto en ese ' +
+            'rato, en cambio, la confirmación habría pasado: quien revisó lo hizo con más información de la que hay hoy.',
+        });
+        return;
+      }
       if (e instanceof ApiError && e.codigo === 'MARCAS_CAMBIARON') {
         void qc.invalidateQueries({ queryKey: ['marcas-percepcion'] });
         setAviso({
           tono: 'warning',
           texto:
-            `No se confirmó nada: las marcas del tipo ${tipo} (${descripcionTipoPercepcion(tipo)}) cambiaron mientras las ` +
+            `No se confirmó nada: las marcas del tipo ${nombre} cambiaron mientras las ` +
             'revisabas. Ya volvimos a cargar la pantalla con las marcas actuales: revísalas otra vez —incluida su duda, si la ' +
             'tiene— y vuelve a confirmar si son correctas.',
         });
@@ -147,15 +183,21 @@ export function MarcasPercepcionSection() {
     );
   }
 
-  const porTipo = new Map((marcas ?? []).map((m) => [m.tipo_percepcion, m]));
-  // Un tipo del catálogo del SAT del que no hay ni una fila es el tercer estado (ausente), igual
-  // que `claves_sin_valor` arriba: no hay marcas que confirmar, así que no hay nada que calcular.
-  const tipos = [...new Set([...TIPOS_PERCEPCION_SAT, ...porTipo.keys()])].sort();
+  const porTipo = new Map((catalogo?.marcas ?? []).map((m) => [m.tipo_percepcion, m]));
+  // El **denominador lo pone el servidor**: `claves_sin_marcas` son los tipos de
+  // `c_TipoPercepcion` que todavía no tienen ninguna fila, y son el tercer estado (ausente), igual
+  // que `claves_sin_valor` arriba. Se le suman los tipos que la nómina **sí emite**: si uno de
+  // esos no tiene fila y tampoco viniera en `claves_sin_marcas` —el catálogo del SAT no se pudo
+  // leer y llegó vacía— quedaría invisible justo cuando es el más urgente.
+  const tipos = [...new Set([...(catalogo?.claves_sin_marcas ?? []), ...porTipo.keys(), ...(tiposUsados.tipos ?? [])])].sort();
 
   const confirmadas = tipos.filter((t) => porTipo.get(t)?.confirmado).length;
   const conDuda = tipos.filter((t) => porTipo.get(t)?.nota_revision).length;
   const sinCapturar = tipos.filter((t) => !porTipo.has(t)).length;
-  const pendientes = tipos.length - confirmadas;
+  // Una **propuesta** sin confirmar es un tipo que tiene marcas y no está confirmado. Los tipos
+  // sin marcas capturadas no son propuestas de nada: contarlos aquí además de en `sinCapturar`
+  // daba 88 elementos en un catálogo de 44 y hacía que los dos contadores se contradijeran.
+  const pendientes = tipos.filter((t) => porTipo.has(t) && !porTipo.get(t)?.confirmado).length;
   const usados = tiposUsados.tipos ? tipos.filter((t) => tiposUsados.tipos?.has(t)) : [];
 
   // El filtro por omisión es "los que tu nómina usa" **solo cuando esa lente existe y no está
@@ -218,12 +260,23 @@ export function MarcasPercepcionSection() {
       </div>
 
       {tiposUsados.error && (
-        <p className="m-0 text-[12px] text-text-muted text-pretty">
-          No se pudo revisar qué tipos aparecen en la nómina de tus organizaciones, así que se muestran los{' '}
-          {tipos.length} tipos del catálogo. No falta nada: solo el atajo para empezar por los tuyos.
+        <p role="status" className="m-0 text-[12px] text-text-muted text-pretty flex items-start gap-1.5">
+          <Info className="size-3.5 shrink-0 mt-0.5" aria-hidden />
+          <span>
+            No se pudo revisar qué tipos aparecen en la nómina de <strong>todas</strong> tus organizaciones (al menos una
+            no respondió), así que se muestran los {tipos.length} tipos del catálogo. El atajo solo aparece cuando se
+            puede armar completo: con una organización de menos, la lista de "los que tu nómina usa" escondería
+            precisamente los tipos que solo esa emite.
+          </span>
         </p>
       )}
 
+      {tiposUsados.cargando ? (
+        // No se pintan los 44 para colapsarlos a 2 medio segundo después: el salto deja sin
+        // contexto a quien ya iba leyendo (y a un lector de pantalla, sin lo que estaba leyendo).
+        <p role="status" className="m-0 text-[13px] text-text-muted">Revisando qué tipos aparecen de verdad en la nómina de tus organizaciones…</p>
+      ) : (
+      <>
       <div className="flex flex-wrap items-center gap-2">
         {FILTROS.filter((f) => f.visible).map((f) => (
           <button
@@ -269,13 +322,18 @@ export function MarcasPercepcionSection() {
             tipo={tipo}
             marca={porTipo.get(tipo) ?? null}
             usadoEnNomina={tiposUsados.tipos?.has(tipo) ?? false}
-            confirmando={confirmar.isPending}
-            onConfirmar={(m) => { setAviso(null); confirmar.mutate({ tipo, marcas: m }); }}
+            // Solo **la tarjeta en la que se hizo clic** se pone a cargar: con el `isPending`
+            // compartido, un clic dejaba las 44 en estado de carga y parecía que la pantalla
+            // entera estaba haciendo algo.
+            confirmando={confirmar.isPending && confirmar.variables?.tipo === tipo}
+            onConfirmar={(m) => { setAviso(null); confirmar.mutate({ tipo, nombre: nombreDelTipo(tipo, porTipo.get(tipo) ?? null), marcas: m }); }}
             onEditar={() => { setAviso(null); setEnCaptura({ tipo, marca: porTipo.get(tipo) ?? null }); }}
           />
         ))}
         {visibles.length === 0 && <p className="m-0 text-[13px] text-text-muted">No hay tipos que cumplan este filtro.</p>}
       </div>
+      </>
+      )}
 
       {enCaptura && (
         <ModalMarca
@@ -376,9 +434,16 @@ function avisoDeErrorDeCatalogo(e: unknown, setAviso: (a: Aviso) => void): boole
  * los conceptos observados son por empresa, así que la unión de todas las organizaciones es lo más
  * cercano a "lo que esta instalación timbra". Si algo falla —no hay empresas, el endpoint no
  * responde, el rol no alcanza— la lente simplemente no existe y se ven los 44 tipos: **falla hacia
- * mostrar de más**, nunca hacia esconder un tipo que alguien tenía que revisar. */
-function useTiposUsadosPorLaNomina(): { tipos: Set<string> | null; error: boolean } {
-  const { data: empresas, isError: errorEmpresas } = useQuery({ queryKey: ['empresas'], queryFn: () => api.listarEmpresas() });
+ * mostrar de más**, nunca hacia esconder un tipo que alguien tenía que revisar.
+ *
+ * `cargando` existe para que la lista **no salte**: mientras las consultas por organización no
+ * resuelven, la sección no pinta todavía los 44 tipos para colapsarlos después a 2. Un lector de
+ * pantalla que ya iba leyendo la lista se quedaría sin lo que estaba leyendo. */
+function useTiposUsadosPorLaNomina(): { tipos: Set<string> | null; error: boolean; cargando: boolean } {
+  const { data: empresas, isError: errorEmpresas, isPending: cargandoEmpresas } = useQuery({
+    queryKey: ['empresas'],
+    queryFn: () => api.listarEmpresas(),
+  });
   const observados = useQueries({
     // Una consulta por organización porque el endpoint es por empresa. Son cuatro agregados con
     // `GROUP BY` cada una y el resultado casi no cambia, así que se cachea largo: esta pantalla no
@@ -390,10 +455,16 @@ function useTiposUsadosPorLaNomina(): { tipos: Set<string> | null; error: boolea
     })),
   });
 
-  if (errorEmpresas) return { tipos: null, error: true };
-  if (!empresas || empresas.length === 0) return { tipos: null, error: false };
-  if (observados.some((q) => q.isPending)) return { tipos: null, error: false };
-  if (observados.every((q) => q.isError)) return { tipos: null, error: true };
+  if (errorEmpresas) return { tipos: null, error: true, cargando: false };
+  if (cargandoEmpresas) return { tipos: null, error: false, cargando: true };
+  if (!empresas || empresas.length === 0) return { tipos: null, error: false, cargando: false };
+  if (observados.some((q) => q.isPending)) return { tipos: null, error: false, cargando: true };
+  // **`some`, no `every`.** Con tres organizaciones y una que responde 500, las otras dos
+  // resuelven y la unión se armaría solo con las que funcionaron: un tipo usado exclusivamente por
+  // la que falló desaparecería del filtro sin que nada lo dijera. Es la única dirección en la que
+  // esta lente puede esconder algo, y esconder es justo lo que no puede hacer — si no se pudo
+  // armar completa, no hay lente y se ven los 44.
+  if (observados.some((q) => q.isError)) return { tipos: null, error: true, cargando: false };
 
   const tipos = new Set<string>();
   for (const q of observados) {
@@ -403,7 +474,7 @@ function useTiposUsadosPorLaNomina(): { tipos: Set<string> | null; error: boolea
       if (c.naturaleza === 'P') tipos.add(c.tipo);
     }
   }
-  return { tipos, error: false };
+  return { tipos, error: false, cargando: false };
 }
 
 // --- una tarjeta por tipo -------------------------------------------------------------------------
@@ -420,7 +491,7 @@ function TarjetaMarca({
   marca: MarcaPercepcion | null;
   usadoEnNomina: boolean;
   confirmando: boolean;
-  onConfirmar: (m: MarcasPercepcion) => void;
+  onConfirmar: (m: MarcaPercepcionConfirmarIn) => void;
   onEditar: () => void;
 }) {
   const estado: EstadoFiscal = marca === null ? 'ausente' : marca.confirmado ? 'confirmado' : 'propuesto';
@@ -433,8 +504,17 @@ function TarjetaMarca({
           {/* Identificador fiscal en monoespaciada (doc 08). */}
           <code className="font-mono text-[13px] font-semibold bg-surface-alt rounded px-1.5 py-0.5 shrink-0">{tipo}</code>
           <div className="min-w-0">
-            <h5 className="m-0 text-[14px] font-semibold text-pretty">{descripcionTipoPercepcion(tipo)}</h5>
-            <p className="m-0 mt-0.5 text-[11px] text-text-muted">Catálogo <code className="font-mono">c_TipoPercepcion</code> del SAT</p>
+            <h5 className="m-0 text-[14px] font-semibold text-pretty">
+              {marca?.descripcion_sat ?? 'Tipo de percepción del catálogo del SAT'}
+            </h5>
+            <p className="m-0 mt-0.5 text-[11px] text-text-muted">
+              Catálogo <code className="font-mono">c_TipoPercepcion</code> del SAT
+              {/* La descripción la resuelve el servidor del mismo `satcfdi` que valida la
+                  escritura, y solo para las filas que existen: un tipo sin marcas capturadas
+                  llega en `claves_sin_marcas`, que trae la clave y nada más. */}
+              {marca !== null && marca.descripcion_sat === null && ' · el catálogo instalado no describe esta clave'}
+              {marca === null && ' · su descripción aparece en cuanto tenga marcas capturadas'}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -512,7 +592,7 @@ function TarjetaMarca({
 
           <div className="flex gap-2 flex-wrap">
             {!marca.confirmado && (
-              <Button type="button" disabled={confirmando} loading={confirmando} onClick={() => onConfirmar(soloMarcas(marca))}>
+              <Button type="button" disabled={confirmando} loading={confirmando} onClick={() => onConfirmar(cuerpoDeConfirmacion(marca))}>
                 Confirmar estas marcas
               </Button>
             )}
@@ -540,9 +620,14 @@ function DudaDeclarada({ texto }: { texto: string }) {
   );
 }
 
-/** Las seis marcas que calculan, sin la nota: es el cuerpo exacto del `confirmar` y lo que el
- * servidor compara para responder 409. */
-function soloMarcas(m: MarcaPercepcion): MarcasPercepcion {
+/** El cuerpo exacto del `confirmar`: las seis marcas que calculan (lo que el servidor compara para
+ * responder 409 `MARCAS_CAMBIARON`) **más la huella de la duda que se tenía delante**.
+ *
+ * La huella se **copia tal cual** de lo que devolvió el `GET`. No se calcula aquí a propósito: es
+ * opaca, y reproducir la normalización del servidor byte a byte para acabar difiriendo en un
+ * espacio produciría un 409 inexplicable. `null` es un valor legítimo — afirma "esta marca no
+ * traía duda", que es el caso de 5 de las 44. */
+function cuerpoDeConfirmacion(m: MarcaPercepcion): MarcaPercepcionConfirmarIn {
   return {
     es_ingreso_ordinario: m.es_ingreso_ordinario,
     base_exencion: m.base_exencion,
@@ -550,6 +635,7 @@ function soloMarcas(m: MarcaPercepcion): MarcasPercepcion {
     integra_sbc: m.integra_sbc,
     es_provisionable: m.es_provisionable,
     sujeto_a_tope_conjunto: m.sujeto_a_tope_conjunto,
+    nota_revision_hash: m.nota_revision_hash,
   };
 }
 
@@ -608,7 +694,11 @@ function ModalMarca({
     marca !== null &&
     (marca.es_ingreso_ordinario !== ordinario ||
       marca.base_exencion !== base ||
-      factorLegible(marca.factor_exencion ?? '') !== (base === 'NINGUNA' ? '' : factor.trim()) ||
+      // Se comparan **los dos lados normalizados**. Antes se comparaba el factor formateado
+      // ("100") contra la cadena cruda tecleada, así que escribir "100.00" avisaba de que la
+      // confirmación se iba a perder cuando el servidor compara `Decimal` y la conserva: un aviso
+      // que no se cumple enseña a ignorar los avisos.
+      factorNormalizado(marca.factor_exencion) !== (base === 'NINGUNA' ? null : factorNormalizado(factor)) ||
       marca.integra_sbc !== sbc ||
       marca.es_provisionable !== provisionable ||
       marca.sujeto_a_tope_conjunto !== tope);
@@ -654,7 +744,8 @@ function ModalMarca({
   return (
     <Modal titleId="titulo-marca-percepcion" onClose={onCerrar} ancho="amplio">
       <h3 id="titulo-marca-percepcion" className="m-0 text-base font-semibold text-pretty">
-        {marca ? 'Corregir' : 'Capturar'} las marcas de <code className="font-mono">{tipo}</code> · {descripcionTipoPercepcion(tipo)}
+        {marca ? 'Corregir' : 'Capturar'} las marcas de <code className="font-mono">{tipo}</code>
+        {marca?.descripcion_sat ? ` · ${marca.descripcion_sat}` : ''}
       </h3>
       <p className="m-0 text-[13px] text-text-muted text-pretty">
         Lo que guardes queda <strong>sin confirmar</strong>: se guarda como propuesta y no entra a ningún cálculo de

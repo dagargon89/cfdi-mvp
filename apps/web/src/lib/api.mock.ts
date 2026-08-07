@@ -8,8 +8,10 @@ import { firebaseConfigured, getFirebaseAuth } from './firebase';
 import { ApiError } from './api';
 import type {
   ApiClient,
+  AlertaVigencia,
   Automatizaciones,
   BaseExencion,
+  CatalogoPercepciones,
   BitacoraEntrada,
   CategoriaProvision,
   Comprobante,
@@ -28,6 +30,7 @@ import type {
   Job,
   MapeosEmpresa,
   MarcaPercepcion,
+  MarcaPercepcionConfirmarIn,
   MarcaPercepcionIn,
   MarcasPercepcion,
   MetadataPreview,
@@ -134,7 +137,11 @@ const db = {
     { clave: 'hora_sync', ejercicio_fiscal: 'vigente', valor: '02:00' },
   ] as DbConfig[],
   configSmtp: null as DbConfigSmtp | null,
-  automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true, limpieza: true } as Automatizaciones,
+  automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true, limpieza: true, vigencia_fiscal: true } as Automatizaciones,
+  // Lo que la tarea `revisar_vigencia_fiscal` dejó en `configuracion` en su último intento. El
+  // mock arranca con **el estado real de hoy**: falta el token de Banxico, así que la
+  // sincronización no corre y la alarma lo dice. No es una avería inventada para la demo.
+  sync_banxico_estado: { fallo: 'falta BANXICO_TOKEN', cuando: '2026-08-06 13:30:04' } as { fallo: string; cuando: string } | null,
   // Configuración fiscal (doc 05 §8bis). Hay **un parámetro en cada uno de los tres estados**
   // a propósito, para poder ver la pantalla completa sin backend: UMA_DIARIA 2025 confirmada,
   // UMA_DIARIA 2026 y el salario mínimo propuestos, y cuatro claves sin ningún valor.
@@ -148,6 +155,14 @@ const db = {
       clave: 'UMA_DIARIA', ejercicio: 2026, valor: '117.310000', vigencia_desde: '2026-02-01', vigencia_hasta: null,
       origen: 'SEMILLA', fuente: 'INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf',
       sincronizado_en: null, confirmado_por: null, confirmado_en: null,
+    },
+    {
+      // El caso que `claves_sin_valor` no puede contar y que la alarma existe para gritar: un
+      // valor **confirmado** que ya caducó. Está en verde en su tarjeta, calcula, y es del
+      // ejercicio pasado. Sin este renglón el mock no podría enseñar el motivo `CADUCADO`.
+      clave: 'SALARIO_MINIMO_ZLFN', ejercicio: 2025, valor: '419.880000', vigencia_desde: '2025-01-01', vigencia_hasta: null,
+      origen: 'SEMILLA', fuente: 'DOF 20-12-2024, resolución del CONASAMI (Zona Libre de la Frontera Norte 2025) — https://www.dof.gob.mx/',
+      sincronizado_en: null, confirmado_por: 'dgarcia@planjuarez.org', confirmado_en: '2025-01-08 11:05:00',
     },
     {
       clave: 'SALARIO_MINIMO_GENERAL', ejercicio: 2026, valor: '315.040000', vigencia_desde: '2026-01-01', vigencia_hasta: null,
@@ -368,6 +383,10 @@ function logBitacora(actor: string, accion: string, entidad: string, detalle: Re
 
 const CLAVES_PARAM_FISCAL = ['SALARIO_MINIMO_GENERAL', 'SALARIO_MINIMO_ZLFN', 'TIPO_CAMBIO_USD', 'UMA_ANUAL', 'UMA_DIARIA', 'UMA_MENSUAL'];
 const DECIMALES_MAXIMOS = 6;
+/** `Numeric(18,6)` = 18 dígitos en total, 6 decimales → 12 enteros. */
+const ENTEROS_MAXIMOS = 12;
+/** `Field(min_length=1, max_length=500)` del esquema `ParamFiscalGuardarIn`. */
+const FUENTE_MAXIMA = 500;
 
 /** Normaliza un importe en texto para poder compararlo sin pasar por `Number` (que es justo lo
  * que el contrato prohíbe): "117.31" y "117.310000" son el mismo valor. `null` si no es número. */
@@ -406,8 +425,20 @@ function exigeParamFiscalValido(clave: string, body: ParametroFiscalIn): string 
   if (decimales > DECIMALES_MAXIMOS) {
     throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`valor\` trae ${decimales} decimales y la columna guarda ${DECIMALES_MAXIMOS} (llegó ${valor}). Redondearlo en silencio guardaría una cifra distinta de la que revisaste; recórtalo tú a 6 decimales.`);
   }
+  // `Numeric(18,6)`: 12 dígitos enteros como máximo. Sin esta comprobación el mock aceptaba lo
+  // que el backend rechaza, y una pantalla probada solo contra el mock se diseña creyendo que ese
+  // 422 no existe (en la fase 1 un mock permisivo escondió un 403 hasta la verificación en vivo).
+  const enteros = valor.replace('-', '').split('.')[0].length;
+  if (enteros > ENTEROS_MAXIMOS) {
+    // Mismo texto que el servidor, palabra por palabra: la pantalla lo muestra tal cual, así que
+    // si el mock parafraseara, se diseñaría contra un mensaje que nadie va a leer nunca.
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`valor\` no cabe en la columna (llegó ${valor}; el máximo son ${ENTEROS_MAXIMOS} dígitos enteros). Sin este rechazo MySQL revienta a media escritura con un error que no dice qué renglón fue.`);
+  }
   if (!body.fuente.trim()) {
     throw new ApiError(422, 'CONFIGURACION_INVALIDA', '`fuente` no puede ir vacía: sin ella nadie puede revisar de dónde salió el valor.');
+  }
+  if (body.fuente.length > FUENTE_MAXIMA) {
+    throw new ApiError(422, 'DATOS_INVALIDOS', `fuente: String should have at most ${FUENTE_MAXIMA} characters`);
   }
   if (body.vigencia_hasta && body.vigencia_hasta < body.vigencia_desde) {
     throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`vigencia_hasta\` (${body.vigencia_hasta}) es anterior a \`vigencia_desde\` (${body.vigencia_desde}).`);
@@ -421,6 +452,100 @@ function seSolapan(aDesde: string, aHasta: string | null, bDesde: string, bHasta
   return (aHasta === null || aHasta >= bDesde) && (bHasta === null || bHasta >= aDesde);
 }
 
+// --- la alarma de vigencia (doc 05 §8bis) --------------------------------------------------------
+// Mismas reglas que `app/services/sincronizacion_fiscal.py`, incluida la distinción entre los tres
+// motivos que hablan de **un valor** y los tres que hablan de **la maquinaria**. Se recalcula en
+// cada `GET` porque depende de la fecha de hoy: una alerta cacheada de anoche diría "al día" el 1
+// de febrero por la mañana.
+//
+// `TIPO_CAMBIO_USD` queda **fuera** a propósito: cambia cada día hábil, no por decreto en fecha
+// fija, y meterlo dejaría la alarma permanentemente encendida (que es como se aprende a
+// ignorarla). Su ausencia total sigue siendo visible por `claves_sin_valor`.
+const FECHAS_DE_ACTUALIZACION: Record<string, [number, number]> = {
+  UMA_DIARIA: [2, 1],
+  UMA_MENSUAL: [2, 1],
+  UMA_ANUAL: [2, 1],
+  SALARIO_MINIMO_GENERAL: [1, 1],
+  SALARIO_MINIMO_ZLFN: [1, 1],
+};
+
+/** La última fecha de actualización de la clave que **ya pasó** (hoy incluido). En enero de 2026
+ * la de la UMA es el 1 de febrero de *2025*: el valor de febrero de 2025 sigue vigente y no hay
+ * nada que reclamar. Ese matiz separa "estás desactualizado" de "todavía no toca". */
+function fechaDeActualizacionAplicable(clave: string, hoy: string): string | null {
+  const calendario = FECHAS_DE_ACTUALIZACION[clave];
+  if (!calendario) return null;
+  const [mes, dia] = calendario;
+  const anio = Number(hoy.slice(0, 4));
+  const delAnio = `${anio}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+  return delAnio <= hoy ? delAnio : `${anio - 1}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+
+function alertaDeClave(clave: string, tramos: DbParamFiscal[], hoy: string): AlertaVigencia | null {
+  const esperada = fechaDeActualizacionAplicable(clave, hoy);
+  if (esperada === null) return null;
+  if (tramos.length === 0) {
+    return {
+      clave, motivo: 'AUSENTE', vigencia_desde: null, fecha_esperada: esperada,
+      detalle: `No hay ningún valor capturado para \`${clave}\`, y su fecha de actualización (${esperada}) ya pasó. Captúralo desde Configuración → Fiscal con su fuente oficial; mientras tanto los informes que dependen de él salen degradados.`,
+    };
+  }
+  const masReciente = (lista: DbParamFiscal[]) =>
+    lista.reduce<DbParamFiscal | null>((a, b) => (a === null || b.vigencia_desde > a.vigencia_desde ? b : a), null);
+  const confirmado = masReciente(tramos.filter((t) => t.confirmado_en !== null));
+  const propuesto = masReciente(tramos.filter((t) => t.confirmado_en === null));
+  const alDia = confirmado !== null && confirmado.vigencia_desde >= esperada;
+
+  if (!alDia) {
+    // Hay una propuesta que **sí** cubre el periodo: confirmarla resuelve el problema, y eso es
+    // un clic. Distinguirlo de "ve a capturar" es lo que hace la alarma accionable.
+    if (propuesto !== null && propuesto.vigencia_desde >= esperada) {
+      return {
+        clave, motivo: 'SIN_CONFIRMAR', vigencia_desde: propuesto.vigencia_desde, fecha_esperada: esperada,
+        detalle: `\`${clave}\` tiene un valor propuesto (${propuesto.valor}, vigente desde ${propuesto.vigencia_desde}, fuente: ${propuesto.fuente}) esperando confirmación. Hasta que alguien lo revise y lo confirme no entra a ningún cálculo.`,
+      };
+    }
+    // Lo único que hay es de antes de la fecha de actualización. Aunque esté sin confirmar, el
+    // motivo es la caducidad: confirmar una propuesta de 2025 no arregla que falte la de 2026.
+    const actual = confirmado ?? propuesto;
+    if (!actual) return null;
+    const estado = confirmado !== null ? 'confirmado' : 'propuesto y sin confirmar';
+    return {
+      clave, motivo: 'CADUCADO', vigencia_desde: actual.vigencia_desde, fecha_esperada: esperada,
+      detalle: `El valor más reciente de \`${clave}\` (${actual.valor}, ${estado}) arranca el ${actual.vigencia_desde}, antes de la fecha de actualización ${esperada}, que ya pasó. Busca el valor del ejercicio en curso en su publicación oficial y captúralo cerrando el tramo anterior.`,
+    };
+  }
+
+  // Al día, pero encima hay una propuesta más nueva que nadie ha mirado (una fe de erratas, otra
+  // semilla, una corrección). Sin este aviso quedaría invisible para siempre.
+  if (propuesto !== null && confirmado !== null && propuesto.vigencia_desde > confirmado.vigencia_desde) {
+    return {
+      clave, motivo: 'SIN_CONFIRMAR', vigencia_desde: propuesto.vigencia_desde, fecha_esperada: esperada,
+      detalle: `\`${clave}\` está al día, pero hay un tramo más reciente propuesto (${propuesto.valor}, desde ${propuesto.vigencia_desde}, fuente: ${propuesto.fuente}) esperando confirmación. Mientras no se confirme, los cálculos siguen usando el anterior.`,
+    };
+  }
+  return null;
+}
+
+function alertasDeVigenciaMock(): AlertaVigencia[] {
+  const hoy = stamp().slice(0, 10);
+  const alertas: AlertaVigencia[] = [];
+  for (const clave of Object.keys(FECHAS_DE_ACTUALIZACION).sort()) {
+    const alerta = alertaDeClave(clave, db.param_fiscal.filter((p) => p.clave === clave), hoy);
+    if (alerta) alertas.push(alerta);
+  }
+  // Maquinaria: el mock no tiene `satcfdi` que leer (su catálogo siempre es legible y su versión
+  // no existe), pero sí reproduce el estado real de hoy — la sincronización con Banxico falla
+  // porque falta el token, que nadie ha tramitado. Es el estado diseñado, no una avería.
+  if (db.sync_banxico_estado) {
+    alertas.push({
+      clave: 'SINCRONIZACION_BANXICO', motivo: 'SINCRONIZACION_FALLIDA', vigencia_desde: null, fecha_esperada: null,
+      detalle: `El último intento de sincronizar el tipo de cambio con Banxico falló (${db.sync_banxico_estado.fallo}, ${db.sync_banxico_estado.cuando}). Mientras dure, \`TIPO_CAMBIO_USD\` no se actualiza solo y hay que capturarlo a mano.`,
+    });
+  }
+  return alertas;
+}
+
 function paramASalida(fila: DbParamFiscal): ParametroFiscal {
   return {
     clave: fila.clave, ejercicio: fila.ejercicio, valor: fila.valor,
@@ -431,15 +556,63 @@ function paramASalida(fila: DbParamFiscal): ParametroFiscal {
 }
 
 // --- marcas del art. 93: también las reglas reales ---------------------------------------------
-// Las 44 claves de `c_TipoPercepcion` (la misma lista blanca que `exige_tipo_percepcion_conocido`
-// comprueba en el servidor). Sin ella el mock aceptaría `150` por `015` y la pantalla se diseñaría
-// creyendo que el backend también lo acepta.
-const TIPOS_PERCEPCION_MOCK = [
-  '001', '002', '003', '004', '005', '006', '009', '010', '011', '012', '013', '014', '015',
-  '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031',
-  '032', '033', '034', '035', '036', '037', '038', '039', '044', '045', '046', '047', '048',
-  '049', '050', '051', '052', '053',
-];
+// El catálogo `c_TipoPercepcion` del SAT — las 44 claves con su descripción oficial.
+//
+// **Esto es el doble de `satcfdi`, no una copia del catálogo en el cliente.** Vive aquí porque
+// aquí es donde el mock hace de servidor: es la misma lista blanca que
+// `exige_tipo_percepcion_conocido` comprueba en el backend (sin ella el mock aceptaría `150` por
+// `015` y la pantalla se diseñaría creyendo que el backend también lo acepta) y la misma fuente de
+// la que sale `descripcion_sat` y `claves_sin_marcas`. La pantalla ya no lleva ninguna copia: la
+// tenía en `features/admin/catalogoTipoPercepcion.ts` —borrada— y desde ahí decidía qué tarjetas
+// existen, con lo que el denominador del "0 de 44" se quedaba viejo al subir la versión de
+// `satcfdi`.
+const CATALOGO_TIPO_PERCEPCION_MOCK: Record<string, string> = {
+  '001': 'Sueldos, Salarios Rayas y Jornales',
+  '002': 'Gratificación Anual (Aguinaldo)',
+  '003': 'Participación de los Trabajadores en las Utilidades PTU',
+  '004': 'Reembolso de Gastos Médicos Dentales y Hospitalarios',
+  '005': 'Fondo de Ahorro',
+  '006': 'Caja de ahorro',
+  '009': 'Contribuciones a Cargo del Trabajador Pagadas por el Patrón',
+  '010': 'Premios por puntualidad',
+  '011': 'Prima de Seguro de vida',
+  '012': 'Seguro de Gastos Médicos Mayores',
+  '013': 'Cuotas Sindicales Pagadas por el Patrón',
+  '014': 'Subsidios por incapacidad',
+  '015': 'Becas para trabajadores y/o hijos',
+  '019': 'Horas extra',
+  '020': 'Prima dominical',
+  '021': 'Prima vacacional',
+  '022': 'Prima por antigüedad',
+  '023': 'Pagos por separación',
+  '024': 'Seguro de retiro',
+  '025': 'Indemnizaciones',
+  '026': 'Reembolso por funeral',
+  '027': 'Cuotas de seguridad social pagadas por el patrón',
+  '028': 'Comisiones',
+  '029': 'Vales de despensa',
+  '030': 'Vales de restaurante',
+  '031': 'Vales de gasolina',
+  '032': 'Vales de ropa',
+  '033': 'Ayuda para renta',
+  '034': 'Ayuda para artículos escolares',
+  '035': 'Ayuda para anteojos',
+  '036': 'Ayuda para transporte',
+  '037': 'Ayuda para gastos de funeral',
+  '038': 'Otros ingresos por salarios',
+  '039': 'Jubilaciones, pensiones o haberes de retiro',
+  '044': 'Jubilaciones, pensiones o haberes de retiro en parcialidades',
+  '045': 'Ingresos en acciones o títulos valor que representan bienes',
+  '046': 'Ingresos asimilados a salarios',
+  '047': 'Alimentación',
+  '048': 'Habitación',
+  '049': 'Premios por asistencia',
+  '050': 'Viáticos',
+  '051': 'Pagos por gratificaciones, primas, compensaciones, recompensas u otros a extrabajadores derivados de jubilación en parcialidades',
+  '052': 'Pagos que se realicen a extrabajadores que obtengan una jubilación en parcialidades derivados de la ejecución de resoluciones judicial o de un laudo',
+  '053': 'Pagos que se realicen a extrabajadores que obtengan una jubilación en una sola exhibición derivados de la ejecución de resoluciones judicial o de un laudo',
+};
+const TIPOS_PERCEPCION_MOCK = Object.keys(CATALOGO_TIPO_PERCEPCION_MOCK);
 const DECIMALES_FACTOR = 4;
 
 function exigeTipoPercepcionMock(tipo: string): void {
@@ -518,9 +691,37 @@ function normalizaNota(nota: string | null): string | null {
   return nota === null ? null : nota.trim() || null;
 }
 
+/** La huella de la duda declarada. El servidor real usa SHA-256; aquí basta con que sea
+ * **estable, opaca y distinta para textos distintos**, porque el contrato dice justo eso: el
+ * cliente la copia del `GET` y la devuelve tal cual, sin calcularla ni interpretarla. Si el mock
+ * emitiera algo que el cliente pudiera reproducir, la pantalla se diseñaría contra una garantía
+ * que el backend real no da. */
+function huellaDeNotaMock(nota: string | null): string | null {
+  if (nota === null) return null;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < nota.length; i++) {
+    h1 = Math.imul(h1 ^ nota.charCodeAt(i), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + nota.charCodeAt(i), 0x85ebca6b) >>> 0;
+  }
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}${nota.length.toString(16)}`;
+}
+
+/** `_duda_no_vista` del backend, **asimétrica igual que `dudaNuevaMock`**: si la marca tiene hoy
+ * una duda y la huella que llegó no es la suya, quien confirma no la tenía delante → 409. Si la
+ * duda **se resolvió** entre la pantalla y el clic, pasa: esa revisión se hizo contra *más*
+ * información de la que hay hoy, y castigarla enseñaría a la gente a no resolver dudas. */
+function dudaNoVistaMock(fila: DbMarcaPercepcion, huellaEnviada: string | null): boolean {
+  const actual = huellaDeNotaMock(fila.nota_revision);
+  return actual !== null && actual !== huellaEnviada;
+}
+
 function marcaASalida(fila: DbMarcaPercepcion): MarcaPercepcion {
   return {
     tipo_percepcion: fila.tipo_percepcion,
+    // Del mismo catálogo con el que se valida la escritura, igual que en el servidor.
+    descripcion_sat: CATALOGO_TIPO_PERCEPCION_MOCK[fila.tipo_percepcion] ?? null,
+    nota_revision_hash: huellaDeNotaMock(fila.nota_revision),
     es_ingreso_ordinario: fila.es_ingreso_ordinario,
     base_exencion: fila.base_exencion,
     factor_exencion: fila.factor_exencion,
@@ -959,7 +1160,11 @@ export const apiMock: ApiClient = {
       .sort((a, b) => a.clave.localeCompare(b.clave) || a.vigencia_desde.localeCompare(b.vigencia_desde))
       .map(paramASalida);
     const conValor = new Set(parametros.map((p) => p.clave));
-    return { parametros, claves_sin_valor: CLAVES_PARAM_FISCAL.filter((c) => !conValor.has(c)) };
+    return {
+      parametros,
+      claves_sin_valor: CLAVES_PARAM_FISCAL.filter((c) => !conValor.has(c)),
+      alertas: alertasDeVigenciaMock(),
+    };
   },
 
   async capturarParametroFiscal(clave, input): Promise<ParametroFiscal> {
@@ -1016,11 +1221,15 @@ export const apiMock: ApiClient = {
     return paramASalida(fila);
   },
 
-  async listarMarcasPercepcion(): Promise<MarcaPercepcion[]> {
+  async listarMarcasPercepcion(): Promise<CatalogoPercepciones> {
     requireAdminMock('ver las marcas de exención');
-    return [...db.catalogo_percepcion_marca]
+    const marcas = [...db.catalogo_percepcion_marca]
       .sort((a, b) => a.tipo_percepcion.localeCompare(b.tipo_percepcion))
       .map(marcaASalida);
+    // El resto del catálogo del SAT: el tercer estado ("sin marcas capturadas") y, sobre todo, el
+    // **denominador autoritativo** del "0 de 44". Lo pone el servidor, no el cliente.
+    const conMarcas = new Set(marcas.map((m) => m.tipo_percepcion));
+    return { marcas, claves_sin_marcas: TIPOS_PERCEPCION_MOCK.filter((t) => !conMarcas.has(t)) };
   },
 
   async guardarMarcaPercepcion(tipo, input: MarcaPercepcionIn): Promise<MarcaPercepcion> {
@@ -1058,12 +1267,23 @@ export const apiMock: ApiClient = {
     return marcaASalida(fila);
   },
 
-  async confirmarMarcaPercepcion(tipo, input: MarcasPercepcion): Promise<MarcaPercepcion> {
+  async confirmarMarcaPercepcion(tipo, input: MarcaPercepcionConfirmarIn): Promise<MarcaPercepcion> {
     const u = requireAdminMock('confirmar las marcas de un tipo de percepción');
     exigeTipoPercepcionMock(tipo);
     exigeMarcasValidas(input, false);
+    // Sin default, igual que `sujeto_a_tope_conjunto`: este es el cuerpo que activa un valor
+    // fiscal, y omitir el campo sería confirmar sin decir qué duda se tenía delante. `null` sí es
+    // válido — afirma "la marca que revisé no traía duda".
+    if (!('nota_revision_hash' in input)) {
+      throw new ApiError(422, 'DATOS_INVALIDOS', 'nota_revision_hash: Field required');
+    }
     const fila = db.catalogo_percepcion_marca.find((m) => m.tipo_percepcion === tipo);
     if (!fila) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
+    // Antes que las marcas: si apareció una duda, ese es el diagnóstico útil aunque además hayan
+    // cambiado las marcas — "mira la advertencia nueva" dice más que "algo cambió".
+    if (dudaNoVistaMock(fila, input.nota_revision_hash)) {
+      throw new ApiError(409, 'DUDA_NO_VISTA', `El tipo ${tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste (la agregó otra persona o una recarga de semillas). Vuelve a cargar la pantalla, lee la duda y confirma después: confirmar es responder por lo que se miró.`);
+    }
     if (marcasDifieren(fila, input)) {
       throw new ApiError(409, 'MARCAS_CAMBIARON', `Las marcas del tipo ${tipo} cambiaron mientras las revisabas. Vuelve a cargar la pantalla y revísalas otra vez antes de confirmarlas.`);
     }

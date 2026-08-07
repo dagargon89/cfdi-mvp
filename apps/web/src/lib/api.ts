@@ -115,6 +115,12 @@ export interface Automatizaciones {
   lista_69b: boolean;
   re_verificar: boolean;
   limpieza: boolean;
+  /** Añadido post-freeze (2026-08-06, informes fase 3): la tarea diaria `revisar_vigencia_fiscal`
+   * —la alarma de calendario de doc 05 §8bis y la sincronización del tipo de cambio con Banxico—.
+   * Es el único interruptor con default en el cuerpo del `PUT` del backend (llegó después del
+   * contrato congelado), pero la pantalla manda siempre los cinco: `{...autos, [clave]: valor}`
+   * sobre lo que devolvió el `GET`, para que el default no reencienda lo que alguien apagó. */
+  vigencia_fiscal: boolean;
 }
 
 /** Añadido tras el freeze (2026-07-28) — RF-NOT-01: correo saliente configurable desde la UI
@@ -182,10 +188,45 @@ export interface ParametroFiscal {
   confirmado_en: string | null;
 }
 
-/** `claves_sin_valor` es el tercer estado: claves conocidas de las que no hay **ni propuesta**. */
+/** Por qué una alerta necesita seis motivos y no tres (doc 05 §8bis).
+ *
+ * Los tres primeros describen **un valor** y piden acciones distintas: `AUSENTE` = hay que ir a
+ * capturarlo; `SIN_CONFIRMAR` = ya hay una propuesta y es **un clic**; `CADUCADO` = lo que hay es
+ * de un ejercicio anterior a una fecha de actualización que ya pasó (la UMA cambia el 1 de febrero
+ * y el salario mínimo el 1 de enero), así que confirmar lo que hay no lo arregla.
+ *
+ * Los tres últimos no hablan de ningún valor sino de **la maquinaria**: el catálogo de `satcfdi`
+ * no se puede leer, la versión instalada de la librería lleva más de un año, o el último intento
+ * de sincronizar con Banxico falló. Presentarlas como si fueran valores haría que la alerta
+ * mintiera —un catálogo que no abre no es un valor "ausente" ni pide capturar nada—, y por eso la
+ * pantalla las separa en dos bloques. */
+export type MotivoAlertaVigencia =
+  | 'AUSENTE'
+  | 'SIN_CONFIRMAR'
+  | 'CADUCADO'
+  | 'CATALOGO_ILEGIBLE'
+  | 'LIBRERIA_DESACTUALIZADA'
+  | 'SINCRONIZACION_FALLIDA';
+
+/** Una alerta de la alarma de vigencia. Se recalcula en cada `GET` (depende de la fecha de hoy) y
+ * no hace ninguna llamada de red. `detalle` es **la frase lista para mostrar**: `motivo` es una
+ * etiqueta de máquina y las de maquinaria no se explican solas. `vigencia_desde` y
+ * `fecha_esperada` son nulas en las de maquinaria y `clave` es entonces una clave sintética
+ * (`CATALOGO_SAT_PERCEPCIONES`, `VERSION_SATCFDI`, `SINCRONIZACION_BANXICO`). */
+export interface AlertaVigencia {
+  clave: string;
+  motivo: MotivoAlertaVigencia;
+  vigencia_desde: string | null;
+  fecha_esperada: string | null;
+  detalle: string;
+}
+
+/** `claves_sin_valor` es el tercer estado: claves conocidas de las que no hay **ni propuesta**.
+ * `alertas` es lo que `claves_sin_valor` **no puede decir: que un valor confirmado ya caducó**. */
 export interface ConfiguracionFiscal {
   parametros: ParametroFiscal[];
   claves_sin_valor: string[];
+  alertas: AlertaVigencia[];
 }
 
 /** Captura o corrección manual. Guarda con `origen: MANUAL` y **sin** confirmar. */
@@ -235,16 +276,62 @@ export interface MarcaPercepcionIn extends MarcasPercepcion {
   nota_revision: string | null;
 }
 
+/** Cuerpo del `POST .../confirmar`: las seis marcas **más la huella de la duda que se tenía
+ * delante**.
+ *
+ * `nota_revision_hash` es un **valor opaco que emite el servidor** (`MarcaPercepcion.
+ * nota_revision_hash` del `GET`) y que el cliente devuelve **tal cual**: nunca se calcula, ni se
+ * compara, ni se interpreta aquí. Si el cliente lo calculara tendría que reproducir byte a byte la
+ * normalización del servidor, y cualquier discrepancia sería un 409 inexplicable.
+ *
+ * Cierra la forma **concurrente** de confirmar a ciegas: A abre `010` sin duda, B le agrega una
+ * por `PUT`, A pulsa Confirmar — las seis marcas no cambiaron, así que antes eso daba 200 y la
+ * marca quedaba confirmada con una duda que nadie vio. Ahora es **409 `DUDA_NO_VISTA`**.
+ *
+ * La comprobación es **asimétrica** a propósito, igual que la del `PUT`: si la duda aparece o
+ * cambia, 409; si se **resolvió** entre que se pintó la pantalla y el clic, la confirmación pasa
+ * —quien revisó lo hizo contra más información de la que hay hoy—.
+ *
+ * **Sin default** (422 si se omite): `null` no es una omisión, afirma "la marca que revisé no
+ * tenía duda declarada", y es lo que mandan las 5 de las 44 que no traen ninguna. */
+export interface MarcaPercepcionConfirmarIn extends MarcasPercepcion {
+  nota_revision_hash: string | null;
+}
+
 /** Una fila de `catalogo_percepcion_marca`. `nota_revision` es **la duda declarada** de ese tipo:
  * qué la genera y qué habría que verificar antes de confirmarlo (39 de las 44 marcas sembradas
  * traen una). Viaja aquí para que se vea al lado del botón de confirmar — sin ella, confirmar
  * sería a ciegas, que es justo lo que el invariante existe para impedir. */
 export interface MarcaPercepcion extends MarcasPercepcion {
   tipo_percepcion: string;
+  /** La descripción de `c_TipoPercepcion` ("Becas para trabajadores y/o hijos"), resuelta del
+   * **mismo** `satcfdi` que valida la escritura. Nula si la clave no está en la versión instalada
+   * o si el catálogo no se pudo leer (leer falla abierto; escribir no: 503). */
+  descripcion_sat: string | null;
   nota_revision: string | null;
+  /** Huella **opaca** de `nota_revision`, para devolverla tal cual al confirmar. Ver
+   * `MarcaPercepcionConfirmarIn`. Nula cuando no hay duda declarada. */
+  nota_revision_hash: string | null;
   confirmado: boolean;
   confirmado_por: string | null;
   confirmado_en: string | null;
+}
+
+/** El `GET` de percepciones devuelve un **objeto, no una lista**.
+ *
+ * `claves_sin_marcas` son las claves de `c_TipoPercepcion` que todavía no tienen ninguna marca
+ * capturada, y espeja `claves_sin_valor` de `/fiscal`. Existe para que **el denominador sea
+ * autoritativo**: antes el cliente llevaba su propia copia del catálogo del SAT, y esa copia no
+ * solo describía —decidía qué tarjetas existen, y por tanto el "0 de 44" y el tercer estado—. Al
+ * subir la versión de `satcfdi` la lista del servidor crecía y la del cliente no. Con este campo
+ * esa copia sobra y se borró (`catalogoTipoPercepcion.ts`).
+ *
+ * Llega **vacía** si el catálogo embebido no se puede leer (misma lectura que `descripcion_sat`,
+ * falla abierto); la señal autoritativa de esa avería es la alerta `CATALOGO_ILEGIBLE` de
+ * `/fiscal`, que la misma pantalla ya consulta. */
+export interface CatalogoPercepciones {
+  marcas: MarcaPercepcion[];
+  claves_sin_marcas: string[];
 }
 
 export type ZonaSalarial = 'GENERAL' | 'ZLFN';
@@ -418,13 +505,17 @@ export interface ApiClient {
    * `TIPO_PERCEPCION_INVALIDO`** si no existe, y **503 `CATALOGO_SAT_ILEGIBLE`** —transitorio— si
    * el catálogo no se puede leer, en el `PUT` y en el `confirmar`: no se escribe sin poder
    * validar. */
-  listarMarcasPercepcion(): Promise<MarcaPercepcion[]>;
+  /** Devuelve `{marcas, claves_sin_marcas}` — un objeto, no una lista: el denominador del
+   * "0 de 44" lo pone el servidor. */
+  listarMarcasPercepcion(): Promise<CatalogoPercepciones>;
   /** Captura o corrige las marcas de un tipo. **No confirma**, y limpia la confirmación anterior
    * si alguna de las seis marcas cambió o si la duda declarada apareció o cambió. */
   guardarMarcaPercepcion(tipo: string, input: MarcaPercepcionIn): Promise<MarcaPercepcion>;
-  /** Confirma **las marcas que se están confirmando** (las seis, sin la nota): si no coinciden con
-   * lo almacenado el servidor responde 409 `MARCAS_CAMBIARON`. Idempotente. */
-  confirmarMarcaPercepcion(tipo: string, input: MarcasPercepcion): Promise<MarcaPercepcion>;
+  /** Confirma **las marcas que se están confirmando** (las seis, sin el texto de la nota) **más la
+   * huella de la duda que se tenía delante**: 409 `MARCAS_CAMBIARON` si las marcas no coinciden
+   * con lo almacenado, 409 `DUDA_NO_VISTA` si la duda de hoy no es la que el cliente vio.
+   * Idempotente. */
+  confirmarMarcaPercepcion(tipo: string, input: MarcaPercepcionConfirmarIn): Promise<MarcaPercepcion>;
   obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
   guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
   obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
