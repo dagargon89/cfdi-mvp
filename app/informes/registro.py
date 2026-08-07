@@ -16,6 +16,7 @@ from app.informes import (
     b05_acumulado_anual,
     b06_centro_costo,
     b07_prestamos,
+    b08_pasivo_laboral,
     b10_validacion_receptor,
 )
 from app.informes.base import DefinicionInforme
@@ -28,6 +29,7 @@ _MODULOS: tuple[Any, ...] = (
     b05_acumulado_anual,
     b06_centro_costo,
     b07_prestamos,
+    b08_pasivo_laboral,
     b10_validacion_receptor,
 )
 

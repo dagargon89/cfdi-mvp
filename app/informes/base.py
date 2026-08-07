@@ -64,6 +64,21 @@ class ResultadoInforme:
     banderas: list[Bandera] = field(default_factory=list)
     diccionario: list[EntradaDiccionario] = field(default_factory=list)
     aviso: str | None = None
+    notas: list[str] = field(default_factory=list)
+    """Advertencias **permanentes** sobre cómo hay que leer las cifras del informe, que
+    `app.informes.excel` rotula en la hoja `Parámetros` del libro.
+
+    No es un `aviso` con otro nombre y la diferencia importa: `aviso` explica **esta** corrida
+    (no hay filas, falta configurar algo) y desaparece cuando el informe sale bien; una nota
+    vale siempre y sobre todo cuando el informe sale bien, porque califica los números que sí
+    se produjeron. Tampoco es una `Bandera`: una bandera es un hallazgo accionable y la hoja
+    `Banderas` se filtra buscando qué arreglar, así que una entrada que aparece en todas las
+    corridas y que nadie puede quitar solo enseña a ignorar esa hoja.
+
+    Existe para B-08 (`b08_pasivo_laboral._NOTAS`): su cifra puede acabar reconocida en los
+    estados financieros y **tiene** que llegar rotulada como estimación con base en CFDI y no
+    como cálculo actuarial, en el libro y no solo en el docstring del módulo. Quien recibe el
+    Excel por correo no lee el código."""
 
 
 @dataclass(slots=True)

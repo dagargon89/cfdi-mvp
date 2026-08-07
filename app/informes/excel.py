@@ -114,6 +114,11 @@ def _escribir_parametros(wb: Workbook, resultado: ResultadoInforme, ctx: Context
     ws.append(["Filas", len(resultado.filas)])
     if resultado.aviso:
         ws.append(["Aviso", resultado.aviso])
+    # Las notas van ARRIBA del bloque de parámetros y no al final de la hoja: son advertencias
+    # sobre cómo leer las cifras (B-08.R3: "esto es una estimación con base en CFDI, no un
+    # cálculo actuarial") y tienen que verse sin desplazarse por la lista de parámetros.
+    for nota in resultado.notas:
+        ws.append(["Nota", nota])
     ws.append([])
     ws.append(["Parámetro", "Valor"])
     for clave, valor in ctx.parametros.items():
