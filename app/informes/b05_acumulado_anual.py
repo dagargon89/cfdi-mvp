@@ -100,12 +100,50 @@ mismo periodo sin advertencia; y dentro de una misma fila de este informe "Total
 viene del encabezado y "Total gravado"/"Total exento" de los nodos, así que la fila no cuadraba
 consigo misma en silencio.
 
-**Alcance.** Se implementan las columnas 1–10 y 12–23 del documento fuente. La columna 11
-("Gravado ordinario") necesita la marca `es_ingreso_ordinario` de una tabla de configuración
-de la fase 3 (§3.1), y las columnas 24–26 (ISR anual teórico, diferencia, sujeto a cálculo
-anual) necesitan la tarifa de ISR — ninguna de las dos existe todavía. No se declaran columnas
-ni parámetros para ellas: una columna vacía en un papel de trabajo fiscal es peor que su
-ausencia, porque quien lo revise no puede distinguir "cero" de "no calculado".
+**B-05.R4 — La columna 11, "Gravado ordinario", y por qué no es "Total gravado".** Es
+`Σ importe_gravado` de las percepciones cuyo tipo trae `es_ingreso_ordinario = true` en
+`catalogo_percepcion_marca` (§3.1), y es la base del cálculo anual del ISR del artículo 97.
+Los ingresos por **separación** (art. 95) y por **jubilación** (art. 96) tienen régimen
+fiscal propio y **no se acumulan** al ordinario: sumarlos —que es lo que hace "Total
+gravado"— sobreestima el ISR anual del trabajador. Cuáles son esos tipos **lo dice el dato**,
+no el programa: son los que la marca declara con `es_ingreso_ordinario = false` (ocho en la
+semilla actual). Escribir aquí la lista sería una lista fiscal codificada en el programa, que
+es lo que prohíbe el §2.12, y dejaría de valer en cuanto una reforma moviera un tipo de lado.
+
+**La columna exige marcas CONFIRMADAS, y es una decisión, no una herencia.** `es_ingreso_ordinario`
+no es un importe, así que se podría argumentar que basta con que la marca exista. No basta, por
+dos razones. (1) El **cargador ya trata un cambio de `es_ingreso_ordinario` como invalidante**: si
+una recarga de la semilla cambia esa bandera, limpia `confirmado_por`/`confirmado_en` de la fila
+(ver `configuracion_fiscal.cargar_desde_yaml_detallado`). Si la lectura ignorara la confirmación,
+esa invalidación no tendría ningún efecto sobre esta columna: el sistema declararía que el dato
+volvió a la cola de revisión y seguiría calculando con él. (2) El daño de equivocarse es del
+mismo orden que el de un factor de exención mal capturado —una base de ISR anual inflada que
+viaja a la constancia de percepciones y de ahí a la declaración del trabajador—, y las marcas son
+44 derivaciones hechas a mano, el dato más propenso a error de la fase. Mismo criterio que B-03,
+que consume el mismo catálogo por `marcas_de_percepcion` (solo confirmadas).
+
+**Cómo degrada, y por qué nunca sale cero.** La columna vale `None` en **todas** las filas
+mientras no haya marca confirmada para **todos** los tipos de percepción presentes en el
+acumulado, con **una** bandera por causa y ámbito `informe` (no una por fila: es la lección del
+colapso de banderas de la fase 2):
+
+- **Confirmado para todos los tipos** → calcula.
+- **Propuesto sin confirmar** → `MARCAS_SIN_CONFIRMAR`, citando los tipos y lo que dice cada
+  propuesta: el arreglo es un clic.
+- **Ausente** → `FALTA_CATALOGO_DE_MARCAS`, diciendo qué capturar.
+
+Un cero ahí diría "este empleado no tuvo ingreso ordinario", que es una afirmación fiscal falsa
+sobre alguien que cobró todo el año. Y se exige el catálogo **completo** para los tipos presentes
+—no se suma "lo que se pueda"— porque una suma parcial no se distingue de una completa al mirar
+la celda: sería una base de ISR corta con apariencia de correcta, el error espejo del que R4
+existe para evitar.
+
+**Alcance.** Se implementan las columnas 1–23 del documento fuente. Las columnas 24–26 (ISR anual
+teórico, diferencia, sujeto a cálculo anual) necesitan la tarifa de ISR, que no existe todavía. No
+se declaran columnas ni parámetros para ellas: una columna vacía en un papel de trabajo fiscal es
+peor que su ausencia cuando **nunca** puede llenarse, porque quien lo revise no puede distinguir
+"cero" de "no calculado". La 11 sí se declara porque su vacío es informado: cada corrida dice, por
+bandera, exactamente qué falta para llenarla.
 
 **Sin `round()` ni `quantize()`** (el redondeo lo hace `app.informes.excel` al escribir la
 celda). `Decimal` de punta a punta.
@@ -130,6 +168,7 @@ from app.models.comprobante import Comprobante
 from app.models.empresa import Empresa
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
+from app.services import configuracion_fiscal as cfg
 
 CLAVE = "B-05"
 NOMBRE = "Acumulado anual por empleado"
@@ -214,7 +253,12 @@ _COLUMNAS_UNO_A_DIEZ: tuple[tuple[str, str, bool], ...] = (
     ("Total exento", "monto", False),
 )
 
-# Columnas 12 a 23 (la 11 queda fuera de alcance: ver docstring del módulo).
+# Columna 11 (B-05.R4). Va aquí, entre "Total exento" y "Ingreso por separación", en el mismo
+# orden del documento fuente: al lado de los dos ingresos de régimen propio que precisamente
+# **no** entran en ella.
+_COLUMNA_ONCE: tuple[tuple[str, str, bool], ...] = (("Gravado ordinario", "monto", False),)
+
+# Columnas 12 a 23.
 _COLUMNAS_DOCE_A_VEINTITRES: tuple[tuple[str, str, bool], ...] = (
     ("Ingreso por separación", "monto", False),
     ("Ingreso por jubilación", "monto", False),
@@ -230,7 +274,7 @@ _COLUMNAS_DOCE_A_VEINTITRES: tuple[tuple[str, str, bool], ...] = (
     ("SDI promedio ponderado", "monto", False),
 )
 
-_COLUMNAS: tuple[tuple[str, str, bool], ...] = _COLUMNAS_UNO_A_DIEZ + _COLUMNAS_DOCE_A_VEINTITRES
+_COLUMNAS: tuple[tuple[str, str, bool], ...] = _COLUMNAS_UNO_A_DIEZ + _COLUMNA_ONCE + _COLUMNAS_DOCE_A_VEINTITRES
 
 
 def _columnas() -> list[Columna]:
@@ -283,6 +327,9 @@ class _Acumulador:
     total_percepciones: Decimal = _CERO
     total_gravado: Decimal = _CERO
     total_exento: Decimal = _CERO
+    # B-05.R4. Se acumula siempre, y se **imprime** solo si el catálogo de marcas alcanzó para
+    # clasificar todos los tipos presentes (`_Ordinario.calculable`); si no, la celda va vacía.
+    gravado_ordinario: Decimal = _CERO
     total_separacion: Decimal = _CERO
     total_jubilacion: Decimal = _CERO
     isr_retenido: Decimal = _CERO
@@ -322,27 +369,53 @@ async def _sustituidos(db: AsyncSession, ids_universo: list[int]) -> set[str]:
     return {str(uuid_relacionado) for uuid_relacionado in filas.scalars().all()}
 
 
-async def _sumas_por_comprobante(db: AsyncSession, ids: list[int]) -> dict[int, dict[str, Decimal]]:
+@dataclass(frozen=True, slots=True)
+class _Sumas:
+    """Lo que devuelve `_sumas_por_comprobante`, en dos vistas del mismo agregado.
+
+    `por_comprobante` es lo que consumen las columnas de totales; `gravado_por_tipo` es el
+    mismo gravado desglosado por `tipo_percepcion`, que es lo que la columna 11 necesita para
+    quedarse solo con los tipos ordinarios (B-05.R4). Sale del **mismo** `GROUP BY`, no de una
+    segunda consulta.
+    """
+
+    por_comprobante: dict[int, dict[str, Decimal]]
+    gravado_por_tipo: dict[int, dict[str, Decimal]]
+
+
+async def _sumas_por_comprobante(db: AsyncSession, ids: list[int]) -> _Sumas:
     """Los agregados por comprobante que no vienen ya resueltos en el encabezado (gravado,
     exento, ISR, IMSS, fondo de ahorro, Infonavit, total de deducciones, subsidio) — una sola
     consulta agregada por tabla hija, para todo el universo del ejercicio (regla 11: cero
     N+1, nunca un `SELECT` por comprobante)."""
     sumas: dict[int, dict[str, Decimal]] = {}
+    gravado_por_tipo: dict[int, dict[str, Decimal]] = {}
     if not ids:
-        return sumas
+        return _Sumas(sumas, gravado_por_tipo)
 
+    # `GROUP BY (comprobante_id, tipo_percepcion)` y no solo por comprobante: el desglose por
+    # tipo es lo único que distingue el gravado ordinario del que tiene régimen propio, y
+    # agregarlo aquí evita una segunda pasada sobre `nomina_percepcion`. El total por
+    # comprobante se reconstruye sumando en memoria, que es exacto (`Decimal`) y gratis.
     percepciones = await db.execute(
         select(
             NominaPercepcion.comprobante_id,
+            NominaPercepcion.tipo_percepcion,
             func.sum(NominaPercepcion.importe_gravado).label("gravado"),
             func.sum(NominaPercepcion.importe_exento).label("exento"),
         )
         .where(NominaPercepcion.comprobante_id.in_(ids))
-        .group_by(NominaPercepcion.comprobante_id)
+        .group_by(NominaPercepcion.comprobante_id, NominaPercepcion.tipo_percepcion)
     )
-    for comprobante_id, gravado, exento in percepciones:
-        sumas.setdefault(int(comprobante_id), {})["gravado"] = _a_decimal(gravado)
-        sumas[int(comprobante_id)]["exento"] = _a_decimal(exento)
+    for comprobante_id, tipo_percepcion, gravado, exento in percepciones:
+        cid_percepcion = int(comprobante_id)
+        tipo = str(tipo_percepcion)
+        gravado_dec = _a_decimal(gravado)
+        fila_sumas = sumas.setdefault(cid_percepcion, {})
+        fila_sumas["gravado"] = fila_sumas.get("gravado", _CERO) + gravado_dec
+        fila_sumas["exento"] = fila_sumas.get("exento", _CERO) + _a_decimal(exento)
+        por_tipo = gravado_por_tipo.setdefault(cid_percepcion, {})
+        por_tipo[tipo] = por_tipo.get(tipo, _CERO) + gravado_dec
 
     deducciones = await db.execute(
         select(
@@ -383,7 +456,91 @@ async def _sumas_por_comprobante(db: AsyncSession, ids: list[int]) -> dict[int, 
         fila["subsidio_causado"] = _a_decimal(subsidio_causado)
         fila["subsidio_entregado"] = _a_decimal(subsidio_entregado)
 
-    return sumas
+    return _Sumas(sumas, gravado_por_tipo)
+
+
+# --------------------------------------------------------------------------------------
+# B-05.R4: la columna 11, o la razón por la que no se pudo calcular
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Ordinario:
+    """El gravado ordinario por comprobante, o el motivo por el que la columna 11 va vacía.
+
+    `calculable` no es redundante con `por_comprobante`: un comprobante cuyos tipos son todos
+    de régimen propio suma cero **de verdad**, y eso es distinto de "no se pudo clasificar".
+    Sin la bandera explícita las dos situaciones darían el mismo diccionario.
+    """
+
+    calculable: bool
+    por_comprobante: dict[int, Decimal]
+    banderas: list[Bandera]
+
+
+async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[str, Decimal]]) -> _Ordinario:
+    """B-05.R4: `Σ importe_gravado` de los tipos con `es_ingreso_ordinario = true`.
+
+    Dos consultas como máximo y ninguna por fila (regla 11): las marcas confirmadas se traen
+    de una vez, y las propuestas solo cuando hace falta explicar un hueco.
+
+    **Solo marcas confirmadas** (`marcas_de_percepcion`), y **todas o ninguna** para los tipos
+    presentes: ver el bloque de B-05.R4 en el docstring del módulo para las dos decisiones y su
+    argumento. Un tipo sin clasificar no se puede "dejar fuera": si es ordinario y se omite, la
+    base del ISR anual sale corta con apariencia de completa.
+    """
+    tipos_presentes = {tipo for por_tipo in gravado_por_tipo.values() for tipo in por_tipo}
+    marcas = await cfg.marcas_de_percepcion(db)
+    faltantes = sorted(tipos_presentes - set(marcas))
+
+    if faltantes:
+        propuestas = await cfg.marcas_propuestas(db)
+        sin_confirmar = [tipo for tipo in faltantes if tipo in propuestas]
+        ausentes = [tipo for tipo in faltantes if tipo not in propuestas]
+        banderas: list[Bandera] = []
+        if sin_confirmar:
+            detalle = "; ".join(
+                f"{tipo} → ingreso ordinario: {'sí' if propuestas[tipo].es_ingreso_ordinario else 'no'}"
+                for tipo in sin_confirmar
+            )
+            banderas.append(
+                Bandera(
+                    clave="MARCAS_SIN_CONFIRMAR",
+                    severidad="alta",
+                    ambito="informe",
+                    mensaje=(
+                        "La columna «Gravado ordinario» salió vacía en todas las filas: hay marcas capturadas "
+                        f"para {len(sin_confirmar)} de los tipos de percepción del ejercicio pero nadie las ha "
+                        f"confirmado, y un valor sin confirmar no calcula. La propuesta dice: {detalle}. "
+                        "Revísalas y confírmalas en Configuración › Fiscal › Marcas de percepción; es un clic."
+                    ),
+                )
+            )
+        if ausentes:
+            banderas.append(
+                Bandera(
+                    clave="FALTA_CATALOGO_DE_MARCAS",
+                    severidad="alta",
+                    ambito="informe",
+                    mensaje=(
+                        "La columna «Gravado ordinario» salió vacía en todas las filas: no hay marca de "
+                        f"`es_ingreso_ordinario` capturada para el/los tipo(s) de percepción {', '.join(ausentes)}, "
+                        "así que no se puede distinguir el ingreso que acumula al cálculo anual del ISR (art. 97 "
+                        "LISR) del que tiene régimen propio (separación, art. 95; jubilación, art. 96). No se suma "
+                        "solo lo conocido a propósito: daría una base anual corta con apariencia de completa. "
+                        "Cárgalas con la semilla `config/fiscal/catalogo_percepcion.yaml` o captúralas en "
+                        "Configuración › Fiscal › Marcas de percepción."
+                    ),
+                )
+            )
+        return _Ordinario(calculable=False, por_comprobante={}, banderas=banderas)
+
+    ordinarios = {tipo for tipo in tipos_presentes if marcas[tipo].es_ingreso_ordinario}
+    por_comprobante = {
+        cid: sum((importe for tipo, importe in por_tipo.items() if tipo in ordinarios), _CERO)
+        for cid, por_tipo in gravado_por_tipo.items()
+    }
+    return _Ordinario(calculable=True, por_comprobante=por_comprobante, banderas=[])
 
 
 async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme:
@@ -486,7 +643,12 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         )
 
     ids_resueltos = [fila[0].comprobante_id for fila in filas_resueltas]
-    sumas_por_cid = await _sumas_por_comprobante(db, ids_resueltos)
+    agregados = await _sumas_por_comprobante(db, ids_resueltos)
+    sumas_por_cid = agregados.por_comprobante
+    # B-05.R4: la columna 11 y, si no se pudo calcular, la bandera que dice qué falta. Se
+    # resuelve una vez por corrida sobre los tipos que de verdad aparecen en el acumulado.
+    ordinario = await _gravado_ordinario(db, agregados.gravado_por_tipo)
+    banderas.extend(ordinario.banderas)
     # Identidades #4 y #5 de B-00 sobre lo que SÍ entra al acumulado: sin ellas, una fila de este
     # informe podía no cuadrar consigo misma en silencio ("Total percepciones" viene del
     # encabezado y "Total gravado"/"Total exento" de los nodos), y diferir de B-01/B-02 para el
@@ -519,6 +681,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         acc.total_percepciones += _a_decimal(nomina.total_percepciones)
         acc.total_gravado += sumas.get("gravado", _CERO)
         acc.total_exento += sumas.get("exento", _CERO)
+        acc.gravado_ordinario += ordinario.por_comprobante.get(comprobante.comprobante_id, _CERO)
         acc.total_separacion += _a_decimal(totales.total_separacion_indemnizacion if totales else None)
         acc.total_jubilacion += _a_decimal(totales.total_jubilacion_pension_retiro if totales else None)
         acc.isr_retenido += sumas.get("isr", _CERO)
@@ -600,6 +763,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 acc.total_percepciones,
                 acc.total_gravado,
                 acc.total_exento,
+                # Columna 11: `None`, nunca cero, mientras el catálogo de marcas no alcance
+                # para clasificar todos los tipos del ejercicio (B-05.R4).
+                acc.gravado_ordinario if ordinario.calculable else None,
                 acc.total_separacion,
                 acc.total_jubilacion,
                 acc.isr_retenido,

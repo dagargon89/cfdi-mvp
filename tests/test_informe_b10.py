@@ -9,14 +9,28 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
+from decimal import Decimal
 
 import openpyxl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b10_validacion_receptor as b10, excel, validadores
 from app.informes.base import ContextoInforme
+from app.models.configuracion_fiscal import ConfiguracionEmpresa, ParamFiscal
+from app.models.enums import OrigenValor, ZonaSalarial
+from app.services import configuracion_fiscal as cfg
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
+
+# Cifras 2026 reales (las de `config/fiscal/param_fiscal.yaml`), para que los topes que
+# calculan estas pruebas sean los que producirá la instalación de verdad. Las mismas que usa
+# `tests/test_informe_b03.py`.
+_UMA_DIARIA = "117.31"
+_SM_ZLFN = "440.87"
+_SM_GENERAL = "315.04"
+
+_CONFIRMADO_EN = datetime(2026, 8, 6, 12, 0, 0)
+_FUENTE = "INEGI, boletín UMA 2026 (fixture de prueba)"
 
 
 def _p(**kw: object) -> b10.Parametros:
@@ -28,6 +42,53 @@ def _p(**kw: object) -> b10.Parametros:
 async def _empresa(db: AsyncSession) -> int:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     return empresa.empresa_id
+
+
+async def _sembrar_param(
+    db: AsyncSession, clave: str, valor: str, *, confirmado: bool, desde: date = date(2026, 2, 1)
+) -> None:
+    """Siembra `param_fiscal` **por la puerta de escritura del servicio**, no con un `INSERT`
+    directo: así la prueba ejercita el camino real, incluida la lista blanca de claves y el
+    invariante de confirmación —que es justo lo que varias de estas pruebas verifican—. Mismo
+    helper que `tests/test_informe_b03.py`."""
+    await cfg.guardar_param_fiscal(
+        db, clave=clave, valor=Decimal(valor), vigencia_desde=desde, origen=OrigenValor.SEMILLA, fuente=_FUENTE
+    )
+    await db.commit()
+    if not confirmado:
+        return
+    fila = await db.get(ParamFiscal, (clave, desde))
+    assert fila is not None
+    fila.confirmado_por = "uid-prueba"
+    fila.confirmado_en = _CONFIRMADO_EN
+    await db.commit()
+
+
+async def _zona(db: AsyncSession, empresa_id: int, zona: ZonaSalarial) -> None:
+    db.add(ConfiguracionEmpresa(empresa_id=empresa_id, zona_salarial=zona))
+    await db.commit()
+
+
+async def _empleado_con_sbc(db: AsyncSession, eid: int, *, uuid: str, sbc: str) -> None:
+    """Un empleado bien capturado salvo por el SBC, que es lo que cada prueba de esta sección
+    mueve. Sin defectos de estructura, para que la única variable sea el SBC."""
+    await insertar_nomina(
+        db,
+        empresa_id=eid,
+        uuid=uuid,
+        rfc_receptor="VECJ880326XXX",
+        curp="VECJ880326HDFLNS09",
+        nss="12345678903",
+        tipo_regimen="02",
+        sbc=sbc,
+        sdi=sbc,
+        fecha_pago=date(2026, 6, 30),
+        fecha_final_pago=date(2026, 6, 30),
+    )
+
+
+def _banderas(resultado: object, clave: str) -> list[object]:
+    return [b for b in resultado.banderas if b.clave == clave]  # type: ignore[attr-defined]
 
 
 def _claves(resultado: object) -> set[str]:
@@ -406,12 +467,39 @@ async def test_conteo_de_validaciones_ejecutadas(db: AsyncSession) -> None:
     El fixture tiene **todos** los campos poblados, así que se ejecutan las 15 validaciones por
     empleado que no son mutuamente excluyentes, más las 3 de conjunto y 1 entre periodos del
     único RFC del rango.
+
+    **Y desde la fase 3 el número es variable por diseño**, que es lo que esta prueba y su
+    gemela `test_el_conteo_sube_cuando_la_configuracion_fiscal_esta_completa` fijan juntas.
+    Aquí **no** hay configuración fiscal —el estado de la instalación real hoy—, así que las dos
+    validaciones de SBC no corren y **no se cuentan**. Contarlas igual sería peor que no tener el
+    conteo: la bandera existe para hacer auditable al informe, y un número que afirma haber
+    ejecutado comprobaciones que no corrieron es exactamente la clase de afirmación falsa que
+    esta bandera vino a impedir.
     """
     eid = await _empresa(db)
+    await _empleado_completo(db, eid, uuid="a000000c-0000-0000-0000-00000000000c")
+
+    resultado = await b10.consultar(db, eid, _p())
+    bandera = next(b for b in resultado.banderas if b.clave == "VALIDACIONES_EJECUTADAS")
+    esperadas = b10.VALIDACIONES_POR_EMPLEADO_COMPLETO + b10.VALIDACIONES_DE_CONJUNTO + b10.VALIDACIONES_ENTRE_PERIODOS_POR_RFC
+    assert f"Se ejecutaron {esperadas} validaciones" in bandera.mensaje, bandera.mensaje
+    assert bandera.severidad == "baja" and bandera.ambito == "informe"
+    # Lo no contado, contrastado contra lo que dicen las banderas de la misma hoja: las dos
+    # validaciones de SBC no corrieron y hay una bandera por cada dato que falta.
+    assert {b.clave for b in resultado.banderas} >= {"FALTA_UMA", "FALTA_ZONA_SALARIAL"}
+    # Y el fixture no produce hallazgos: es el mismo camino limpio de
+    # `test_datos_correctos_no_generan_hallazgos`, pero ahora con el conteo que lo hace auditable.
+    assert resultado.filas == [], _claves(resultado)
+
+
+async def _empleado_completo(db: AsyncSession, eid: int, *, uuid: str) -> None:
+    """La fotografía con **todos** los campos poblados y ningún defecto, que es la premisa de
+    las dos pruebas del conteo. `antiguedad="P339W"`: ver
+    `test_datos_correctos_no_generan_hallazgos` para por qué ese valor y no `P330W`."""
     await insertar_nomina(
         db,
         empresa_id=eid,
-        uuid="a000000c-0000-0000-0000-00000000000c",
+        uuid=uuid,
         rfc_receptor="VECJ880326XXX",
         curp="VECJ880326HDFLNS09",
         nss="12345678903",
@@ -428,13 +516,38 @@ async def test_conteo_de_validaciones_ejecutadas(db: AsyncSession) -> None:
         dias="15.000",
     )
 
+
+async def test_el_conteo_sube_cuando_la_configuracion_fiscal_esta_completa(db: AsyncSession) -> None:
+    """La gemela de la anterior: **el mismo empleado**, ahora con la UMA, la zona salarial y el
+    mínimo de esa zona confirmados. Las dos validaciones de SBC sí corren, así que el conteo sube
+    en `VALIDACIONES_QUE_EXIGEN_CONFIGURACION` y no queda ninguna bandera de configuración.
+
+    Las dos pruebas juntas son lo que hace honesto al conteo. Con una sola, un conteo fijo —o uno
+    que sumara las dos validaciones sin haberlas evaluado— pasaría igual.
+
+    El SBC de 500 está entre los dos límites (mínimo general 315.04, tope 25 × 117.31 = 2932.75),
+    así que ninguna de las dos dispara: lo que se mide aquí es que **se ejecutaron**, no que
+    encontraran algo."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.GENERAL)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "SALARIO_MINIMO_GENERAL", _SM_GENERAL, confirmado=True, desde=date(2026, 1, 1))
+    await _empleado_completo(db, eid, uuid="a000000d-0000-0000-0000-00000000000d")
+
     resultado = await b10.consultar(db, eid, _p())
     bandera = next(b for b in resultado.banderas if b.clave == "VALIDACIONES_EJECUTADAS")
-    esperadas = b10.VALIDACIONES_POR_EMPLEADO_COMPLETO + b10.VALIDACIONES_DE_CONJUNTO + b10.VALIDACIONES_ENTRE_PERIODOS_POR_RFC
+    esperadas = (
+        b10.VALIDACIONES_POR_EMPLEADO_COMPLETO
+        + b10.VALIDACIONES_QUE_EXIGEN_CONFIGURACION
+        + b10.VALIDACIONES_DE_CONJUNTO
+        + b10.VALIDACIONES_ENTRE_PERIODOS_POR_RFC
+    )
     assert f"Se ejecutaron {esperadas} validaciones" in bandera.mensaje, bandera.mensaje
-    assert bandera.severidad == "baja" and bandera.ambito == "informe"
-    # Y el fixture no produce hallazgos: es el mismo camino limpio de
-    # `test_datos_correctos_no_generan_hallazgos`, pero ahora con el conteo que lo hace auditable.
+    # Nada que configurar: ninguna de las cuatro banderas de degradación.
+    assert not [
+        b for b in resultado.banderas
+        if b.clave in ("FALTA_UMA", "UMA_SIN_CONFIRMAR", "FALTA_ZONA_SALARIAL", "FALTA_SALARIO_MINIMO")
+    ], [b.clave for b in resultado.banderas]
     assert resultado.filas == [], _claves(resultado)
 
 
@@ -710,21 +823,173 @@ async def test_severidad_minima_filtra(db: AsyncSession) -> None:
     assert "PUESTO_VACIO" not in _claves(solo_altas)
 
 
-async def test_las_dos_validaciones_de_sbc_diferidas_no_aparecen(db: AsyncSession) -> None:
-    """Necesitan UMA y salario mínimo de la fase 3."""
+async def test_sin_configuracion_fiscal_las_dos_validaciones_de_sbc_no_se_evaluan(db: AsyncSession) -> None:
+    """**El estado de la instalación real hoy**, y la degradación que la tarea 8 tenía que dejar
+    bien: sin UMA y sin zona salarial las dos validaciones de SBC no se evalúan, ni siquiera con
+    un SBC absurdo que las dispararía las dos.
+
+    Esta prueba comprobaba antes que las dos validaciones **no existían** (fase 2, fuera de
+    alcance por falta de configuración). Ahora existen, así que comprueba lo que de verdad
+    importa: que su ausencia sigue siendo una decisión declarada —con bandera que dice cuál dato
+    falta y adónde ir— y no un silencio. Sin las banderas, un SBC de 999,999 pasaría inadvertido
+    y el informe se vería idéntico a uno donde todo está bien."""
     eid = await _empresa(db)
-    await insertar_nomina(
-        db,
-        empresa_id=eid,
-        uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        rfc_receptor="VECJ880326XXX",
-        curp="VECJ880326HDFLNS09",
-        nss="12345678903",
-        sbc="999999.00",
-    )
-    claves = _claves(await b10.consultar(db, eid, _p()))
+    await _empleado_con_sbc(db, eid, uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sbc="999999.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    claves = _claves(resultado)
     assert "SBC_SOBRE_TOPE" not in claves
     assert "SBC_BAJO_MINIMO" not in claves
+    # Pero no en silencio: una bandera por causa, con ámbito `informe`.
+    assert len(_banderas(resultado, "FALTA_UMA")) == 1, [b.clave for b in resultado.banderas]
+    assert len(_banderas(resultado, "FALTA_ZONA_SALARIAL")) == 1, [b.clave for b in resultado.banderas]
+    assert all(b.severidad == "alta" and b.ambito == "informe" for b in resultado.banderas if b.clave.startswith("FALTA_"))  # type: ignore[attr-defined]
+
+
+async def test_sbc_sobre_tope_dispara_con_la_uma_confirmada(db: AsyncSession) -> None:
+    """`SBC_SOBRE_TOPE`: 25 UMA diarias es el límite superior de cotización del art. 28 de la
+    LSS. Con la UMA 2026 (117.31) el tope son 2932.75, y un SBC de 3000 lo excede.
+
+    Severidad **media**, no alta: un SBC sobre el tope no daña al trabajador, sobrestima la
+    cuota, y el IMSS la recorta al tope de todas formas."""
+    eid = await _empresa(db)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _empleado_con_sbc(db, eid, uuid="e0000001-0000-0000-0000-000000000001", sbc="3000.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_SOBRE_TOPE")
+    assert fila[titulos.index("Severidad")] == "media"
+    # Y con la UMA confirmada ya no hay nada que reportar por ese lado.
+    assert _banderas(resultado, "FALTA_UMA") == []
+    assert _banderas(resultado, "UMA_SIN_CONFIRMAR") == []
+
+
+async def test_sbc_justo_por_debajo_del_tope_no_dispara(db: AsyncSession) -> None:
+    """La gemela negativa. Sin ella, una comparación invertida —o el tope calculado con la UMA
+    en vez de con 25 UMA— pasaría igual: 25 × 117.31 = 2932.75, así que 2900 está dentro."""
+    eid = await _empresa(db)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _empleado_con_sbc(db, eid, uuid="e0000002-0000-0000-0000-000000000002", sbc="2900.00")
+
+    assert "SBC_SOBRE_TOPE" not in _claves(await b10.consultar(db, eid, _p()))
+
+
+async def test_sbc_de_400_bajo_minimo_en_la_zona_frontera(db: AsyncSession) -> None:
+    """**La mitad frontera de la pareja que prueba que la zona cambia el resultado.** El mínimo
+    2026 de la Zona Libre de la Frontera Norte —donde está Ciudad Juárez— es 440.87, así que un
+    SBC de 400 está por debajo. Severidad **alta**: es incumplimiento directo."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    await _empleado_con_sbc(db, eid, uuid="e0000003-0000-0000-0000-000000000003", sbc="400.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    titulos = [c.titulo for c in resultado.columnas]
+    fila = next(f for f in resultado.filas if f[titulos.index("Validación")] == "SBC_BAJO_MINIMO")
+    assert fila[titulos.index("Severidad")] == "alta"
+    assert _banderas(resultado, "FALTA_ZONA_SALARIAL") == []
+    assert _banderas(resultado, "FALTA_SALARIO_MINIMO") == []
+
+
+async def test_el_mismo_sbc_de_400_no_dispara_en_la_zona_general(db: AsyncSession) -> None:
+    """**La otra mitad de la pareja, y la razón de ser de toda la configuración de zona.** El
+    mismo SBC de 400, el mismo empleado y la misma fecha: en la zona general el mínimo 2026 es
+    315.04 y 400 lo cumple.
+
+    Sin esta pareja nada protegería a `zona_salarial`: una implementación que ignorara la zona y
+    leyera siempre el mínimo de la frontera pasaría la prueba anterior. La diferencia entre las
+    dos zonas es de casi un 40%, que es exactamente por lo que el campo nace nulo en vez de
+    adivinarse."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.GENERAL)
+    # Los dos mínimos capturados y confirmados: la única cosa que distingue las dos pruebas es
+    # la zona configurada en la empresa, no qué renglones existen.
+    await _sembrar_param(db, "SALARIO_MINIMO_GENERAL", _SM_GENERAL, confirmado=True, desde=date(2026, 1, 1))
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    await _empleado_con_sbc(db, eid, uuid="e0000004-0000-0000-0000-000000000004", sbc="400.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    assert "SBC_BAJO_MINIMO" not in _claves(resultado)
+    assert _banderas(resultado, "FALTA_ZONA_SALARIAL") == []
+
+
+async def test_sin_zona_salarial_no_se_evalua_el_minimo_aunque_los_valores_esten_capturados(
+    db: AsyncSession,
+) -> None:
+    """`salario_minimo_de_empresa` devuelve `None` **sin mirar los valores** cuando la zona no
+    está configurada: aquí los dos mínimos están capturados y confirmados, y aun así
+    `SBC_BAJO_MINIMO` no corre.
+
+    Es la protección contra el falso negativo: si se asumiera "GENERAL", este SBC de 400 —que en
+    la frontera incumple— saldría como que cumple, y nadie se enteraría."""
+    eid = await _empresa(db)
+    await _sembrar_param(db, "SALARIO_MINIMO_GENERAL", _SM_GENERAL, confirmado=True, desde=date(2026, 1, 1))
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    await _empleado_con_sbc(db, eid, uuid="e0000005-0000-0000-0000-000000000005", sbc="400.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    assert "SBC_BAJO_MINIMO" not in _claves(resultado)
+    faltantes = _banderas(resultado, "FALTA_ZONA_SALARIAL")
+    assert len(faltantes) == 1
+    # Manda a la pantalla correcta: el hueco es de la empresa, no del catálogo fiscal.
+    assert "Configuración › Empresa" in faltantes[0].mensaje  # type: ignore[attr-defined]
+    assert _banderas(resultado, "FALTA_SALARIO_MINIMO") == []
+
+
+async def test_zona_configurada_sin_minimo_confirmado_manda_a_la_otra_pantalla(db: AsyncSession) -> None:
+    """La causa gemela: con la zona configurada pero sin mínimo confirmado para esa zona, la
+    validación tampoco corre — pero la bandera es otra y manda a Configuración › Fiscal. Mandar a
+    la pantalla equivocada es lo que vuelve inútil un aviso de configuración."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=False, desde=date(2026, 1, 1))
+    await _empleado_con_sbc(db, eid, uuid="e0000006-0000-0000-0000-000000000006", sbc="400.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    assert "SBC_BAJO_MINIMO" not in _claves(resultado)
+    assert _banderas(resultado, "FALTA_ZONA_SALARIAL") == []
+    faltantes = _banderas(resultado, "FALTA_SALARIO_MINIMO")
+    assert len(faltantes) == 1
+    assert "Configuración › Fiscal" in faltantes[0].mensaje  # type: ignore[attr-defined]
+
+
+async def test_uma_propuesta_sin_confirmar_no_calcula_pero_la_bandera_trae_su_fuente(db: AsyncSession) -> None:
+    """El tercer estado, el que tiene hoy la instalación real: la UMA está capturada y nadie la
+    ha confirmado. No calcula —un valor sin confirmar nunca calcula—, pero la bandera lleva la
+    **fuente** de la propuesta, que es lo que convierte "falta la UMA, ve a buscarla" en "está
+    propuesta con su liga al boletín, confírmala". Un clic contra una búsqueda."""
+    eid = await _empresa(db)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=False)
+    await _empleado_con_sbc(db, eid, uuid="e0000007-0000-0000-0000-000000000007", sbc="999999.00")
+
+    resultado = await b10.consultar(db, eid, _p())
+    assert "SBC_SOBRE_TOPE" not in _claves(resultado)
+    assert _banderas(resultado, "FALTA_UMA") == []
+    sin_confirmar = _banderas(resultado, "UMA_SIN_CONFIRMAR")
+    assert len(sin_confirmar) == 1
+    assert _FUENTE in sin_confirmar[0].mensaje  # type: ignore[attr-defined]
+
+
+async def test_un_sbc_en_cero_no_se_reporta_como_bajo_el_minimo(db: AsyncSession) -> None:
+    """Regla de aplicabilidad: con `sbc <= 0` ninguna de las dos validaciones corre.
+
+    Un SBC en cero no está "por debajo del mínimo", es una base **ausente**, y `SBC_CERO` ya
+    nombra ese defecto donde lo es (`tipo_regimen='02'`). Sin esta regla cada asimilado a
+    salarios —que legítimamente no cotiza— saldría con un hallazgo de severidad alta por corrida,
+    y el informe cuyo grano es "una fila = algo que corregir" se llenaría de filas que no se
+    corrigen."""
+    eid = await _empresa(db)
+    await _zona(db, eid, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=True, desde=date(2026, 1, 1))
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _empleado_con_sbc(db, eid, uuid="e0000008-0000-0000-0000-000000000008", sbc="0.00")
+
+    claves = _claves(await b10.consultar(db, eid, _p()))
+    assert "SBC_BAJO_MINIMO" not in claves
+    assert "SBC_SOBRE_TOPE" not in claves
+    # El defecto real sí se reporta, con la clave que le corresponde.
+    assert "SBC_CERO" in claves
 
 
 async def test_curp_y_nss_se_declaran_sensibles(db: AsyncSession) -> None:

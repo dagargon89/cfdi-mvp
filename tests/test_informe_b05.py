@@ -3,21 +3,59 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from pathlib import Path
+
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b05_acumulado_anual as b05
 from app.informes import universo_nomina
 from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
+from app.models.configuracion_fiscal import CatalogoPercepcionMarca
 from app.models.enums import EstatusCfdi
+from app.services import configuracion_fiscal as cfg
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
+
+_CONFIRMADO_EN = datetime(2026, 8, 6, 12, 0, 0)
 
 
 async def _empresa(db: AsyncSession) -> int:
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     return empresa.empresa_id
+
+
+async def _sembrar_marcas(
+    db: AsyncSession, tmp_path: Path, marcas: list[tuple[str, bool]], *, confirmadas: bool
+) -> None:
+    """Siembra `catalogo_percepcion_marca` **por el servicio de la tarea 2**, no con `INSERT`
+    directos: así cada prueba ejercita el camino real, incluido el invariante de confirmación
+    —que es justo lo que se está probando— y la validación de `tipo_percepcion` contra
+    `c_TipoPercepcion`. Mismo criterio que `tests/test_informe_b03.py`.
+
+    Cada marca es `(tipo_percepcion, es_ingreso_ordinario)`. El resto de los campos son los
+    mínimos que el cargador exige; B-05 solo mira `es_ingreso_ordinario`.
+    """
+    renglones = ["catalogo_percepcion_marca:"]
+    for tipo, ordinario in marcas:
+        renglones += [
+            f"  - tipo_percepcion: '{tipo}'",
+            f"    es_ingreso_ordinario: {str(ordinario).lower()}",
+            "    base_exencion: NINGUNA",
+            "    integra_sbc: false",
+            "    es_provisionable: false",
+        ]
+    ruta = tmp_path / "marcas.yaml"
+    ruta.write_text("\n".join(renglones) + "\n", encoding="utf-8")
+    await cfg.cargar_desde_yaml(db, ruta)
+    if not confirmadas:
+        return
+    for fila in (await db.scalars(select(CatalogoPercepcionMarca))).all():
+        fila.confirmado_por = "uid-prueba"
+        fila.confirmado_en = _CONFIRMADO_EN
+    await db.commit()
 
 
 def _fila(resultado: object, titulo: str, indice: int = 0) -> object:
@@ -198,15 +236,147 @@ async def test_subsidio_causado_y_entregado(db: AsyncSession) -> None:
 
 
 async def test_no_hay_columnas_de_alcance_diferido(db: AsyncSession) -> None:
-    """La columna 11 y las 24-26 se declararon fuera de alcance: una columna vacía en un
-    papel de trabajo fiscal es peor que su ausencia."""
+    """Las columnas 24-26 (ISR anual teórico, diferencia, sujeto a cálculo anual) siguen fuera
+    de alcance: necesitan la tarifa de ISR, que no existe.
+
+    **Esta prueba aseveraba también la ausencia de la columna 11** ("Gravado ordinario"), que
+    era correcto mientras `catalogo_percepcion_marca` no existía. La tarea 8 de la fase 3 la
+    implementa, así que esa aserción se retira **por diseño** — es el sujeto de la prueba el que
+    cambió, no la prueba la que se acomodó a la implementación. La diferencia con las 24-26 es
+    real: el vacío de la 11 es informado (cada corrida dice por bandera qué falta para llenarla)
+    y el de las 24-26 no podría serlo."""
     eid = await _empresa(db)
     await insertar_nomina(db, empresa_id=eid, uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                           fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30))
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     titulos = [c.titulo for c in resultado.columnas]
-    assert not any("ordinario" in t.lower() for t in titulos)
     assert not any("teórico" in t.lower() or "teorico" in t.lower() for t in titulos)
+    assert not any("cálculo anual" in t.lower() for t in titulos)
+
+
+# --------------------------------------------------------------------------------------
+# B-05.R4 — La columna 11, "Gravado ordinario"
+# --------------------------------------------------------------------------------------
+
+
+async def test_gravado_ordinario_excluye_separacion_y_jubilacion(db: AsyncSession, tmp_path: Path) -> None:
+    """**La prueba central de B-05.R4.** Los ingresos por separación (art. 95 LISR) y por
+    jubilación (art. 96) tienen régimen fiscal propio y **no** se acumulan al gravado ordinario,
+    que es la base del cálculo anual del ISR del art. 97. Sumarlos sobreestima el ISR anual.
+
+    Cuáles son esos tipos lo dice el dato (`es_ingreso_ordinario`), no una lista en el programa
+    (§2.12): aquí `022` (prima de antigüedad, régimen de separación) y `039` (jubilación en una
+    exhibición) se siembran con la marca en `false`, y la columna tiene que dejarlos fuera
+    mientras "Total gravado" —que sí los suma— sigue valiendo el total.
+    """
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True), ("022", False), ("039", False)], confirmadas=True)
+    await insertar_nomina(db, empresa_id=eid, uuid="c0000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("022", "022", "Prima de antigüedad", "5000.00", "0.00"),
+                                        ("039", "039", "Jubilación", "3000.00", "0.00")],
+                          total_percepciones="16000.00", total="16000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Total gravado") == Decimal("16000.00")
+    assert _fila(resultado, "Gravado ordinario") == Decimal("8000.00")
+    # No hay nada que reportar: el catálogo alcanzó para clasificar todos los tipos.
+    assert not [b for b in resultado.banderas if b.clave in ("FALTA_CATALOGO_DE_MARCAS", "MARCAS_SIN_CONFIRMAR")]
+
+
+async def test_gravado_ordinario_acumula_todos_los_cfdi_del_ejercicio(db: AsyncSession, tmp_path: Path) -> None:
+    """La gemela de acumulación: la columna es anual, no del último CFDI, y suma solo el gravado
+    (no el exento) de los tipos ordinarios."""
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True), ("022", False)], confirmadas=True)
+    for sufijo, fecha in (("1", date(2026, 6, 30)), ("2", date(2026, 7, 15))):
+        await insertar_nomina(db, empresa_id=eid, uuid=f"c000000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+                              fecha_pago=fecha, fecha_final_pago=fecha,
+                              percepciones=[("001", "001", "Sueldo", "8000.00", "500.00"),
+                                            ("022", "022", "Prima de antigüedad", "1000.00", "0.00")],
+                              total_percepciones="9500.00", total="9500.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") == Decimal("16000.00")
+    # El exento no entra (la columna es `Σ importe_gravado`) y la prima de antigüedad tampoco.
+    assert _fila(resultado, "Total gravado") == Decimal("18000.00")
+    assert _fila(resultado, "Total exento") == Decimal("1000.00")
+
+
+async def test_sin_catalogo_de_marcas_la_columna_va_vacia_con_una_sola_bandera(db: AsyncSession) -> None:
+    """Sin marcas, la columna sale `None` — **nunca cero**: un cero ahí diría "este empleado no
+    tuvo ingreso ordinario", que es una afirmación fiscal falsa sobre alguien que cobró todo el
+    año, y viaja a su constancia de percepciones.
+
+    Y **una** bandera por causa, con ámbito `informe`, no una por fila: es la lección del
+    colapso de banderas de la fase 2. Este es además el estado de la instalación real hoy."""
+    eid = await _empresa(db)
+    for sufijo, fecha in (("1", date(2026, 6, 30)), ("2", date(2026, 7, 15))):
+        await insertar_nomina(db, empresa_id=eid, uuid=f"c100000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+                              fecha_pago=fecha, fecha_final_pago=fecha,
+                              percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                              total_percepciones="8000.00", total="8000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") is None
+    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_CATALOGO_DE_MARCAS"]
+    assert len(faltantes) == 1, [b.clave for b in resultado.banderas]
+    assert faltantes[0].severidad == "alta" and faltantes[0].ambito == "informe"
+    assert "001" in faltantes[0].mensaje
+    assert "MARCAS_SIN_CONFIRMAR" not in [b.clave for b in resultado.banderas]
+
+
+async def test_marcas_sin_confirmar_degradan_igual_y_la_bandera_dice_que_hay_propuesta(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """**La decisión de esta tarea, fijada por prueba:** la columna 11 exige marcas
+    **confirmadas**. Con la marca cargada pero sin confirmar la columna sigue vacía.
+
+    Y la bandera distingue este estado del anterior: dice que hay una propuesta esperando y qué
+    afirma, así que el arreglo es un clic en vez de una búsqueda. Es el estado real de la
+    instalación (44 marcas cargadas, ninguna confirmada), así que es la ruta más transitada."""
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=False)
+    await insertar_nomina(db, empresa_id=eid, uuid="c2000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                          total_percepciones="8000.00", total="8000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") is None
+    sin_confirmar = [b for b in resultado.banderas if b.clave == "MARCAS_SIN_CONFIRMAR"]
+    assert len(sin_confirmar) == 1, [b.clave for b in resultado.banderas]
+    assert sin_confirmar[0].severidad == "alta" and sin_confirmar[0].ambito == "informe"
+    # Procedencia: qué dice la propuesta, para que confirmarla sea una decisión y no un acto de fe.
+    assert "001 → ingreso ordinario: sí" in sin_confirmar[0].mensaje
+    # Y no se confunde con la ausencia: son dos estados distintos y dos claves distintas.
+    assert "FALTA_CATALOGO_DE_MARCAS" not in [b.clave for b in resultado.banderas]
+
+
+async def test_un_solo_tipo_sin_marca_deja_la_columna_vacia_en_vez_de_sumar_lo_conocido(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """El catálogo se exige **completo** para los tipos presentes.
+
+    Sumar solo los tipos clasificados daría una base de ISR anual **corta con apariencia de
+    completa** —el error espejo del que B-05.R4 existe para evitar—, y nadie que mire la celda
+    podría distinguirla de una suma correcta. Aquí `001` está confirmado y `022` no está en el
+    catálogo: la columna se vacía entera y la bandera nombra el tipo que falta."""
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await insertar_nomina(db, empresa_id=eid, uuid="c3000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("022", "022", "Prima de antigüedad", "5000.00", "0.00")],
+                          total_percepciones="13000.00", total="13000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") is None
+    faltantes = [b for b in resultado.banderas if b.clave == "FALTA_CATALOGO_DE_MARCAS"]
+    assert len(faltantes) == 1
+    # La bandera nombra el tipo que falta y solo ese: dice qué capturar, no qué sobra.
+    assert "percepción 022," in faltantes[0].mensaje, faltantes[0].mensaje
 
 
 async def test_curp_sensible_y_ejercicio_vacio(db: AsyncSession) -> None:
