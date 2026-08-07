@@ -425,6 +425,64 @@ async def test_una_marca_con_duda_declarada_no_calcula_el_tope(db: AsyncSession,
     assert "EXENCION_EXCEDIDA" not in _claves(resultado)
 
 
+async def test_la_bandera_de_duda_declarada_cita_la_nota_en_vez_de_suponerla(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """39 de las 44 marcas traen nota y solo nueve la traen por el multiplicador. Afirmar que
+    la duda es la del multiplicador manda a resolver la duda equivocada: la del `029` es sobre
+    el SBC, la del `005` sobre los requisitos de deducibilidad. La bandera cita el texto."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [{"tipo": "005", "base": "PORCENTAJE", "factor": "100", "nota": "requisitos de deducibilidad del art. 27-XI"}],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3",
+        percepciones=[("005", "031", "Fondo ahorro", "0.00", "2000.00")],
+        total_percepciones="2000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    dudas = _de_clave(resultado, "MARCA_CON_DUDA_DECLARADA")
+    assert len(dudas) == 1
+    assert "requisitos de deducibilidad del art. 27-XI" in dudas[0].mensaje
+    assert "año de servicio" not in dudas[0].mensaje, "no se supone cuál es la duda"
+
+
+async def test_base_ninguna_con_duda_declarada_sigue_dando_tope_cero(db: AsyncSession, tmp_path: Path) -> None:
+    """La duda solo puede bloquear lo que depende del factor, y `NINGUNA` no tiene factor
+    (`factor_exencion` es `NULL` y el cargador lo exige así). Vaciar ahí las columnas de tope
+    y exceso deja huecos donde no hay nada que capturar — 14 de los 16 tipos `NINGUNA` de la
+    semilla traen nota."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [{"tipo": "045", "base": "NINGUNA", "integra_sbc": True, "nota": "el art. 94-VII les da una base propia"}],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="d4d4d4d4-d4d4-d4d4-d4d4-d4d4d4d4d4d4",
+        percepciones=[("045", "045", "Acciones", "5000.00", "1000.00")],
+        total_percepciones="6000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert _valor(resultado, 0, "Base de exención") == "NINGUNA"
+    assert _valor(resultado, 0, "Tope de exención") == Decimal("0")
+    assert _valor(resultado, 0, "Exceso sobre el tope") == Decimal("1000.00")
+    assert "MARCA_CON_DUDA_DECLARADA" not in _claves(resultado)
+    assert len(_de_clave(resultado, "EXENCION_INDEBIDA")) == 1
+
+
 async def test_una_marca_sin_duda_declarada_si_calcula_el_tope(db: AsyncSession, tmp_path: Path) -> None:
     """Gemela negativa de la anterior: la regla no puede bloquear todos los topes."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
@@ -648,9 +706,175 @@ async def test_el_tope_conjunto_de_prevision_social_se_evalua_sobre_la_suma_anua
 
     # Ninguno de los dos excede su tope por tipo (100% del importe).
     assert [_valor(resultado, i, "Exceso sobre el tope") for i in range(2)] == [Decimal("0"), Decimal("0")]
-    conjuntas = [b for b in _de_clave(resultado, "EXENCION_EXCEDIDA") if "conjunto" in b.mensaje.lower()]
+    # Clave propia, no `EXENCION_EXCEDIDA`: el exceso de B-03.R2 es comprobable contra un tope
+    # de la ley y este es explícitamente condicional (no se evalúa la precondición de 7 UMA).
+    # Si hubiera que distinguirlos leyendo la prosa del mensaje —como hacía esta prueba—, el
+    # usuario que filtra la hoja `Banderas` tampoco podría.
+    conjuntas = _de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")
     assert len(conjuntas) == 1, "una bandera por (empleado, ejercicio)"
     assert "XAXX010101000" in conjuntas[0].ambito
+    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+
+
+async def test_el_tope_conjunto_se_evalua_aunque_las_marcas_traigan_duda_declarada(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """**Los seis tipos sujetos al tope conjunto traen los seis `nota_revision` en la semilla
+    real**, así que esta es la única configuración que existe en producción — y era la que
+    ninguna prueba cubría.
+
+    El tope conjunto **no necesita** el `factor_exencion` dudoso: suma `importe_exento` y lo
+    compara contra 1 UMA anual. Hacer que la duda sobre el factor apague también esta
+    comprobación dejaba inerte la única protección contra el "exentar de más" de esos seis
+    tipos, y encima en silencio: la bandera que sí salía hablaba de su tope por tipo, que con
+    `PORCENTAJE 100` es inexcedible por construcción.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {
+                "tipo": "029",
+                "base": "PORCENTAJE",
+                "factor": "100",
+                "tope_conjunto": True,
+                "nota": "la exclusion del SBC es parcial (40% del salario minimo diario)",
+            },
+            {
+                "tipo": "034",
+                "base": "PORCENTAJE",
+                "factor": "100",
+                "tope_conjunto": True,
+                "nota": "la analogia con beca es mia, no del texto",
+            },
+        ],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="d3d3d3d3-d3d3-d3d3-d3d3-d3d3d3d3d3d3",
+        percepciones=[
+            ("029", "029", "Vales de despensa", "0.00", "30000.00"),
+            ("034", "034", "Utiles escolares", "0.00", "20000.00"),
+        ],
+        total_percepciones="50000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    # La duda sí apaga el tope **por tipo**, que es lo que depende del factor.
+    assert _valor(resultado, 0, "Tope de exención") is None
+    assert len(_de_clave(resultado, "MARCA_CON_DUDA_DECLARADA")) == 2
+    # Pero no el tope conjunto, que no depende del factor.
+    conjuntas = _de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")
+    assert len(conjuntas) == 1
+    assert "XAXX010101000" in conjuntas[0].ambito
+
+
+async def test_el_tope_conjunto_suma_los_tipos_pagados_fuera_del_rango(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """El tope conjunto es una suma **entre tipos** y **anual**: un tipo pagado en enero
+    consume la misma UMA anual que uno pagado en junio, aunque el informe sea de junio.
+
+    Es la misma clase de defecto que B-03.R2 (comparar un acumulado anual contra un tope del
+    rango), solo que aplicado al **conjunto de tipos** en vez de a los importes: la consulta
+    agregada tiene que cubrir todos los tipos con `sujeto_a_tope_conjunto` del ejercicio, no
+    solo los que aparecen en las filas impresas.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+            {"tipo": "034", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="e3e3e3e3-e3e3-e3e3-e3e3-e3e3e3e3e3e3",
+        fecha_pago=date(2026, 1, 31),
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "30000.00")],
+        total_percepciones="30000.00",
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="f3f3f3f3-f3f3-f3f3-f3f3-f3f3f3f3f3f3",
+        fecha_pago=date(2026, 6, 30),
+        percepciones=[("034", "034", "Utiles escolares", "0.00", "20000.00")],
+        total_percepciones="20000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 1, "el rango del informe es junio-julio"
+    conjuntas = _de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")
+    assert len(conjuntas) == 1
+    assert "50000" in conjuntas[0].mensaje
+
+
+async def test_el_filtro_por_tipo_no_apaga_el_tope_conjunto(db: AsyncSession, tmp_path: Path) -> None:
+    """Pedir el informe de un solo tipo acota qué filas se imprimen, no contra qué se compara
+    la suma del art. 93."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "UMA_ANUAL", _UMA_ANUAL, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [
+            {"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+            {"tipo": "034", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True},
+        ],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="a4a4a4a4-a4a4-a4a4-a4a4-a4a4a4a4a4a4",
+        percepciones=[
+            ("029", "029", "Vales de despensa", "0.00", "30000.00"),
+            ("034", "034", "Utiles escolares", "0.00", "20000.00"),
+        ],
+        total_percepciones="50000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p(tipo_percepcion="034"))
+
+    assert len(resultado.filas) == 1
+    assert len(_de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")) == 1
+
+
+async def test_sin_uma_anual_el_tope_conjunto_avisa_que_no_lo_evaluo(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """La única protección contra el "exentar de más" de esos seis tipos no puede dejar de
+    correr en silencio."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(
+        db, tmp_path, [{"tipo": "029", "base": "PORCENTAJE", "factor": "100", "tope_conjunto": True}]
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="b4b4b4b4-b4b4-b4b4-b4b4-b4b4b4b4b4b4",
+        percepciones=[("029", "029", "Vales de despensa", "0.00", "30000.00")],
+        total_percepciones="30000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    faltantes = _de_clave(resultado, "FALTA_UMA_ANUAL")
+    assert len(faltantes) == 1
+    assert faltantes[0].severidad == "alta"
 
 
 async def test_el_tope_conjunto_no_dispara_por_debajo_de_una_uma_anual(db: AsyncSession, tmp_path: Path) -> None:
@@ -671,7 +895,7 @@ async def test_el_tope_conjunto_no_dispara_por_debajo_de_una_uma_anual(db: Async
 
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
-    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+    assert "TOPE_CONJUNTO_EXCEDIDO" not in _claves(resultado)
 
 
 async def test_un_tipo_exceptuado_del_tope_conjunto_no_suma_en_el(db: AsyncSession, tmp_path: Path) -> None:
@@ -711,7 +935,7 @@ async def test_un_tipo_exceptuado_del_tope_conjunto_no_suma_en_el(db: AsyncSessi
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
     # 50000 + 1000 pasarían de 1 UMA anual (42794.64); solo 1000 está sujeto al tope.
-    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+    assert "TOPE_CONJUNTO_EXCEDIDO" not in _claves(resultado)
 
 
 # --------------------------------------------------------------------------------------

@@ -52,20 +52,28 @@ Ignorarlos hace que el informe **exente de más**.
    **Cómo se resuelve hoy, y su límite.** Los nueve declaran esa advertencia en
    `catalogo_percepcion_marca.nota_revision`, que sí es un campo de la base y cuyo
    significado documentado es exactamente "el valor podría estar mal" (ver el modelo). Así
-   que la regla de este informe es **una marca con duda declarada abierta no calcula tope**:
-   columna vacía y `MARCA_CON_DUDA_DECLARADA`, la misma forma de degradar que con la UMA. Es
-   deliberadamente conservadora —hoy 39 de las 44 marcas traen nota, y solo nueve la traen
-   *por este motivo*—, pero nunca publica un tope calculado con un multiplicador supuesto y
-   no codifica ninguna lista fiscal. Los cinco tipos sin duda (`001`, `002`, `003`, `021`,
-   `028`) son justamente los de la nómina cotidiana, así que el informe sí calcula donde se
-   usa a diario.
+   que la regla de este informe es **una marca con duda declarada abierta no calcula su tope
+   por tipo**: columna vacía y `MARCA_CON_DUDA_DECLARADA`, la misma forma de degradar que con
+   la UMA, y **citando la nota** en vez de suponer cuál es la duda (39 de las 44 la traen y
+   solo nueve por este motivo). Es deliberadamente conservadora, pero nunca publica un tope
+   calculado con un multiplicador supuesto y no codifica ninguna lista fiscal. Los cinco tipos
+   sin duda (`001`, `002`, `003`, `021`, `028`) son justamente los de la nómina cotidiana, así
+   que el informe sí calcula donde se usa a diario.
+
+   **Lo que la duda NO puede apagar, y costó dos defectos:** solo bloquea lo que depende del
+   factor. No bloquea el tope de un `NINGUNA` —que no tiene factor: su cero es un hecho—, ni
+   el tope conjunto del punto 1 —que suma `importe_exento` contra `UMA_ANUAL` sin tocar el
+   factor—. Alimentar el tope conjunto de las filas cuyo tope por tipo se había podido
+   calcular dejaba **inerte** esa comprobación para los seis tipos afectados, porque los seis
+   traen nota en la semilla real: el 100% del catálogo de producción, y sin bandera que lo
+   dijera. Ver `_banderas_de_tope_conjunto` y el orden de comprobaciones de `_tope_de_fila`.
 
    **Su residuo, declarado:** si alguien resuelve la duda de un tipo del grupo C y le borra
-   la nota sin corregir el modelo, el tope volvería a calcularse con el multiplicador
+   la nota sin corregir el modelo, el tope por tipo volvería a calcularse con el multiplicador
    supuesto. El arreglo preciso es una columna propia —`multiplicador_no_derivable`, el
    mismo remedio que ya se aplicó dos veces en esta fase con `sujeto_a_tope_conjunto` y
    `nota_revision`—, que exige migración, semilla y pantalla de confirmación, y por eso no
-   cabe en esta tarea. Está anotado en el informe de la tarea 7.
+   cabe en esta tarea: es la tarea 7b.
 
 3. **Las vacaciones no tienen tipo propio** en `c_TipoPercepcion`: se pagan dentro del `001`.
    Ninguna marca de este catálogo las identifica, así que B-03 **no intenta distinguirlas**;
@@ -133,6 +141,12 @@ MUESTRA_UUID = 3
 """Cuántos UUID se citan en el mensaje de una bandera colapsada por tipo. No es cero —quien
 la lee necesita por dónde empezar— y no son todos: el mensaje dice cuántos hay en total.
 Mismo criterio que `universo_nomina.MUESTRA_UUID_COLAPSO`."""
+
+_MAX_NOTA_EN_BANDERA = 240
+"""Cuánto de `nota_revision` se cita en `MARCA_CON_DUDA_DECLARADA`. Las notas de la semilla
+llegan a pasar de 780 caracteres y son párrafos con subpuntos: entero, el mensaje deja de ser
+legible en una celda. Se cita la **primera línea** recortada a esto, que es donde la semilla
+pone el enunciado de la duda, y el texto completo sigue estando en la pantalla de marcas."""
 
 
 class Parametros(BaseModel):
@@ -292,24 +306,37 @@ def _tope_de_fila(
     hay_propuesta_de_uma: bool,
     salario_minimo: Decimal | None,
     zona_configurada: bool,
+    hay_fecha_de_pago: bool,
     importe_total: Decimal,
 ) -> _Tope:
     """B-03.R1. `factor_exencion` con `PORCENTAJE` está en **escala 0-100**, no en fracción
     (ver la columna en `app/models/configuracion_fiscal.py`): dividir entre 100 aquí es lo
-    que impide exentar cien veces de menos."""
+    que impide exentar cien veces de menos.
+
+    **El orden de las comprobaciones es parte de la regla.** Cada una solo puede bloquear lo
+    que de verdad depende del dato que falta:
+
+    - Sin marca no hay ni base ni factor: no se puede decir nada.
+    - `NINGUNA` va **antes** que la duda declarada porque no tiene factor —`factor_exencion`
+      es `NULL` y el cargador lo exige así—, luego no hay nada que la duda pueda invalidar.
+      Su tope es cero de verdad, no un cero por ausencia, y vaciarlo escondería el hallazgo
+      de B-03.R3 tras una celda en blanco.
+    - La duda declarada bloquea solo lo que sale del factor (ver el límite 2 del docstring del
+      módulo). **No bloquea el tope conjunto**, que no usa el factor: eso se decide fuera de
+      esta función, en `_banderas_de_tope_conjunto`.
+    - La fecha de pago se comprueba dentro de las dos bases que la necesitan para resolver su
+      valor por vigencia. `PORCENTAJE` no la necesita, y decir "falta la UMA" cuando lo que
+      falta es la fecha manda a configurar algo que quizá ya está configurado.
+    """
     if marca is None:
         return _Tope(None, "MARCA_SIN_CONFIRMAR" if propuesta is not None else "FALTA_MARCA")
-    if marca.nota_revision:
-        # Límite 2 del docstring del módulo: la propia semilla declara que este factor podría
-        # no significar lo que el modelo supone. Un tope calculado sobre esa duda es peor que
-        # una celda vacía con su aviso.
-        return _Tope(None, "MARCA_CON_DUDA_DECLARADA")
 
     base = marca.base_exencion
     if base is BaseExencion.NINGUNA:
-        # Cero de verdad, no un cero por ausencia: el tipo no tiene tramo exento y eso no
-        # depende de ningún valor por capturar. Ocultarlo escondería el hallazgo de B-03.R3.
         return _Tope(_CERO, None)
+
+    if marca.nota_revision:
+        return _Tope(None, "MARCA_CON_DUDA_DECLARADA")
 
     factor = marca.factor_exencion
     if factor is None:
@@ -319,6 +346,12 @@ def _tope_de_fila(
 
     if base is BaseExencion.PORCENTAJE:
         return _Tope(factor * importe_total / _CIEN, None)
+    if not hay_fecha_de_pago:
+        # Inalcanzable a través de `universo()`, que filtra por `nomina.fecha_pago` y por
+        # tanto excluye los nulos. Se conserva para que la causa esté bien atribuida si algún
+        # día otro universo llama a esta función: sin fecha no hay vigencia que resolver, y
+        # eso no es un hueco de configuración.
+        return _Tope(None, "SIN_FECHA_DE_PAGO")
     if base is BaseExencion.UMA_DIAS:
         if uma is None:
             return _Tope(None, "UMA_SIN_CONFIRMAR" if hay_propuesta_de_uma else "FALTA_UMA")
@@ -440,6 +473,11 @@ _MENSAJES_DE_CAUSA: dict[str, str] = {
         "La marca de estas filas declara una base de exención pero no trae `factor_exencion`. El cargador y "
         "la pantalla lo impiden, así que la fila se escribió directamente en la base: revísala."
     ),
+    "SIN_FECHA_DE_PAGO": (
+        "Estas filas vienen de un complemento de nómina sin fecha de pago, así que no hay con qué resolver la "
+        "UMA ni el salario mínimo por vigencia. No es un hueco de configuración: es el CFDI el que no trae "
+        "el dato."
+    ),
 }
 """Texto de las causas que no necesitan datos de la propia marca. Las que sí —las tres de
 `_bandera_de_tipo`— se arman con el tipo, su descripción y su procedencia. `UMA_SIN_CONFIRMAR`
@@ -498,6 +536,15 @@ def _bandera_de_tipo(causa: str, tipo: str, recuento: _Recuento, config: _Config
         if propuesta is not None:
             factor = "sin factor" if propuesta.factor_exencion is None else f"factor {propuesta.factor_exencion}"
             detalle = f" La propuesta dice base {propuesta.base_exencion.value} y {factor}."
+            if propuesta.sujeto_a_tope_conjunto:
+                # Sin la marca confirmada, este tipo tampoco entra en la suma del tope conjunto
+                # —`tipos_sujetos_al_tope_conjunto` solo mira lo confirmado—, y eso es más grave
+                # que quedarse sin su tope por tipo: con `PORCENTAJE 100` el tope por tipo es
+                # inexcedible por construcción y el conjunto es la única protección real.
+                detalle += (
+                    " Y está sujeta al tope conjunto de previsión social, que tampoco se evalúa mientras la "
+                    "marca no se confirme."
+                )
         return Bandera(
             clave=causa,
             severidad="alta",
@@ -519,16 +566,26 @@ def _bandera_de_tipo(causa: str, tipo: str, recuento: _Recuento, config: _Config
                 f"en Configuración › Fiscal.{comun}"
             ),
         )
+    # `MARCA_CON_DUDA_DECLARADA`. **Se cita la nota, no se supone cuál es la duda.** 39 de las
+    # 44 marcas traen nota y solo nueve la traen por el multiplicador que no viene en el CFDI:
+    # la del `029` es sobre el SBC y la del `005` sobre los requisitos de deducibilidad.
+    # Afirmar "es el factor por año de servicio" mandaría a resolver la duda equivocada.
+    marca = config.marcas.get(tipo)
+    nota = (marca.nota_revision or "").strip() if marca is not None else ""
+    primera_linea = nota.splitlines()[0] if nota else ""
+    if len(primera_linea) > _MAX_NOTA_EN_BANDERA:
+        primera_linea = primera_linea[:_MAX_NOTA_EN_BANDERA].rstrip() + "…"
+    cita = f' La duda dice: "{primera_linea}".' if primera_linea else ""
     return Bandera(
         clave=causa,
         severidad="alta",
         ambito=f"tipo:{tipo}",
         mensaje=(
-            f"La marca del tipo {nombre} está confirmada pero conserva una duda declarada sobre su factor de "
-            f"exención, así que no se calcula su tope: publicar un número derivado de un factor que la propia "
-            f"semilla marca como dudoso sería peor que dejar la celda vacía. Es lo que pasa con los nueve tipos "
-            f"cuyo multiplicador no viene en el CFDI (90 UMA por año de servicio, 15 UMA diarias, 1 UMA por "
-            f"domingo). Resuelve la nota de revisión de esa marca antes de confiar en el tope.{comun}"
+            f"La marca del tipo {nombre} está confirmada pero conserva una duda declarada, así que no se calcula "
+            f"su tope de exención: publicar un número derivado de un factor que la propia semilla marca como "
+            f"dudoso sería peor que dejar la celda vacía.{cita} Resuélvela en Configuración › Fiscal › Marcas de "
+            f"percepción —y bórrala solo cuando el factor capturado sea el correcto— antes de confiar en el "
+            f"tope.{comun}"
         ),
     )
 
@@ -626,40 +683,74 @@ def _bandera_de_exencion_excedida(
     )
 
 
+def tipos_sujetos_al_tope_conjunto(config: _Configuracion) -> set[str]:
+    """Los tipos con `sujeto_a_tope_conjunto` entre las marcas **confirmadas**.
+
+    Es lo que decide el alcance del tope conjunto, y sale del dato: la columna que la tarea 3
+    agregó justo para que esto no fuera una lista escrita en el programa (§2.12). Los
+    exceptuados por el último párrafo del art. 93 (jubilaciones, gastos médicos, funeral,
+    fondo de ahorro…) simplemente no traen la marca, así que la lista de exceptuados tampoco
+    vive en el código.
+
+    Se expone (sin guion bajo) porque `consultar` la necesita **antes** de la consulta
+    agregada: la suma del tope conjunto tiene que cubrir estos tipos aunque ninguno aparezca
+    en las filas impresas.
+    """
+    return {tipo for tipo, marca in config.marcas.items() if marca.sujeto_a_tope_conjunto}
+
+
 def _banderas_de_tope_conjunto(
     config: _Configuracion,
     acumulados: dict[tuple[str, str, int], _Acumulado],
-    combinaciones: set[tuple[str, str, int]],
+    empleados: set[tuple[str, int]],
 ) -> list[Bandera]:
     """El tope conjunto de previsión social (penúltimo párrafo del art. 93): la **suma** de
     esas exenciones se limita a 1 UMA anual por trabajador y por año.
 
-    **Qué tipos entran lo dice `sujeto_a_tope_conjunto`**, la columna que la tarea 3 agregó
-    justo para que esto no fuera una lista escrita en el programa (§2.12). Los seis afectados
-    llevan `PORCENTAJE 100` —la exención en bruto—, así que su tope por tipo nunca se excede
-    y sin esta comprobación el informe exentaría de más. Los exceptuados por el último
-    párrafo (jubilaciones, gastos médicos, funeral, fondo de ahorro…) simplemente no traen la
-    marca, así que no suman aquí: la lista de exceptuados tampoco vive en el código.
+    **Dos cosas que este cálculo NO comparte con el tope por tipo, y que costaron dos
+    defectos de "exentar de más en silencio":**
 
-    **Es una bandera de revisión, no un recálculo de ISR**, y el alcance se declara en el
-    mensaje: el párrafo condiciona el tope a que los ingresos por salarios más la previsión
-    social excedan de 7 UMA anuales, y añade un piso para que la limitación no deje al
-    trabajador por debajo de esas 7 UMA. Ninguna de las dos se evalúa aquí —haría falta la
-    base salarial anual completa del trabajador, incluida la de otros patrones— así que la
-    bandera señala el caso para que una persona lo revise, que es lo que hace este informe.
+    1. **No depende del `factor_exencion`.** Suma `importe_exento` y lo compara contra
+       `UMA_ANUAL`; el factor dudoso no interviene. La primera versión alimentaba esta suma
+       de las filas cuyo tope por tipo se había podido calcular, así que la duda declarada de
+       una marca apagaba también esta comprobación — y como **los seis tipos sujetos al tope
+       traen los seis `nota_revision` en la semilla real**, la única protección contra el
+       "exentar de más" de esos seis quedaba inerte en el 100% del catálogo de producción, sin
+       una sola bandera que lo dijera. Por eso el conjunto se arma aquí, de las marcas
+       confirmadas, y no de lo que se pudo calcular.
+    2. **No se acota al rango ni al filtro del informe.** Es una suma *entre* tipos: uno
+       pagado en enero consume la misma UMA anual que uno pagado en junio. `consultar` incluye
+       todos los tipos de `tipos_sujetos_al_tope_conjunto` en la consulta agregada, no solo
+       los presentes en las filas impresas — es el mismo arreglo que ya llevaba B-03.R2 para
+       los importes, aplicado ahora al conjunto de tipos.
+
+    `empleados` son los `(rfc_receptor, ejercicio)` de las filas impresas: el informe habla de
+    esos trabajadores. Lo que se amplía es qué tipos y qué fechas entran en su suma, no de
+    quién se opina.
+
+    **Es una bandera de revisión, no un recálculo de ISR**, y por eso lleva **clave propia** y
+    no `EXENCION_EXCEDIDA`: aquel es un exceso comprobable contra un tope de la ley y este es
+    explícitamente condicional. El párrafo limita la exención solo cuando los ingresos por
+    salarios más la previsión social exceden de 7 UMA anuales, y añade un piso para que la
+    limitación no deje al trabajador por debajo de esas 7 UMA; ninguna de las dos se evalúa
+    aquí —haría falta la base salarial anual completa del trabajador, incluida la de otros
+    patrones—. Emitirla igual es lo correcto: el falso positivo cuesta una lectura y el falso
+    negativo en un ingreso alto es el hallazgo caro. Pero quien filtra la hoja `Banderas`
+    tiene que poder separarlos por clave, no leyendo la prosa del mensaje.
     """
     banderas: list[Bandera] = []
-    tipos_con_tope = {tipo for tipo, marca in config.marcas.items() if marca.sujeto_a_tope_conjunto}
+    tipos_con_tope = tipos_sujetos_al_tope_conjunto(config)
     if not tipos_con_tope:
         return banderas
 
-    por_empleado: dict[tuple[str, int], Decimal] = defaultdict(lambda: _CERO)
-    for rfc, tipo, ejercicio in combinaciones:
-        if tipo not in tipos_con_tope:
-            continue
-        acumulado = acumulados.get((rfc, tipo, ejercicio))
-        if acumulado is not None:
-            por_empleado[(rfc, ejercicio)] += acumulado.exento
+    por_empleado: dict[tuple[str, int], Decimal] = {}
+    for rfc, ejercicio in empleados:
+        exento = sum(
+            (acumulados[(rfc, tipo, ejercicio)].exento for tipo in tipos_con_tope if (rfc, tipo, ejercicio) in acumulados),
+            _CERO,
+        )
+        if exento > _CERO:
+            por_empleado[(rfc, ejercicio)] = exento
 
     ejercicios_sin_uma_anual: set[int] = set()
     for (rfc, ejercicio), exento in sorted(por_empleado.items()):
@@ -671,16 +762,17 @@ def _banderas_de_tope_conjunto(
             continue
         banderas.append(
             Bandera(
-                clave="EXENCION_EXCEDIDA",
+                clave="TOPE_CONJUNTO_EXCEDIDO",
                 severidad="alta",
                 ambito=f"rfc:{rfc}|ejercicio:{ejercicio}",
                 mensaje=(
                     f"Tope conjunto de previsión social: las exenciones de previsión social de este empleado "
                     f"suman {exento} en {ejercicio} y el penúltimo párrafo del artículo 93 de la LISR las limita "
-                    f"a 1 UMA anual ({tope}). Hay {exento - tope} exentos de más. La limitación aplica cuando los "
-                    "ingresos por salarios más la previsión social exceden de 7 UMA anuales y tiene un piso "
-                    "propio; este informe no evalúa esas dos condiciones —necesitan la base salarial anual "
-                    "completa del trabajador—, así que confirma el caso antes de corregir."
+                    f"a 1 UMA anual ({tope}). Hay {exento - tope} exentos de más. La suma incluye todo el "
+                    "ejercicio y todos los tipos sujetos al tope, aunque no aparezcan en estas filas. La "
+                    "limitación aplica cuando los ingresos por salarios más la previsión social exceden de 7 UMA "
+                    "anuales y tiene un piso propio; este informe no evalúa esas dos condiciones —necesitan la "
+                    "base salarial anual completa del trabajador—, así que confirma el caso antes de corregir."
                 ),
             )
         )
@@ -785,7 +877,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     fechas.update(date(ejercicio, 12, 31) for ejercicio in ejercicios)
 
     config = await _configuracion(db, empresa_id, fechas, ejercicios)
-    acumulados = await _acumulado_anual(db, empresa_id, rfc_empresa, ejercicios, tipos, p.incluir_cancelados)
+    # El acumulado cubre los tipos de las filas impresas **y** todos los sujetos al tope
+    # conjunto, aunque ninguno de estos aparezca en el rango o lo excluya `tipo_percepcion`:
+    # el tope conjunto es una suma *entre* tipos y un vale pagado en enero consume la misma
+    # UMA anual que uno de junio. Sigue siendo una sola consulta.
+    acumulados = await _acumulado_anual(
+        db, empresa_id, rfc_empresa, ejercicios, tipos | tipos_sujetos_al_tope_conjunto(config), p.incluir_cancelados
+    )
 
     banderas: list[Bandera] = list(banderas_fuera)
     banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
@@ -800,6 +898,11 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # percepción concreta se pase, porque otra del mismo año se quedó corta.
     combinaciones: set[tuple[str, str, int]] = set()
     excede_alguna_fila: dict[tuple[str, str, int], bool] = defaultdict(bool)
+    # `(rfc_receptor, ejercicio)` de las filas impresas: de esos trabajadores habla el informe,
+    # y son los que se revisan contra el tope conjunto. **No se deriva de `combinaciones`**:
+    # ese conjunto solo tiene las filas cuyo tope por tipo se pudo calcular, y el tope conjunto
+    # no depende de ese cálculo (ver `_banderas_de_tope_conjunto`).
+    empleados: set[tuple[str, int]] = set()
 
     filas: list[list[Any]] = []
     # `_totales` (el encabezado de `nomina_totales`) no se usa: este informe reporta los nodos
@@ -814,6 +917,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         propuesta_uma = config.uma_propuesta.get(fecha_pago) if fecha_pago is not None else None
         salario_minimo = config.salario_minimo.get(fecha_pago) if fecha_pago is not None else None
         ejercicio = fecha_pago.year if fecha_pago is not None else None
+        if ejercicio is not None:
+            empleados.add((comprobante.rfc_receptor, ejercicio))
 
         for nodo in percepciones:
             total = nodo.importe_gravado + nodo.importe_exento
@@ -825,6 +930,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 propuesta_uma is not None,
                 salario_minimo,
                 config.zona_configurada,
+                fecha_pago is not None,
                 total,
             )
             if tope.causa in ("MARCA_SIN_CONFIRMAR", "FALTA_MARCA", "MARCA_CON_DUDA_DECLARADA"):
@@ -903,7 +1009,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 )
             )
 
-    banderas.extend(_banderas_de_tope_conjunto(config, acumulados, combinaciones))
+    banderas.extend(_banderas_de_tope_conjunto(config, acumulados, empleados))
 
     return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas)
 
@@ -924,6 +1030,14 @@ def _tope_anual(
     Devuelve `None` —nunca cero— cuando el valor que hace falta no está disponible al cierre
     del ejercicio: un cero aquí convertiría la ausencia de la UMA en un exceso inexistente
     sobre todos los empleados del informe.
+
+    **El matiz de enero, anotado a propósito.** La UMA cambia el 1 de febrero, así que la
+    columna "UMA aplicable" de una fila pagada en **enero** trae el valor del tramo anterior
+    y este tope anual trae el nuevo: el lector no puede reproducir la cifra multiplicando lo
+    que ve en su fila. La diferencia (~4-5% al año) va **hacia la indulgencia** —el tope sale
+    algo más alto—, que es lo contrario del criterio conservador del resto del módulo. Se
+    mantiene igual porque medir una cifra anual con el valor vigente al cierre es la lectura
+    fiscal estándar, y porque del 1 de febrero al 31 de diciembre los dos valores coinciden.
     """
     factor = marca.factor_exencion
     if factor is None:
