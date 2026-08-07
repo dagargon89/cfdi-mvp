@@ -17,6 +17,7 @@ import { SignupPage } from '@/features/auth/SignupPage';
 import { ComprobantesPage } from '@/features/comprobantes/ComprobantesPage';
 import { DescargasPage } from '@/features/descargas/DescargasPage';
 import { EfirmaPage } from '@/features/efirma/EfirmaPage';
+import { ConfiguracionEmpresaPage } from '@/features/empresas/ConfiguracionEmpresaPage';
 import { EmpresasPage } from '@/features/empresas/EmpresasPage';
 import { InformesPage } from '@/features/informes/InformesPage';
 import { NotificacionesPage } from '@/features/notificaciones/NotificacionesPage';
@@ -46,6 +47,10 @@ export function App() {
                       <Route path="config" element={<ConfigBitacoraPage />} />
                       <Route path="bitacora" element={<ConfigBitacoraPage />} />
                       <Route path="correo" element={<ConfigBitacoraPage />} />
+                      {/* La configuración fiscal es política federal: aplica a todas las empresas
+                          y el backend la restringe a admin (require_admin). La de cada empresa es
+                          política laboral suya y vive en /e/:id/configuracion, abierta a operador. */}
+                      <Route path="fiscal" element={<ConfigBitacoraPage />} />
                     </Route>
                   </Route>
                   {/* Rutas de empresa: EmpresaProvider va ANTES de AppShell para que el Sidebar
@@ -59,6 +64,7 @@ export function App() {
                         <Route path="descargas/:job" element={<DescargasPage />} />
                         <Route path="comprobantes" element={<ComprobantesPage />} />
                         <Route path="informes" element={<InformesPage />} />
+                        <Route path="configuracion" element={<ConfiguracionEmpresaPage />} />
                         <Route path="alertas" element={<AlertasPage />} />
                         <Route path="notificaciones" element={<NotificacionesPage />} />
                       </Route>

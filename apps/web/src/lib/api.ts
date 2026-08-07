@@ -148,6 +148,120 @@ export interface BitacoraEntrada {
   created_at: string;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Configuración fiscal (doc 05 §8bis) — añadido post-freeze (2026-08-06, informes CFDI fase 3).
+ *
+ * Invariante que gobierna todo este bloque: **un valor sin confirmar no calcula.** Sembrar o
+ * sincronizar *proponen*; solo una persona confirma, y los informes leen solo lo confirmado.
+ *
+ * **Los importes viajan como cadena, jamás como número.** El backend rechaza con 422 un importe
+ * que llegue como número JSON: se convierte pasando por `float` y pierde precisión antes de que
+ * el servidor pueda revisarlo (`12345678901.123456` llega ya redondeado). Por eso `valor`,
+ * `factor_prima_vacacional` e `importe` son `string` en las dos direcciones — no los conviertas
+ * a `number` ni para mostrarlos: la escala con la que vuelven ("117.310000") es la que está
+ * almacenada, y `Number()` la perdería.
+ * ---------------------------------------------------------------------------------------- */
+
+/** Procedencia de un valor: quién lo puso ahí. Ninguna de las tres confirma por sí sola. */
+export type OrigenValor = 'SEMILLA' | 'MANUAL' | 'SINCRONIZADO';
+
+/** Un tramo de `param_fiscal` con su vigencia, su procedencia y su estado de confirmación. */
+export interface ParametroFiscal {
+  clave: string;
+  ejercicio: number;
+  /** Cadena, nunca número — ver la nota de arriba. */
+  valor: string;
+  vigencia_desde: string;
+  vigencia_hasta: string | null;
+  origen: OrigenValor;
+  /** Texto libre; las semillas incluyen la URL del boletín/DOF dentro del propio texto. */
+  fuente: string;
+  sincronizado_en: string | null;
+  confirmado: boolean;
+  confirmado_por: string | null;
+  confirmado_en: string | null;
+}
+
+/** `claves_sin_valor` es el tercer estado: claves conocidas de las que no hay **ni propuesta**. */
+export interface ConfiguracionFiscal {
+  parametros: ParametroFiscal[];
+  claves_sin_valor: string[];
+}
+
+/** Captura o corrección manual. Guarda con `origen: MANUAL` y **sin** confirmar. */
+export interface ParametroFiscalIn {
+  valor: string;
+  vigencia_desde: string;
+  vigencia_hasta?: string | null;
+  fuente: string;
+  /** Nulo/omitido = el año de `vigencia_desde`. */
+  ejercicio?: number | null;
+}
+
+export type ZonaSalarial = 'GENERAL' | 'ZLFN';
+
+/** Política laboral de una organización. Los tres campos viajan siempre, incluso nulos: "no
+ * configurado" es un estado que la pantalla tiene que mostrar (degrada B-10), no una ausencia. */
+export interface ConfiguracionEmpresa {
+  empresa_id: number;
+  zona_salarial: ZonaSalarial | null;
+  dias_aguinaldo: number | null;
+  factor_prima_vacacional: string | null;
+}
+
+export type ConfiguracionEmpresaIn = Omit<ConfiguracionEmpresa, 'empresa_id'>;
+
+export type CategoriaProvision = 'AGUINALDO' | 'VACACIONES' | 'PRIMA_VACACIONAL' | 'NO_APLICA';
+
+export interface MapeoDepartamento {
+  departamento_texto: string;
+  centro_costo: string;
+}
+
+export interface MapeoConceptoProvision {
+  naturaleza: string;
+  tipo: string;
+  clave: string;
+  categoria: CategoriaProvision;
+}
+
+/** El `PUT` **reemplaza las dos listas completas**: lo que no venga deja de existir. */
+export interface MapeosEmpresa {
+  departamentos: MapeoDepartamento[];
+  conceptos_provision: MapeoConceptoProvision[];
+}
+
+/** Un concepto que la nómina de la empresa **emitió de verdad**. Existe para que configurar sea
+ * reconocer y elegir: nadie conoce de memoria las claves internas de su sistema de nómina. */
+export interface ConceptoObservado {
+  naturaleza: string;
+  tipo: string;
+  /** Nula cuando el complemento no la trae: entonces el concepto no se puede clasificar. */
+  clave: string | null;
+  /** El texto libre que escribió el patrón — es lo que la persona reconoce. */
+  concepto: string | null;
+  descripcion_sat: string | null;
+  comprobantes: number;
+  /** Cadena, nunca número — ver la nota de arriba. */
+  importe: string;
+  categoria: CategoriaProvision | null;
+}
+
+export interface DepartamentoObservado {
+  departamento_texto: string;
+  comprobantes: number;
+  centro_costo: string | null;
+}
+
+/** `sin_clasificar` es el marcador que la pantalla necesita para decir "te faltan N": mientras
+ * no sea cero, B-08 no puede distinguir "no se pagó aguinaldo" de "sí se pagó y no sé dónde". */
+export interface ObservadosEmpresa {
+  conceptos: ConceptoObservado[];
+  departamentos: DepartamentoObservado[];
+  sin_clasificar: number;
+  sin_mapear: number;
+}
+
 /** Entrada del catálogo de informes (doc: spec §7.2). `parametros` es un JSON Schema — la pantalla
  * de Informes construye el formulario a partir de `parametros.properties`/`required`, sin conocer
  * de antemano qué informe es (B-02 hoy, ocho más en fases 2-3, ninguno hardcodeado en la UI). */
@@ -240,4 +354,20 @@ export interface ApiClient {
   obtenerAutomatizaciones(): Promise<Automatizaciones>;
   guardarAutomatizaciones(input: Automatizaciones): Promise<Automatizaciones>;
   probarConfigSmtp(input: ConfigSmtpIn & { correo_destino: string }): Promise<void>;
+  /* Configuración fiscal (doc 05 §8bis) — añadido post-freeze (2026-08-06, informes fase 3).
+   * Los tres primeros son **solo administrador**: la configuración fiscal es política federal
+   * y aplica a todas las empresas. Los de empresa son política laboral suya: leer pide
+   * consulta, escribir pide operador — el mismo reparto que el resto de la API. */
+  listarConfiguracionFiscal(): Promise<ConfiguracionFiscal>;
+  /** Captura o corrige un tramo. **No confirma**: queda `MANUAL` y sin confirmar, a propósito. */
+  capturarParametroFiscal(clave: string, input: ParametroFiscalIn): Promise<ParametroFiscal>;
+  /** Confirma **el valor que se está confirmando**: si no coincide con el almacenado el servidor
+   * responde 409 `VALOR_CAMBIO` (la propuesta cambió entre que se pintó la pantalla y el clic). */
+  confirmarParametroFiscal(clave: string, input: { vigencia_desde: string; valor: string }): Promise<ParametroFiscal>;
+  obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
+  guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
+  obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
+  /** Reemplaza las dos listas completas: hay que mandar también la que no se está editando. */
+  guardarMapeosEmpresa(empresaId: number, input: MapeosEmpresa): Promise<MapeosEmpresa>;
+  obtenerConceptosObservados(empresaId: number): Promise<ObservadosEmpresa>;
 }

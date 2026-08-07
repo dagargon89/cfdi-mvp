@@ -12,6 +12,7 @@ import { Switch } from '@/components/ui/Switch';
 import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError, type Automatizaciones } from '@/lib/api';
 import { api } from '@/lib/client';
+import { ConfiguracionFiscalPage } from './ConfiguracionFiscalPage';
 
 // Tareas automáticas (beat) que el admin puede apagar/prender, con lo que pasa al desactivarlas.
 const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: string; consecuencia: string }[] = [
@@ -45,13 +46,14 @@ export function ConfigBitacoraPage() {
   const { pathname } = useLocation();
   const enBitacora = pathname.startsWith('/admin/bitacora');
   const enCorreo = pathname.startsWith('/admin/correo');
+  const enFiscal = pathname.startsWith('/admin/fiscal');
   const [pagina, setPagina] = useState(1);
   const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
   const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
 
   const qc = useQueryClient();
   const { toast } = useToast();
-  const enConfig = !enBitacora && !enCorreo;
+  const enConfig = !enBitacora && !enCorreo && !enFiscal;
 
   const { data: autos } = useQuery({ queryKey: ['automatizaciones'], queryFn: () => api.obtenerAutomatizaciones(), enabled: enConfig });
   const { data: bitacoraPage } = useQuery({
@@ -76,27 +78,22 @@ export function ConfigBitacoraPage() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-1 bg-surface-alt rounded-md p-0.5 w-fit">
-        <Link
-          to="/admin/config"
-          className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center"
-          style={{ background: !enBitacora && !enCorreo ? 'var(--surface)' : 'transparent', color: !enBitacora && !enCorreo ? 'var(--primary)' : 'var(--text-muted)' }}
-        >
-          Configuración
-        </Link>
-        <Link
-          to="/admin/correo"
-          className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center"
-          style={{ background: enCorreo ? 'var(--surface)' : 'transparent', color: enCorreo ? 'var(--primary)' : 'var(--text-muted)' }}
-        >
-          Correo
-        </Link>
-        <Link
-          to="/admin/bitacora"
-          className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center"
-          style={{ background: enBitacora ? 'var(--surface)' : 'transparent', color: enBitacora ? 'var(--primary)' : 'var(--text-muted)' }}
-        >
-          Bitácora
-        </Link>
+        {[
+          { href: '/admin/config', etiqueta: 'Configuración', activa: enConfig },
+          { href: '/admin/fiscal', etiqueta: 'Fiscal', activa: enFiscal },
+          { href: '/admin/correo', etiqueta: 'Correo', activa: enCorreo },
+          { href: '/admin/bitacora', etiqueta: 'Bitácora', activa: enBitacora },
+        ].map((t) => (
+          <Link
+            key={t.href}
+            to={t.href}
+            aria-current={t.activa ? 'page' : undefined}
+            className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center"
+            style={{ background: t.activa ? 'var(--surface)' : 'transparent', color: t.activa ? 'var(--primary)' : 'var(--text-muted)' }}
+          >
+            {t.etiqueta}
+          </Link>
+        ))}
       </div>
 
       {enConfig && (
@@ -122,6 +119,8 @@ export function ConfigBitacoraPage() {
           </div>
         </div>
       )}
+
+      {enFiscal && <ConfiguracionFiscalPage />}
 
       {enCorreo && <ConfigCorreoForm />}
 

@@ -4,13 +4,42 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, Automatizaciones, BitacoraEntrada, Comprobante, ConfigSmtp, EmpresaResumen, Evento, InformeCatalogo, Job, MetadataPreview, Page, UsuarioAdmin } from './api';
+import type { ApiClient, Automatizaciones, BitacoraEntrada, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
 interface ErrorEnvelope {
   error: { codigo: string; mensaje: string; trace_id?: string; detalle?: unknown };
+}
+
+/** Un fallo de validación de Pydantic (cuerpo mal formado) **no pasa por el manejador de
+ * `HTTPException` del backend**, así que llega sin el sobre `{error:{codigo,mensaje}}` de doc 05
+ * §1.4: FastAPI responde su propio `{"detail":[{loc,msg,type}]}`. Sin traducirlo aquí, un 422 de
+ * "días de aguinaldo fuera de rango" se le mostraba al usuario como "Error de red.", que es
+ * mentira y no dice qué corregir. */
+interface DetalleValidacion {
+  detail?: string | { loc?: unknown[]; msg?: string }[];
+}
+
+function aApiError(status: number, data: unknown): ApiError {
+  const envelope = data as ErrorEnvelope | null;
+  if (envelope?.error?.mensaje) {
+    return new ApiError(status, envelope.error.codigo ?? 'ERROR', envelope.error.mensaje);
+  }
+  const detalle = (data as DetalleValidacion | null)?.detail;
+  if (typeof detalle === 'string') return new ApiError(status, 'ERROR', detalle);
+  if (Array.isArray(detalle) && detalle.length > 0) {
+    const mensaje = detalle
+      .map((d) => {
+        // `loc` es ["body", "dias_aguinaldo"]: el campo es la última posición.
+        const campo = Array.isArray(d.loc) ? String(d.loc[d.loc.length - 1] ?? '') : '';
+        return campo ? `${campo}: ${d.msg ?? 'dato inválido'}` : (d.msg ?? 'dato inválido');
+      })
+      .join(' · ');
+    return new ApiError(status, 'DATOS_INVALIDOS', mensaje);
+  }
+  return new ApiError(status, 'ERROR', 'Error de red.');
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -28,10 +57,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const text = await res.text();
   const data: unknown = text ? JSON.parse(text) : null;
 
-  if (!res.ok) {
-    const envelope = data as ErrorEnvelope;
-    throw new ApiError(res.status, envelope?.error?.codigo ?? 'ERROR', envelope?.error?.mensaje ?? 'Error de red.');
-  }
+  if (!res.ok) throw aApiError(res.status, data);
   return data as T;
 }
 
@@ -46,13 +72,13 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
 
   if (!res.ok) {
     const text = await res.text();
-    let envelope: ErrorEnvelope | null = null;
+    let data: unknown = null;
     try {
-      envelope = text ? JSON.parse(text) : null;
+      data = text ? JSON.parse(text) : null;
     } catch {
-      // el cuerpo de error no era JSON — se usa el mensaje genérico de abajo
+      // el cuerpo de error no era JSON — se usa el mensaje genérico de `aApiError`
     }
-    throw new ApiError(res.status, envelope?.error?.codigo ?? 'ERROR', envelope?.error?.mensaje ?? 'Error de red.');
+    throw aApiError(res.status, data);
   }
   return res.blob();
 }
@@ -98,6 +124,14 @@ type ApiClientHttpSubset = Pick<
   | 'obtenerConfigSmtp'
   | 'guardarConfigSmtp'
   | 'probarConfigSmtp'
+  | 'listarConfiguracionFiscal'
+  | 'capturarParametroFiscal'
+  | 'confirmarParametroFiscal'
+  | 'obtenerConfiguracionEmpresa'
+  | 'guardarConfiguracionEmpresa'
+  | 'obtenerMapeosEmpresa'
+  | 'guardarMapeosEmpresa'
+  | 'obtenerConceptosObservados'
 >;
 
 export const apiHttp: ApiClientHttpSubset = {
@@ -230,4 +264,27 @@ export const apiHttp: ApiClientHttpSubset = {
   guardarConfigSmtp: (input) => request('/v1/config/smtp', { method: 'PUT', body: JSON.stringify(input) }),
 
   probarConfigSmtp: (input) => request('/v1/config/smtp/probar', { method: 'POST', body: JSON.stringify(input) }),
+
+  // Configuración fiscal (doc 05 §8bis). `JSON.stringify` conserva el importe como cadena
+  // porque el tipo ya lo es: convertirlo a número aquí sería exactamente lo que el 422 del
+  // backend existe para impedir.
+  listarConfiguracionFiscal: () => request<ConfiguracionFiscal>('/v1/configuracion/fiscal'),
+
+  capturarParametroFiscal: (clave, input) =>
+    request<ParametroFiscal>(`/v1/configuracion/fiscal/${encodeURIComponent(clave)}`, { method: 'PUT', body: JSON.stringify(input) }),
+
+  confirmarParametroFiscal: (clave, input) =>
+    request<ParametroFiscal>(`/v1/configuracion/fiscal/${encodeURIComponent(clave)}/confirmar`, { method: 'POST', body: JSON.stringify(input) }),
+
+  obtenerConfiguracionEmpresa: (empresaId) => request<ConfiguracionEmpresa>(`/v1/empresas/${empresaId}/configuracion`),
+
+  guardarConfiguracionEmpresa: (empresaId, input) =>
+    request<ConfiguracionEmpresa>(`/v1/empresas/${empresaId}/configuracion`, { method: 'PUT', body: JSON.stringify(input) }),
+
+  obtenerMapeosEmpresa: (empresaId) => request<MapeosEmpresa>(`/v1/empresas/${empresaId}/configuracion/mapeos`),
+
+  guardarMapeosEmpresa: (empresaId, input) =>
+    request<MapeosEmpresa>(`/v1/empresas/${empresaId}/configuracion/mapeos`, { method: 'PUT', body: JSON.stringify(input) }),
+
+  obtenerConceptosObservados: (empresaId) => request<ObservadosEmpresa>(`/v1/empresas/${empresaId}/configuracion/conceptos-observados`),
 };

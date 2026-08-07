@@ -306,6 +306,32 @@ export interface ConfiguracionItem { clave: string; ejercicio_fiscal: string; va
 export interface BitacoraEntrada { bitacora_id: number; actor: string; accion: string; entidad: string;
                                    detalle: Record<string, unknown>; created_at: string }
 
+// Configuración fiscal — añadido post-freeze (2026-08-06, informes fase 3). Ver §8bis.
+// Los importes van como CADENA en las dos direcciones (`valor`, `factor_prima_vacacional`,
+// `importe`): un número JSON pasa por `float` y el backend lo rechaza con 422.
+export type OrigenValor = 'SEMILLA' | 'MANUAL' | 'SINCRONIZADO';
+export type ZonaSalarial = 'GENERAL' | 'ZLFN';
+export type CategoriaProvision = 'AGUINALDO' | 'VACACIONES' | 'PRIMA_VACACIONAL' | 'NO_APLICA';
+export interface ParametroFiscal { clave: string; ejercicio: number; valor: string; vigencia_desde: string;
+                                   vigencia_hasta: string | null; origen: OrigenValor; fuente: string;
+                                   sincronizado_en: string | null; confirmado: boolean;
+                                   confirmado_por: string | null; confirmado_en: string | null }
+export interface ConfiguracionFiscal { parametros: ParametroFiscal[]; claves_sin_valor: string[] }
+export interface ParametroFiscalIn { valor: string; vigencia_desde: string; vigencia_hasta?: string | null;
+                                     fuente: string; ejercicio?: number | null }
+export interface ConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null;
+                                        dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
+export type ConfiguracionEmpresaIn = Omit<ConfiguracionEmpresa, 'empresa_id'>;
+export interface MapeoDepartamento { departamento_texto: string; centro_costo: string }
+export interface MapeoConceptoProvision { naturaleza: string; tipo: string; clave: string; categoria: CategoriaProvision }
+export interface MapeosEmpresa { departamentos: MapeoDepartamento[]; conceptos_provision: MapeoConceptoProvision[] }
+export interface ConceptoObservado { naturaleza: string; tipo: string; clave: string | null; concepto: string | null;
+                                     descripcion_sat: string | null; comprobantes: number; importe: string;
+                                     categoria: CategoriaProvision | null }
+export interface DepartamentoObservado { departamento_texto: string; comprobantes: number; centro_costo: string | null }
+export interface ObservadosEmpresa { conceptos: ConceptoObservado[]; departamentos: DepartamentoObservado[];
+                                     sin_clasificar: number; sin_mapear: number }
+
 export interface ApiClient {
   // Sesión (prioridad 1)
   me(): Promise<{ usuario_id: number; correo: string; nombre: string; rol_global: Rol; empresas: EmpresaResumen[] }>;
@@ -342,8 +368,25 @@ export interface ApiClient {
   listarUsuarios(): Promise<UsuarioAdmin[]>;
   listarConfiguracion(): Promise<ConfiguracionItem[]>;
   listarBitacora(f?: { page?: number }): Promise<Page<BitacoraEntrada>>;
+  // Configuración fiscal (§8bis) — añadido post-freeze (2026-08-06, informes fase 3), consumido por
+  // la pestaña /admin/fiscal y por /e/:id/configuracion. Los tres primeros son solo admin; los de
+  // empresa siguen el reparto de siempre (GET consulta+, PUT operador+).
+  listarConfiguracionFiscal(): Promise<ConfiguracionFiscal>;
+  capturarParametroFiscal(clave: string, input: ParametroFiscalIn): Promise<ParametroFiscal>;
+  confirmarParametroFiscal(clave: string, input: { vigencia_desde: string; valor: string }): Promise<ParametroFiscal>;
+  obtenerConfiguracionEmpresa(empresaId: number): Promise<ConfiguracionEmpresa>;
+  guardarConfiguracionEmpresa(empresaId: number, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa>;
+  obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
+  guardarMapeosEmpresa(empresaId: number, input: MapeosEmpresa): Promise<MapeosEmpresa>;
+  obtenerConceptosObservados(empresaId: number): Promise<ObservadosEmpresa>;
 }
 ```
+
+**No hay métodos para `catalogo_percepcion_marca`** (§8bis los expone como endpoints), y no es un olvido: las
+44 marcas se sembraron con **39 dudas declaradas** (`config/fiscal/README.md` §5.3) que **no viajan en la
+respuesta** de `GET /v1/configuracion/percepciones`. Una pantalla que ofreciera "Confirmar" sobre esas
+filas dejaría confirmar a ciegas justo lo que el invariante existe para impedir. Cuando se construya, la
+duda tiene que llegar primero al contrato.
 
 Campos `escenarioDemo`/`simVencidaDemo` de `subirEfirma`/`crearDescarga` son exclusivos de
 `VITE_DEMO_CONTROLS` (fuerzan la respuesta del backend simulado para la sesión de validación) — no

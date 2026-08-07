@@ -23,6 +23,7 @@ import {
   Settings,
   ShieldCheck,
   ShieldX,
+  SlidersHorizontal,
   Users,
   X,
   type LucideIcon,
@@ -38,6 +39,7 @@ export const NAV_ICON = {
   campana: Bell,
   usuarios: Users,
   engrane: Settings,
+  ajustes: SlidersHorizontal,
   pergamino: ScrollText,
   informes: FileSpreadsheet,
 } satisfies Record<string, LucideIcon>;

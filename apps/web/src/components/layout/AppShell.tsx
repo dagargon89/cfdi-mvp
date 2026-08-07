@@ -14,7 +14,9 @@ function tituloDePantalla(pathname: string, empresaNombre: string | undefined): 
   if (pathname.includes('/comprobantes')) return 'Comprobantes';
   if (pathname.includes('/alertas')) return 'Alertas y eventos';
   if (pathname.includes('/notificaciones')) return 'Notificaciones';
+  if (pathname.includes('/configuracion')) return 'Configuración de la empresa';
   if (pathname === '/admin/usuarios') return 'Administración · Usuarios';
+  if (pathname === '/admin/fiscal') return 'Administración · Configuración fiscal';
   if (pathname.startsWith('/admin/')) return 'Administración · Configuración';
   if (/^\/e\/\d+$/.test(pathname)) return empresaNombre ?? 'Tablero';
   return 'Hub CFDI';

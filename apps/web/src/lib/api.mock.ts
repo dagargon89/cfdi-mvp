@@ -10,9 +10,14 @@ import type {
   ApiClient,
   Automatizaciones,
   BitacoraEntrada,
+  CategoriaProvision,
   Comprobante,
+  ConceptoObservado,
   ConfigSmtp,
   ConfigSmtpIn,
+  ConfiguracionEmpresa,
+  ConfiguracionEmpresaIn,
+  ConfiguracionFiscal,
   ConfiguracionItem,
   EmpresaResumen,
   EstadoJob,
@@ -20,12 +25,18 @@ import type {
   Evento,
   InformeCatalogo,
   Job,
+  MapeosEmpresa,
   MetadataPreview,
   NotificacionDestino,
+  ObservadosEmpresa,
+  OrigenValor,
   Page,
+  ParametroFiscal,
+  ParametroFiscalIn,
   Rol,
   TipoEvento,
   UsuarioAdmin,
+  ZonaSalarial,
 } from './api';
 import { maxMesesVentana, ventanasDe } from './domain';
 
@@ -50,6 +61,18 @@ interface DbDestino { destino_id: number; empresa_id: number; correo: string; ev
 interface DbBitacora { bitacora_id: number; actor: string; accion: string; entidad: string; detalle: Record<string, unknown>; created_at: string }
 interface DbConfigSmtp { host: string; port: number; usuario: string; password: string; remitente: string; tls: boolean }
 interface DbConfig { clave: string; ejercicio_fiscal: string; valor: string | number }
+interface DbParamFiscal {
+  clave: string; ejercicio: number; valor: string; vigencia_desde: string; vigencia_hasta: string | null;
+  origen: OrigenValor; fuente: string; sincronizado_en: string | null;
+  confirmado_por: string | null; confirmado_en: string | null;
+}
+interface DbConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null; dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
+interface DbMapDepartamento { empresa_id: number; departamento_texto: string; centro_costo: string }
+interface DbMapConceptoProvision { empresa_id: number; naturaleza: string; tipo: string; clave: string; categoria: CategoriaProvision }
+interface DbNominaObservada {
+  empresa_id: number; naturaleza: string; tipo: string; clave: string | null; concepto: string;
+  descripcion_sat: string | null; comprobantes: number; importe: string; departamento: string;
+}
 
 const db = {
   usuarios: [
@@ -102,6 +125,39 @@ const db = {
   ] as DbConfig[],
   configSmtp: null as DbConfigSmtp | null,
   automatizaciones: { sync_diaria: true, lista_69b: true, re_verificar: true, limpieza: true } as Automatizaciones,
+  // Configuración fiscal (doc 05 §8bis). Hay **un parámetro en cada uno de los tres estados**
+  // a propósito, para poder ver la pantalla completa sin backend: UMA_DIARIA 2025 confirmada,
+  // UMA_DIARIA 2026 y el salario mínimo propuestos, y cuatro claves sin ningún valor.
+  param_fiscal: [
+    {
+      clave: 'UMA_DIARIA', ejercicio: 2025, valor: '113.140000', vigencia_desde: '2025-02-01', vigencia_hasta: '2026-01-31',
+      origen: 'SEMILLA', fuente: 'INEGI, boletín UMA 2025 — https://www.inegi.org.mx/temas/uma/',
+      sincronizado_en: null, confirmado_por: 'dgarcia@planjuarez.org', confirmado_en: '2025-02-03 10:12:00',
+    },
+    {
+      clave: 'UMA_DIARIA', ejercicio: 2026, valor: '117.310000', vigencia_desde: '2026-02-01', vigencia_hasta: null,
+      origen: 'SEMILLA', fuente: 'INEGI, boletín UMA 2026 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2026/uma/uma2026.pdf',
+      sincronizado_en: null, confirmado_por: null, confirmado_en: null,
+    },
+    {
+      clave: 'SALARIO_MINIMO_GENERAL', ejercicio: 2026, valor: '315.040000', vigencia_desde: '2026-01-01', vigencia_hasta: null,
+      origen: 'SEMILLA', fuente: 'DOF 09-12-2025, resolución del CONASAMI (salarios mínimos 2026) — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025',
+      sincronizado_en: null, confirmado_por: null, confirmado_en: null,
+    },
+  ] as DbParamFiscal[],
+  configuracion_empresa: [] as DbConfiguracionEmpresa[],
+  map_departamento: [] as DbMapDepartamento[],
+  map_concepto_provision: [] as DbMapConceptoProvision[],
+  // Lo que la nómina de la empresa emitió de verdad (lo que en el backend son cuatro consultas
+  // agregadas sobre los CFDI de tipo N). El renglón sin clave está aquí a propósito: existe en
+  // los datos reales, no se puede clasificar, y por eso tampoco cuenta como pendiente.
+  nomina_observada: [
+    { empresa_id: 7, naturaleza: 'P', tipo: '001', clave: 'P001', concepto: 'SUELDO', descripcion_sat: 'Sueldos, Salarios Rayas y Jornales', comprobantes: 48, importe: '1284500.00', departamento: 'ADMINISTRACION' },
+    { empresa_id: 7, naturaleza: 'P', tipo: '002', clave: 'P020', concepto: 'AGUINALDO', descripcion_sat: 'Gratificación Anual (Aguinaldo)', comprobantes: 12, importe: '186300.00', departamento: 'ADMINISTRACION' },
+    { empresa_id: 7, naturaleza: 'P', tipo: '021', clave: 'P030', concepto: 'PRIMA VACACIONAL', descripcion_sat: 'Prima Vacacional', comprobantes: 9, importe: '41200.00', departamento: 'OPERACIONES' },
+    { empresa_id: 7, naturaleza: 'P', tipo: '029', clave: null, concepto: 'FONDO DE AHORRO', descripcion_sat: 'Fondo de ahorro', comprobantes: 6, importe: '30000.00', departamento: 'OPERACIONES' },
+    { empresa_id: 7, naturaleza: 'D', tipo: '001', clave: 'D010', concepto: 'PRESTAMO PERSONAL', descripcion_sat: 'Seguridad social', comprobantes: 4, importe: '12800.00', departamento: 'OPERACIONES' },
+  ] as DbNominaObservada[],
 };
 
 const CONFIG_DESC: Record<string, string> = {
@@ -238,6 +294,81 @@ function stamp(): string {
 
 function logBitacora(actor: string, accion: string, entidad: string, detalle: Record<string, unknown>) {
   db.bitacora.unshift({ bitacora_id: nextBitacoraId++, actor, accion, entidad, detalle, created_at: stamp() });
+}
+
+// --- configuración fiscal: las MISMAS reglas del backend, no una versión relajada ---------------
+// En la fase 1 un mock permisivo escondió un 403 real hasta la verificación en vivo. Aquí las
+// validaciones son las de `app/services/configuracion_fiscal.py` y `app/api/v1/schemas.py`: si el
+// mock deja pasar algo que el backend rechaza, la pantalla se diseña contra una realidad falsa.
+
+const CLAVES_PARAM_FISCAL = ['SALARIO_MINIMO_GENERAL', 'SALARIO_MINIMO_ZLFN', 'TIPO_CAMBIO_USD', 'UMA_ANUAL', 'UMA_DIARIA', 'UMA_MENSUAL'];
+const DECIMALES_MAXIMOS = 6;
+
+/** Normaliza un importe en texto para poder compararlo sin pasar por `Number` (que es justo lo
+ * que el contrato prohíbe): "117.31" y "117.310000" son el mismo valor. `null` si no es número. */
+function importeNormalizado(texto: string): string | null {
+  const t = texto.trim();
+  if (!/^[+-]?\d+(\.\d+)?$/.test(t)) return null;
+  const negativo = t.startsWith('-');
+  const [enteros, decimales = ''] = t.replace(/^[+-]/, '').split('.');
+  const e = enteros.replace(/^0+(?=\d)/, '');
+  const d = decimales.replace(/0+$/, '');
+  const cifra = `${e}${d ? `.${d}` : ''}`;
+  return negativo && cifra !== '0' ? `-${cifra}` : cifra;
+}
+
+/** Un importe que llega como número JSON ya perdió precisión: el backend responde 422 y el mock
+ * también, porque es un error que solo se ve si alguien lo comete. */
+function exigeImporteCadena(valor: unknown): string {
+  if (typeof valor === 'number') {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', 'manda el importe entre comillas ("117.31"), no como número JSON: un número se convierte pasando por float y pierde precisión antes de que el servidor pueda revisarlo.');
+  }
+  if (typeof valor !== 'string') throw new ApiError(422, 'CONFIGURACION_INVALIDA', '`valor` tiene que venir como cadena.');
+  return valor;
+}
+
+function exigeParamFiscalValido(clave: string, body: ParametroFiscalIn): string {
+  if (!CLAVES_PARAM_FISCAL.includes(clave)) {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`clave\` = '${clave}' no es una clave conocida de param_fiscal. Esperadas: ${CLAVES_PARAM_FISCAL.join(', ')}.`);
+  }
+  const bruto = exigeImporteCadena(body.valor);
+  const valor = importeNormalizado(bruto);
+  if (valor === null) throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`valor\` no es un número válido (llegó '${bruto}').`);
+  if (valor.startsWith('-') || valor === '0') {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`valor\` debe ser positivo (llegó ${valor}). Un cero o un negativo en un tope de exención o en un salario mínimo produce cálculos falsos sin que nadie los note.`);
+  }
+  const decimales = valor.includes('.') ? valor.split('.')[1].length : 0;
+  if (decimales > DECIMALES_MAXIMOS) {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`valor\` trae ${decimales} decimales y la columna guarda ${DECIMALES_MAXIMOS} (llegó ${valor}). Redondearlo en silencio guardaría una cifra distinta de la que revisaste; recórtalo tú a 6 decimales.`);
+  }
+  if (!body.fuente.trim()) {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', '`fuente` no puede ir vacía: sin ella nadie puede revisar de dónde salió el valor.');
+  }
+  if (body.vigencia_hasta && body.vigencia_hasta < body.vigencia_desde) {
+    throw new ApiError(422, 'CONFIGURACION_INVALIDA', `\`vigencia_hasta\` (${body.vigencia_hasta}) es anterior a \`vigencia_desde\` (${body.vigencia_desde}).`);
+  }
+  return bruto;
+}
+
+/** Dos tramos se solapan si ninguno termina antes de que empiece el otro (`vigencia_hasta` nula
+ * = abierto). Misma regla que `_se_solapan` del servicio: el esquema no la puede sostener. */
+function seSolapan(aDesde: string, aHasta: string | null, bDesde: string, bHasta: string | null): boolean {
+  return (aHasta === null || aHasta >= bDesde) && (bHasta === null || bHasta >= aDesde);
+}
+
+function paramASalida(fila: DbParamFiscal): ParametroFiscal {
+  return {
+    clave: fila.clave, ejercicio: fila.ejercicio, valor: fila.valor,
+    vigencia_desde: fila.vigencia_desde, vigencia_hasta: fila.vigencia_hasta,
+    origen: fila.origen, fuente: fila.fuente, sincronizado_en: fila.sincronizado_en,
+    confirmado: fila.confirmado_en !== null, confirmado_por: fila.confirmado_por, confirmado_en: fila.confirmado_en,
+  };
+}
+
+function requireAdminMock(accion: string): DbUsuario {
+  const u = requireUsuario();
+  if (!esAdmin(u)) throw new ApiError(403, 'SOLO_ADMIN', `Solo un administrador puede ${accion}.`);
+  return u;
 }
 
 /**
@@ -639,4 +770,175 @@ export const apiMock: ApiClient = {
   async crearAdminBootstrap(): Promise<void> {
     throw new ApiError(409, 'BOOTSTRAP_YA_REALIZADO', 'El mock ya tiene un administrador.');
   },
+
+  // --- Configuración fiscal (doc 05 §8bis) -----------------------------------------------------
+
+  async listarConfiguracionFiscal(): Promise<ConfiguracionFiscal> {
+    requireAdminMock('ver la configuración fiscal');
+    const parametros = [...db.param_fiscal]
+      .sort((a, b) => a.clave.localeCompare(b.clave) || a.vigencia_desde.localeCompare(b.vigencia_desde))
+      .map(paramASalida);
+    const conValor = new Set(parametros.map((p) => p.clave));
+    return { parametros, claves_sin_valor: CLAVES_PARAM_FISCAL.filter((c) => !conValor.has(c)) };
+  },
+
+  async capturarParametroFiscal(clave, input): Promise<ParametroFiscal> {
+    const u = requireAdminMock('capturar un valor fiscal');
+    const valor = exigeParamFiscalValido(clave, input);
+    const hasta = input.vigencia_hasta ?? null;
+
+    const tramos = db.param_fiscal.filter((p) => p.clave === clave);
+    for (const otro of tramos) {
+      if (otro.vigencia_desde === input.vigencia_desde) continue; // es la misma fila
+      if (seSolapan(input.vigencia_desde, hasta, otro.vigencia_desde, otro.vigencia_hasta)) {
+        throw new ApiError(409, 'VIGENCIA_SOLAPADA', `el tramo ${input.vigencia_desde}..${hasta ?? 'nuevo aviso'} de \`${clave}\` se solapa con el que ya existe (${otro.vigencia_desde}..${otro.vigencia_hasta ?? 'nuevo aviso'}, valor ${otro.valor}). Cierra el tramo anterior poniéndole \`vigencia_hasta\` el día previo, o corrige la fecha si tecleaste mal el año.`);
+      }
+    }
+
+    let fila = tramos.find((p) => p.vigencia_desde === input.vigencia_desde);
+    if (!fila) {
+      fila = {
+        clave, ejercicio: input.ejercicio ?? Number(input.vigencia_desde.slice(0, 4)), valor,
+        vigencia_desde: input.vigencia_desde, vigencia_hasta: hasta, origen: 'MANUAL',
+        fuente: input.fuente, sincronizado_en: null, confirmado_por: null, confirmado_en: null,
+      };
+      db.param_fiscal.push(fila);
+    } else {
+      // Si la cifra cambia, la confirmación anterior se limpia: un valor distinto es un valor
+      // nuevo y necesita que alguien lo vuelva a mirar. Cambiar solo fuente o vigencia no la tira.
+      if (importeNormalizado(fila.valor) !== importeNormalizado(valor)) {
+        fila.confirmado_por = null;
+        fila.confirmado_en = null;
+      }
+      fila.valor = valor;
+      fila.vigencia_hasta = hasta;
+      fila.fuente = input.fuente;
+      fila.origen = 'MANUAL';
+      fila.ejercicio = input.ejercicio ?? Number(input.vigencia_desde.slice(0, 4));
+    }
+    logBitacora(u.correo, 'capturar_param_fiscal', `param_fiscal:${clave}@${input.vigencia_desde}`, { clave, valor });
+    return paramASalida(fila);
+  },
+
+  async confirmarParametroFiscal(clave, input): Promise<ParametroFiscal> {
+    const u = requireAdminMock('confirmar un valor fiscal');
+    const fila = db.param_fiscal.find((p) => p.clave === clave && p.vigencia_desde === input.vigencia_desde);
+    if (!fila) throw new ApiError(404, 'NO_ENCONTRADO', 'No encontrado.');
+    const enviado = importeNormalizado(exigeImporteCadena(input.valor));
+    if (enviado === null || enviado !== importeNormalizado(fila.valor)) {
+      throw new ApiError(409, 'VALOR_CAMBIO', `El valor de \`${clave}\` cambió mientras revisabas: está en ${fila.valor} y confirmaste ${input.valor}. Vuelve a cargar la pantalla y revísalo otra vez antes de confirmar.`);
+    }
+    // Idempotente: reconfirmar no reescribe quién lo revisó ni deja bitácora de un no-cambio.
+    if (fila.confirmado_en !== null) return paramASalida(fila);
+    fila.confirmado_por = u.correo;
+    fila.confirmado_en = stamp();
+    logBitacora(u.correo, 'confirmar_param_fiscal', `param_fiscal:${clave}@${input.vigencia_desde}`, { clave, valor: fila.valor });
+    return paramASalida(fila);
+  },
+
+  async obtenerConfiguracionEmpresa(empresaId): Promise<ConfiguracionEmpresa> {
+    // Leer pide CONSULTA y escribir OPERADOR: un usuario de consulta ya puede generar los
+    // informes cuyo resultado depende de la zona salarial, así que esconderle la entrada
+    // mientras se le muestra la salida no protege nada.
+    requireRol(empresaId, 'consulta');
+    const fila = db.configuracion_empresa.find((c) => c.empresa_id === empresaId);
+    return {
+      empresa_id: empresaId,
+      zona_salarial: fila?.zona_salarial ?? null,
+      dias_aguinaldo: fila?.dias_aguinaldo ?? null,
+      factor_prima_vacacional: fila?.factor_prima_vacacional ?? null,
+    };
+  },
+
+  async guardarConfiguracionEmpresa(empresaId, input: ConfiguracionEmpresaIn): Promise<ConfiguracionEmpresa> {
+    const u = requireRol(empresaId, 'operador');
+    if (input.dias_aguinaldo !== null && (!Number.isInteger(input.dias_aguinaldo) || input.dias_aguinaldo < 1 || input.dias_aguinaldo > 365)) {
+      throw new ApiError(422, 'DATOS_INVALIDOS', 'dias_aguinaldo: el valor tiene que ser un entero entre 1 y 365.');
+    }
+    if (input.factor_prima_vacacional !== null) {
+      const factor = importeNormalizado(exigeImporteCadena(input.factor_prima_vacacional));
+      const decimales = factor && factor.includes('.') ? factor.split('.')[1].length : 0;
+      if (factor === null || factor.startsWith('-') || factor === '0' || Number(factor) > 9.9999 || decimales > 4) {
+        throw new ApiError(422, 'DATOS_INVALIDOS', 'factor_prima_vacacional: tiene que ser mayor que cero, máximo 9.9999, con hasta 4 decimales.');
+      }
+    }
+    let fila = db.configuracion_empresa.find((c) => c.empresa_id === empresaId);
+    if (!fila) {
+      fila = { empresa_id: empresaId, zona_salarial: null, dias_aguinaldo: null, factor_prima_vacacional: null };
+      db.configuracion_empresa.push(fila);
+    }
+    fila.zona_salarial = input.zona_salarial;
+    fila.dias_aguinaldo = input.dias_aguinaldo;
+    fila.factor_prima_vacacional = input.factor_prima_vacacional;
+    logBitacora(u.correo, 'guardar_configuracion_empresa', `empresa:${empresaId}`, { ...input });
+    return { empresa_id: empresaId, ...input };
+  },
+
+  async obtenerMapeosEmpresa(empresaId): Promise<MapeosEmpresa> {
+    requireRol(empresaId, 'consulta');
+    return leerMapeos(empresaId);
+  },
+
+  async guardarMapeosEmpresa(empresaId, input): Promise<MapeosEmpresa> {
+    const u = requireRol(empresaId, 'operador');
+    // Dos renglones con la misma clave natural se pisan entre sí: el backend los rechaza en vez
+    // de guardar el último en silencio.
+    exigeSinDuplicados(input.departamentos.map((d) => d.departamento_texto), 'departamentos', '`departamento_texto`');
+    exigeSinDuplicados(input.conceptos_provision.map((c) => `${c.naturaleza}/${c.tipo}/${c.clave}`), 'conceptos_provision', 'la terna (`naturaleza`, `tipo`, `clave`)');
+
+    db.map_departamento = db.map_departamento.filter((m) => m.empresa_id !== empresaId);
+    db.map_concepto_provision = db.map_concepto_provision.filter((m) => m.empresa_id !== empresaId);
+    input.departamentos.forEach((d) => db.map_departamento.push({ empresa_id: empresaId, ...d }));
+    input.conceptos_provision.forEach((c) => db.map_concepto_provision.push({ empresa_id: empresaId, ...c }));
+    logBitacora(u.correo, 'guardar_mapeos_empresa', `empresa:${empresaId}`, { departamentos: input.departamentos.length, conceptos: input.conceptos_provision.length });
+    return leerMapeos(empresaId);
+  },
+
+  async obtenerConceptosObservados(empresaId): Promise<ObservadosEmpresa> {
+    requireRol(empresaId, 'consulta');
+    const observados = db.nomina_observada.filter((n) => n.empresa_id === empresaId);
+    const mapeos = leerMapeos(empresaId);
+    const conceptos: ConceptoObservado[] = observados.map((n) => ({
+      naturaleza: n.naturaleza, tipo: n.tipo, clave: n.clave, concepto: n.concepto,
+      descripcion_sat: n.descripcion_sat, comprobantes: n.comprobantes, importe: n.importe,
+      categoria: mapeos.conceptos_provision.find((m) => m.naturaleza === n.naturaleza && m.tipo === n.tipo && m.clave === n.clave)?.categoria ?? null,
+    }));
+    const textos = [...new Set(observados.map((n) => n.departamento))].sort();
+    const departamentos = textos.map((texto) => ({
+      departamento_texto: texto,
+      comprobantes: observados.filter((n) => n.departamento === texto).reduce((s, n) => s + n.comprobantes, 0),
+      centro_costo: mapeos.departamentos.find((m) => m.departamento_texto === texto)?.centro_costo ?? null,
+    }));
+    return {
+      conceptos,
+      departamentos,
+      // Un concepto sin clave no se puede clasificar (la clave va en la PK del mapeo), así que
+      // tampoco cuenta como pendiente: si contara, el marcador nunca bajaría a cero.
+      sin_clasificar: conceptos.filter((c) => c.categoria === null && c.clave !== null).length,
+      sin_mapear: departamentos.filter((d) => d.centro_costo === null).length,
+    };
+  },
 };
+
+function leerMapeos(empresaId: number): MapeosEmpresa {
+  return {
+    departamentos: db.map_departamento
+      .filter((m) => m.empresa_id === empresaId)
+      .map(({ departamento_texto, centro_costo }) => ({ departamento_texto, centro_costo }))
+      .sort((a, b) => a.departamento_texto.localeCompare(b.departamento_texto)),
+    conceptos_provision: db.map_concepto_provision
+      .filter((m) => m.empresa_id === empresaId)
+      .map(({ naturaleza, tipo, clave, categoria }) => ({ naturaleza, tipo, clave, categoria }))
+      .sort((a, b) => `${a.naturaleza}${a.tipo}${a.clave}`.localeCompare(`${b.naturaleza}${b.tipo}${b.clave}`)),
+  };
+}
+
+function exigeSinDuplicados(claves: string[], seccion: string, nombre: string): void {
+  const vistas = new Set<string>();
+  for (const clave of claves) {
+    if (vistas.has(clave)) {
+      throw new ApiError(422, 'MAPEO_DUPLICADO', `\`${seccion}\` trae ${nombre} repetida ('${clave}'). Dos renglones con la misma clave se pisan entre sí.`);
+    }
+    vistas.add(clave);
+  }
+}

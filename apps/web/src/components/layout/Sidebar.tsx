@@ -71,6 +71,9 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       { key: 'descargas', label: 'Descargas', Icon: NAV_ICON.descarga, href: `${base}/descargas`, active: path.startsWith(`${base}/descargas`) },
       { key: 'comprobantes', label: 'Comprobantes', Icon: NAV_ICON.lista, href: `${base}/comprobantes`, active: path.startsWith(`${base}/comprobantes`) },
       { key: 'informes', label: 'Informes', Icon: NAV_ICON.informes, href: `${base}/informes`, active: path.startsWith(`${base}/informes`) },
+      // Visible también para el rol de consulta: el backend abre el GET a CONSULTA a propósito
+      // (un usuario que ya puede generar los informes tiene que poder ver por qué salen degradados).
+      { key: 'config-empresa', label: 'Configuración', Icon: NAV_ICON.ajustes, href: `${base}/configuracion`, active: path.startsWith(`${base}/configuracion`) },
     );
     // Alertas y Notificaciones no aplican al rol de solo consulta en esa empresa.
     if (empresaActiva.rol !== 'consulta') {
@@ -83,7 +86,7 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
   if (usuario?.rol_global === 'admin') {
     items.push(
       { key: 'usuarios', label: 'Usuarios', Icon: NAV_ICON.usuarios, href: '/admin/usuarios', active: path === '/admin/usuarios' },
-      { key: 'admin', label: 'Config · Bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') || path.startsWith('/admin/correo') },
+      { key: 'admin', label: 'Config · Bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') || path.startsWith('/admin/correo') || path.startsWith('/admin/fiscal') },
     );
   }
 
