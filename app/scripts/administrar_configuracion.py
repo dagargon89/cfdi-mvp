@@ -43,6 +43,7 @@ hay usuarios.
 Uso:
     python -m app.scripts.administrar_configuracion estado
     python -m app.scripts.administrar_configuracion estado --percepciones --empresa-id 11
+    python -m app.scripts.administrar_configuracion estado --percepciones --como-comandos --actor a@b.mx
     python -m app.scripts.administrar_configuracion confirmar-valor --actor a@b.mx \\
         --valor UMA_DIARIA 117.31 2026-02-01
     python -m app.scripts.administrar_configuracion capturar-valor UMA_DIARIA \\
@@ -404,7 +405,7 @@ async def _mostrar_alertas(db: AsyncSession, hoy: date) -> None:
             print(f"      {alerta.detalle}")
 
 
-async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool) -> None:
+async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool, como_comandos: str | None) -> None:
     filas = list(
         (await db.scalars(select(CatalogoPercepcionMarca).order_by(CatalogoPercepcionMarca.tipo_percepcion))).all()
     )
@@ -418,6 +419,9 @@ async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool) -> None:
         f"\nMARCAS DE PERCEPCIÓN — {len(filas)} de {total_sat} capturadas, "
         f"{confirmadas} confirmada(s), {con_duda} con duda declarada"
     )
+    if como_comandos is not None:
+        _imprimir_comandos_de_marcas(filas, descripciones, actor=como_comandos)
+        return
     if not detallado:
         print("  (usa `estado --percepciones` para verlas una por una, con su huella)")
         return
@@ -442,6 +446,74 @@ async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool) -> None:
             print("      confirmada   NO — sin confirmar no calcula ninguna exención")
 
 
+def _salida_a_terminal() -> bool:
+    """Si la salida va a una terminal, es decir: si hay alguien leyéndola.
+
+    Redirigida a un archivo o entubada a `sh`, no lo hay — y de eso depende si el generador
+    de comandos imprime la huella. Ver `_imprimir_comandos_de_marcas`."""
+    return sys.stdout.isatty()
+
+
+def _imprimir_comandos_de_marcas(
+    filas: Sequence[CatalogoPercepcionMarca], descripciones: dict[str, str], *, actor: str
+) -> None:
+    """Los comandos `confirmar-marca` de lo que falta, ya formados.
+
+    Existe porque teclear 64 caracteres de huella por cada una de las 39 marcas con duda no lo
+    hace nadie, y una herramienta que en la práctica no se usa es una herramienta que no
+    existe. Pero el punto de la huella es que **quien confirma haya visto la duda**, y un
+    generador que escupe las líneas listas invita a pegarlas sin leer nada — que es
+    exactamente lo que la huella impide en la pantalla. Dos cosas lo conservan:
+
+    1. **La duda va impresa encima de su comando**, completa. Al copiar la línea, el texto de
+       la advertencia queda en pantalla; no hay forma de llegar al comando sin pasar por ella.
+    2. **La huella solo se imprime si la salida va a una terminal.** Redirigido a un archivo o
+       entubado a `sh` no hay nadie leyendo, así que las marcas **con duda** salen sin
+       `--huella` y el comando pegado **falla** en la guarda. Una tubería no puede confirmar
+       una marca con una duda declarada, que es el caso que importa. Las que no tienen duda
+       salen completas con `--sin-duda` en los dos casos: no hay nada que leer.
+
+    No se emite un script ejecutable a propósito (sin `#!`, sin `set -e`): es una lista de
+    comandos para pegar de uno en uno, y que no sea cómodo hacerlo en lote es parte del diseño.
+    """
+    pendientes = [f for f in filas if f.confirmado_en is None]
+    print(f"\nCOMANDOS PARA CONFIRMAR LAS {len(pendientes)} MARCA(S) PENDIENTE(S)\n")
+    if not pendientes:
+        print("  (ninguna pendiente)")
+        return
+    hay_terminal = _salida_a_terminal()
+    print("Esto NO es un script. Cada marca lleva su duda encima porque confirmar es responder")
+    print("por lo que se miró: lee la duda y pega su comando, de uno en uno.")
+    if not hay_terminal:
+        print()
+        print("La salida NO va a una terminal, así que la huella de las marcas con duda no se")
+        print("imprime: si nadie está leyendo, nadie vio la duda. Esos comandos van incompletos")
+        print("y fallarán a propósito. Vuelve a correr esto en una terminal para obtenerlas.")
+    for fila in pendientes:
+        descripcion = descripciones.get(fila.tipo_percepcion) or "(sin descripción en el catálogo instalado)"
+        print(f"\n# --- {fila.tipo_percepcion}  {descripcion} ---")
+        if fila.nota_revision is None:
+            print("# (sin duda declarada)")
+            guarda = " --sin-duda"
+        else:
+            print(f"# DUDA: {fila.nota_revision}")
+            if hay_terminal:
+                guarda = f" --huella {cfg.huella_de_nota(fila.nota_revision)}"
+            else:
+                # El comando sale **sin la guarda**, no con un hueco comentado: así se puede
+                # pegar tal cual y falla en la puerta con su mensaje, en vez de romperse por
+                # una comilla o un `#` a media línea. Fallar es lo que se busca; fallar de
+                # forma inexplicable, no.
+                print("# SIN HUELLA: la salida no va a una terminal, así que nadie leyó esta duda.")
+                print("# Lee la duda de arriba, corre `estado --percepciones` en una terminal y añade")
+                print("# `--huella <la que muestre>`. Tal como está, el comando de abajo se niega.")
+                guarda = ""
+        print(
+            f"python -m app.scripts.administrar_configuracion confirmar-marca "
+            f"{fila.tipo_percepcion}{guarda} --actor {actor}"
+        )
+
+
 async def _mostrar_empresa(db: AsyncSession, empresa_id: int) -> None:
     empresa = await _exige_empresa(db, empresa_id)
     print(f"\nEMPRESA {empresa_id} — {empresa.nombre} ({empresa.rfc})")
@@ -454,20 +526,35 @@ async def _mostrar_empresa(db: AsyncSession, empresa_id: int) -> None:
     print(f"  factor prima vacacional  {factor if factor is not None else 'sin configurar'}")
 
     observados = await cfg.observados_de_empresa(db, empresa)
-    clasificables = [c for c in observados.conceptos if c.clave is not None]
-    sin_clasificar = sum(1 for c in clasificables if c.categoria is None)
     sin_mapear = sum(1 for d in observados.departamentos if d.centro_costo is None)
-    print(
-        f"  conceptos observados     {len(observados.conceptos)} "
-        f"({sin_clasificar} sin clasificar de los {len(clasificables)} que se pueden clasificar)"
-    )
+    print(f"  conceptos observados     {len(observados.conceptos)}")
+    _imprimir_pendientes_de_clasificar(observados)
     print(f"  departamentos observados {len(observados.departamentos)} ({sin_mapear} sin centro de costo)")
 
 
+def _imprimir_pendientes_de_clasificar(observados: cfg.Observados) -> None:
+    """Cuántas **percepciones** faltan por clasificar, que es la condición que decide si B-08
+    se puede generar. Las deducciones y los departamentos no cuentan, y no es un descuido: ver
+    `cfg.percepciones_sin_clasificar` antes de "arreglarlo"."""
+    pendientes = cfg.percepciones_sin_clasificar(observados)
+    if not pendientes:
+        print("  clasificación           COMPLETA (todas las percepciones tienen categoría)")
+        return
+    print(f"  clasificación           faltan {len(pendientes)} percepción(es) por clasificar:")
+    for c in pendientes:
+        print(f"      {c.naturaleza}/{c.tipo}/{c.clave}  {c.concepto or ''}")
+
+
 async def cmd_estado(db: AsyncSession, args: argparse.Namespace) -> int:
+    if args.como_comandos and not args.percepciones:
+        raise ErrorDeUso("`--como-comandos` va con `--percepciones`: es la lista de la que salen los comandos.")
     await _mostrar_valores_fiscales(db)
     await _mostrar_alertas(db, date.today())
-    await _mostrar_percepciones(db, detallado=bool(args.percepciones))
+    await _mostrar_percepciones(
+        db,
+        detallado=bool(args.percepciones),
+        como_comandos=(args.actor or "TU_CORREO@DOMINIO") if args.como_comandos else None,
+    )
     if args.empresa_id is not None:
         await _mostrar_empresa(db, int(args.empresa_id))
     return 0
@@ -500,6 +587,8 @@ async def cmd_observados(db: AsyncSession, args: argparse.Namespace) -> int:
     print(f"\nDEPARTAMENTOS OBSERVADOS — {len(observados.departamentos)}")
     for d in observados.departamentos:
         print(f"  {d.departamento_texto}  ({d.comprobantes} comprobante(s))  -> {d.centro_costo or 'SIN MAPEAR'}")
+    print()
+    _imprimir_pendientes_de_clasificar(observados)
     return 0
 
 
@@ -1021,6 +1110,9 @@ async def cmd_clasificar(db: AsyncSession, args: argparse.Namespace) -> int:
         raise
 
     print(f"\nListo: {cambios} cambio(s) aplicados por {actor} desde la línea de comandos.")
+    # Lo que queda para que B-08 pueda generarse. Se relee: la clasificación que acaba de
+    # entrar cambia el conteo, y decir "faltan 3" con el número de antes sería peor que callar.
+    _imprimir_pendientes_de_clasificar(await cfg.observados_de_empresa(db, empresa))
     return 0
 
 
@@ -1107,6 +1199,15 @@ def construir_parser() -> argparse.ArgumentParser:
     estado = subs.add_parser("estado", help="Muestra toda la configuración fiscal.")
     estado.add_argument("--percepciones", action="store_true", help="Lista las 44 marcas con su huella.")
     estado.add_argument("--empresa-id", type=int, default=None, help="Agrega la configuración de esa empresa.")
+    estado.add_argument(
+        "--como-comandos",
+        action="store_true",
+        help=(
+            "Con --percepciones: imprime los comandos `confirmar-marca` de lo que falta, cada uno con su "
+            "duda encima. La huella solo sale si la salida va a una terminal."
+        ),
+    )
+    estado.add_argument("--actor", default=None, help="Correo con el que rellenar los comandos de --como-comandos.")
 
     observados = subs.add_parser("observados", help="Conceptos y departamentos que la nómina emitió de verdad.")
     observados.add_argument("--empresa-id", type=int, required=True)

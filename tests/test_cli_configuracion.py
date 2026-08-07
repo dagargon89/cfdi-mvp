@@ -18,6 +18,27 @@ marcador de línea de comandos**, y si la bitácora falla el cambio se revierte 
 
 Cada afirmación va con su gemela negativa: sin ella, una guarda que rechazara *todo* pasaría
 igual de verde y no protegería nada.
+
+Tres trampas de la evidencia por mutación, las tres ya pisadas en esta fase
+---------------------------------------------------------------------------
+Ninguna prueba de este archivo se dio por buena sin romper a propósito lo que dice proteger y
+comprobar que **falla**. Al hacerlo aparecieron tres formas de que esa comprobación mienta, y
+quedan anotadas aquí porque se van a volver a pisar:
+
+1. **Un `-k` que no selecciona ninguna prueba sale con código 5 y se ve igual que una prueba
+   muerta.** Hay que mirar el conteo de selección, no el código de salida. (Ojo también con el
+   parser del conteo: `pytest -q` no imprime "collected N items", solo el resumen final.)
+2. **Una mutación que solo hace *pasar* la prueba también "cambia algo".** Hay que exigir que
+   la prueba **FALLE**, no que el resultado sea distinto.
+3. **El anclaje de la mutación puede casar en el sitio equivocado.** `"    if fila.valor !=
+   valor:"` es subcadena de `"        if fila.valor != valor:"`, así que un `replace` sustituyó
+   el `if` de `guardar_param_fiscal` en vez del de `confirmar_param_fiscal`: la mutación
+   "sobrevivía" por un motivo falso. Los anclajes tienen que incluir la línea siguiente.
+
+Y un hallazgo que salió de esas mutaciones y que conviene recordar al escribir pruebas nuevas:
+una comprobación **fuera** de la transacción (el vistazo previo que imprime el plan) tapa la
+guarda de dentro, así que las pruebas que pasan por el camino feliz no prueban la guarda que
+de verdad decide. Ver `test_la_guarda_que_decide_esta_dentro_de_la_transaccion`.
 """
 
 from __future__ import annotations
@@ -862,6 +883,57 @@ async def test_reemplazar_si_borra_lo_que_no_venga(db: AsyncSession) -> None:
     assert set(await cfg.categorias_de_provision(db, empresa_id)) == {("P", "001", "001")}
 
 
+async def test_la_clasificacion_completa_solo_cuenta_percepciones(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Lo que B-08 concilia es cuánto **se pagó ya** de aguinaldo, vacaciones y prima
+    vacacional, y eso son percepciones: una deducción no puede ser aguinaldo — el aguinaldo no
+    se le descuenta a nadie. Contar las deducciones dejaría el marcador clavado en un número
+    que nadie puede bajar a cero y B-08 nunca se generaría, por una razón sin sentido.
+
+    La nómina de esta empresa trae **una deducción sin clasificar** (`D/001/IMSS`) y dos
+    departamentos sin centro de costo, y aun así, con las dos percepciones clasificadas, la
+    clasificación tiene que quedar COMPLETA.
+    """
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    await _nomina(db, empresa_id, "88888888-8888-8888-8888-888888888881", "VENTAS")
+
+    assert await _correr(
+        db, "clasificar", "--empresa-id", str(empresa_id),
+        "--concepto", "P/001/001", "NO_APLICA",
+        "--concepto", "P/001/019", "VACACIONES",
+        "--actor", ACTOR, "--si",
+    ) == 0
+
+    salida = capsys.readouterr().out
+    assert "COMPLETA" in salida, salida
+    db.expire_all()
+    # La deducción sigue sin clasificar, y eso es correcto: no participa.
+    assert ("D", "001", "IMSS") not in await cfg.categorias_de_provision(db, empresa_id)
+
+
+async def test_una_percepcion_sin_clasificar_si_deja_la_clasificacion_incompleta(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """La gemela: sin ella, un contador que dijera "COMPLETA" siempre pasaría igual de verde."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    await _nomina(db, empresa_id, "88888888-8888-8888-8888-888888888881", "VENTAS")
+
+    assert await _correr(
+        db, "clasificar", "--empresa-id", str(empresa_id),
+        "--concepto", "P/001/001", "NO_APLICA", "--actor", ACTOR, "--si",
+    ) == 0
+
+    salida = capsys.readouterr().out
+    assert "COMPLETA" not in salida
+    assert "faltan 1 percepción(es)" in salida
+    assert "P/001/019" in salida, "tiene que decir cuál falta, no solo cuántas"
+
+
 async def test_observados_enumera_lo_que_la_nomina_emitio(
     db: AsyncSession, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -882,7 +954,118 @@ async def test_observados_enumera_lo_que_la_nomina_emitio(
 
 
 # --------------------------------------------------------------------------------------
-# 9. Conversión de la línea de comandos
+# 9. El generador de comandos, y la garantía de la huella en una terminal
+# --------------------------------------------------------------------------------------
+
+_DUDA = "Verificar contra el art. 93 fracción XIV: la exención podría estar topada."
+
+
+async def test_los_comandos_generados_llevan_la_duda_encima(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teclear 64 caracteres por marca no lo hace nadie, pero el punto de la huella es que
+    quien confirma **haya visto la duda**. La duda va impresa encima de su comando: no hay
+    forma de llegar a la línea que se copia sin pasar por la advertencia."""
+    await _admin(db)
+    db.add(_marca("010", nota=_DUDA))
+    await db.commit()
+    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: True)
+
+    assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
+
+    salida = capsys.readouterr().out
+    assert f"# DUDA: {_DUDA}" in salida
+    huella = str(cfg.huella_de_nota(_DUDA))
+    assert f"--huella {huella}" in salida
+    # La duda va **antes** que el comando que se copia, no después.
+    assert salida.index("# DUDA:") < salida.index("confirmar-marca 010")
+    assert f"--actor {ACTOR}" in salida
+
+
+async def test_una_marca_ya_confirmada_no_sale_en_los_comandos(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La gemela del generador: solo se listan las pendientes. Si listara todas, la lista
+    nunca bajaría y nadie sabría qué le falta."""
+    await _admin(db)
+    fila = _marca("010", nota=None)
+    fila.confirmado_por = ACTOR
+    fila.confirmado_en = datetime(2026, 8, 1, 9, 0, 0)
+    db.add(fila)
+    await db.commit()
+    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: True)
+
+    assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
+
+    salida = capsys.readouterr().out
+    assert "confirmar-marca 010" not in salida
+    assert "0 MARCA(S) PENDIENTE(S)" in salida
+
+
+async def test_redirigida_la_salida_no_entrega_la_huella(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La otra mitad de la garantía, y la que cierra el atajo real: si la salida no va a una
+    terminal (`> confirmar.sh`, `| sh`) **no hay nadie leyendo**, así que nadie vio la duda.
+    Las marcas con duda salen sin `--huella` y el comando pegado falla a propósito.
+
+    Bajo pytest la salida está capturada, que es justo el caso que se prueba.
+    """
+    await _admin(db)
+    db.add(_marca("010", nota=_DUDA))
+    await db.commit()
+    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: False)
+
+    assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
+
+    salida = capsys.readouterr().out
+    assert f"# DUDA: {_DUDA}" in salida, "la duda sí se imprime; lo que no sale es la huella"
+    assert str(cfg.huella_de_nota(_DUDA)) not in salida
+    assert "SIN HUELLA" in salida
+    # La línea que se pegaría sale sin guarda ninguna: es lo que la hace fallar en la puerta.
+    (linea,) = [l for l in salida.splitlines() if l.startswith("python -m")]
+    assert linea == f"python -m app.scripts.administrar_configuracion confirmar-marca 010 --actor {ACTOR}"
+
+
+async def test_el_comando_incompleto_que_sale_redirigido_de_verdad_falla(db: AsyncSession) -> None:
+    """Y no basta con no imprimir la huella: el comando que queda tiene que **fallar**. Si
+    pasara sin ella, no habríamos cerrado nada."""
+    await _admin(db)
+    db.add(_marca("010", nota=_DUDA))
+    await db.commit()
+
+    codigo = await _correr(db, "confirmar-marca", "010", "--actor", ACTOR, "--si")
+
+    assert codigo == 1
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+async def test_una_marca_sin_duda_sale_completa_aunque_este_redirigida(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La gemela de la regla de la terminal: donde no hay duda no hay nada que leer, así que
+    el comando sale completo con `--sin-duda`. Si también se degradara, la regla estaría
+    castigando a quien no tiene nada que revisar."""
+    await _admin(db)
+    db.add(_marca("010", nota=None))
+    await db.commit()
+    monkeypatch.setattr(cli, "_salida_a_terminal", lambda: False)
+
+    assert await _correr(db, "estado", "--percepciones", "--como-comandos", "--actor", ACTOR) == 0
+
+    salida = capsys.readouterr().out
+    assert "--sin-duda" in salida
+    assert "SIN HUELLA" not in salida
+
+
+async def test_como_comandos_exige_percepciones(db: AsyncSession) -> None:
+    await _admin(db)
+    assert await _correr(db, "estado", "--como-comandos") == 1
+
+
+# --------------------------------------------------------------------------------------
+# 10. Conversión de la línea de comandos
 # --------------------------------------------------------------------------------------
 
 

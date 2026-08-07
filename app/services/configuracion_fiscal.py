@@ -497,6 +497,44 @@ async def observados_de_empresa(db: AsyncSession, empresa: Empresa) -> Observado
     )
 
 
+# La naturaleza cuya clasificación decide si B-08 se puede generar. Ver
+# `percepciones_sin_clasificar`, que es donde vive el argumento y donde hay que leerlo antes
+# de "arreglar" la aparente inconsistencia de ignorar deducciones y otros pagos.
+NATURALEZA_PERCEPCION = "P"
+
+
+def percepciones_sin_clasificar(observados: Observados) -> list[ConceptoObservado]:
+    """Lo que **de verdad** falta para que la clasificación esté completa: las percepciones
+    sin categoría.
+
+    **Solo percepciones, y no es un descuido.** Lo que B-08 necesita saber es cuánto aguinaldo,
+    vacaciones y prima vacacional se han **pagado ya**, para restarlo de lo devengado. Eso son
+    percepciones, por definición:
+
+    - una **deducción** no puede ser aguinaldo: el aguinaldo no se le descuenta a nadie. El
+      catálogo `c_TipoDeduccion` son IMSS, ISR, préstamos, pensiones alimenticias y descuentos
+      — nada que se pueda haber "pagado ya" de las tres prestaciones que B-08 concilia;
+    - un **otro pago** tampoco: `c_TipoOtroPago` son subsidio al empleo, viáticos, ajustes y
+      reintegros;
+    - los **departamentos** no participan en absoluto. Son para los centros de costo de B-06,
+      que es otra cosa, y tienen su propio contador (`centro_costo is None`).
+
+    Contarlos volvería la clasificación **imposible de completar** —una empresa con siete
+    deducciones que nadie puede clasificar como aguinaldo dejaría el marcador clavado— y B-08
+    nunca se generaría, por una razón sin sentido. Es el mismo argumento por el que un concepto
+    sin `clave` tampoco cuenta: si nadie puede bajar el número a cero, el número no sirve.
+
+    Se excluye igualmente el concepto sin `clave`: `map_concepto_provision` la lleva en la PK,
+    así que no hay forma de clasificarlo aunque se quiera (B-02 lo señala aparte con
+    `CLAVE_VACIA`).
+    """
+    return [
+        c
+        for c in observados.conceptos
+        if c.naturaleza == NATURALEZA_PERCEPCION and c.clave is not None and c.categoria is None
+    ]
+
+
 async def dias_de_vacaciones(db: AsyncSession, anios: int) -> int | None:
     """Días de vacaciones que corresponden a `anios` de antigüedad (art. 76 LFT).
 
