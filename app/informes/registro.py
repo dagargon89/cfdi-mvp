@@ -14,6 +14,7 @@ from app.informes import (
     b03_gravado_exento,
     b04_matriz_empleado_periodo,
     b05_acumulado_anual,
+    b06_centro_costo,
     b07_prestamos,
     b10_validacion_receptor,
 )
@@ -25,6 +26,7 @@ _MODULOS: tuple[Any, ...] = (
     b03_gravado_exento,
     b04_matriz_empleado_periodo,
     b05_acumulado_anual,
+    b06_centro_costo,
     b07_prestamos,
     b10_validacion_receptor,
 )
