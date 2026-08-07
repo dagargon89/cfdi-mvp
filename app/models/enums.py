@@ -94,11 +94,21 @@ class BaseExencion(str, Enum):
 
 
 class CategoriaProvision(str, Enum):
-    """A qué provisión contable corresponde un concepto de nómina de la organización."""
+    """A qué provisión contable corresponde un concepto de nómina de la organización.
+
+    `NO_APLICA` no es un relleno: es lo que hace que la clasificación pueda estar
+    **completa**. B-08 necesita saber cuánto aguinaldo se pagó ya; con un solo concepto sin
+    clasificar, "aguinaldo pagado = 0" es indistinguible de "sí se pagó y no sé en cuál
+    concepto viene", y el informe no puede generarse. Cuando todos los conceptos tienen
+    categoría —incluidos los que explícitamente no son ninguna de las tres— ese cero pasa a
+    ser un hecho conocido. Sin esta opción, marcar "este concepto no aplica" sería
+    indistinguible de no haberlo revisado.
+    """
 
     AGUINALDO = "AGUINALDO"
     VACACIONES = "VACACIONES"
     PRIMA_VACACIONAL = "PRIMA_VACACIONAL"
+    NO_APLICA = "NO_APLICA"
 
 
 class ZonaSalarial(str, Enum):

@@ -13,8 +13,17 @@
 #
 # Es ley federal, no política de cada patrón: por eso la tabla es global, sin `empresa_id`,
 # y por eso el servicio la aplica sin exigir confirmación humana (a diferencia de los
-# importes de `param_fiscal`, que sí la exigen). Un error de captura aquí lo atrapa la
-# prueba de monotonía de `tests/test_semillas_fiscales.py`.
+# importes de `param_fiscal`, que sí la exigen).
+#
+# QUÉ RED SUSTITUYE A ESA CONFIRMACIÓN. `test_la_tabla_de_vacaciones_reproduce_la_progresion_
+# del_articulo_76` (en `tests/test_semillas_fiscales.py`) reconstruye la tabla desde el texto
+# del artículo y la compara renglón por renglón, además de resolver todos los años de 1 a 50.
+# **No** la prueba de monotonía que decía aquí antes: esa no protegía nada útil —cambiar el
+# renglón de 11 años de 24 a 22 días, un dedazo verosímil, la deja pasar porque la tabla sigue
+# siendo no decreciente, sigue arrancando en 12 y sigue conteniendo el 20—. Y el alcance de la
+# red, para no prometer de más: valida **este archivo del repositorio**, no la fila que hay en
+# la base de datos. No protege contra editar el YAML en el servidor ni contra un `UPDATE` a
+# mano sobre `tabla_vacaciones`.
 #
 # CÓMO SE LEE ESTA TABLA. `dias_de_vacaciones()` toma el renglón con el mayor
 # `anios_antiguedad` que no exceda la antigüedad consultada, no el renglón exacto. Por eso

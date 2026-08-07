@@ -396,13 +396,29 @@ class ParamFiscalConfirmarIn(BaseModel):
 
 class MarcaPercepcionIn(BaseModel):
     """Las marcas del §3.1 de un tipo de percepción. Mismas reglas que el cargador de
-    semillas (`_leer_marca`): sin base de exención no hay factor, y con base sí lo hay."""
+    semillas (`_leer_marca`): sin base de exención no hay factor, y con base sí lo hay.
+
+    **Los seis campos son obligatorios, incluido `sujeto_a_tope_conjunto`.** No lleva default
+    a propósito: este es el cuerpo que también confirma, y confirmar es afirmar que se miró
+    lo que se está activando. Con un default de `false`, un cliente que ni menciona el campo
+    confirmaría —o crearía— una marca de previsión social **sin el tope a la vista**, que es
+    literalmente la condición que la migración `c7a1e0b4d92f` declaró inaceptable cuando
+    limpió las 44 confirmaciones anteriores. Un 422 por un campo que falta es barato; una
+    exención de más en B-03 no.
+    """
 
     es_ingreso_ordinario: bool
     base_exencion: BaseExencion
-    factor_exencion: ImporteExacto | None = None
+    # `Numeric(9,4)` en la columna: 5 dígitos enteros y 4 decimales. Los límites evitan que un
+    # valor fuera de molde salga como 500 de MySQL en vez de 422 con su explicación.
+    factor_exencion: Annotated[Decimal, BeforeValidator(_sin_float), Field(gt=0, lt=Decimal("100000"), decimal_places=4)] | None = None
     integra_sbc: bool
     es_provisionable: bool
+    # Si la exención de este tipo cae bajo el tope conjunto de previsión social del penúltimo
+    # párrafo del art. 93 de la LISR (1 UMA anual sobre la SUMA de varios tipos). No es
+    # derivable de `factor_exencion`: son los seis tipos 015/029/030/034/035/037 contra otros
+    # diez con la misma `base_exencion: PORCENTAJE` pero exceptuados del tope.
+    sujeto_a_tope_conjunto: bool
 
     @model_validator(mode="after")
     def _coherencia_de_exencion(self) -> MarcaPercepcionIn:
@@ -410,8 +426,13 @@ class MarcaPercepcionIn(BaseModel):
             raise ValueError("con `base_exencion: NINGUNA` no puede haber `factor_exencion`.")
         if self.base_exencion is not BaseExencion.NINGUNA and self.factor_exencion is None:
             raise ValueError(f"`base_exencion: {self.base_exencion.value}` exige un `factor_exencion`.")
-        if self.factor_exencion is not None and self.factor_exencion <= 0:
-            raise ValueError(f"`factor_exencion` debe ser positivo (llegó {self.factor_exencion}).")
+        if self.sujeto_a_tope_conjunto and self.base_exencion is BaseExencion.NINGUNA:
+            # Misma regla que `_leer_marca` en el cargador: el tope limita una exención, y
+            # aquí no hay ninguna que limitar.
+            raise ValueError(
+                "`sujeto_a_tope_conjunto: true` no tiene sentido con `base_exencion: NINGUNA` — o el "
+                "tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
+            )
         return self
 
 
@@ -422,6 +443,7 @@ class MarcaPercepcionOut(BaseModel):
     factor_exencion: Decimal | None
     integra_sbc: bool
     es_provisionable: bool
+    sujeto_a_tope_conjunto: bool
     confirmado: bool
     confirmado_por: str | None
     confirmado_en: str | None
@@ -435,9 +457,11 @@ class ConfiguracionEmpresaIn(BaseModel):
     zona_salarial: ZonaSalarial | None = None
     # Mínimo legal 15 días (art. 87 LFT); el tope solo evita un dedazo absurdo, no es política.
     dias_aguinaldo: int | None = Field(default=None, ge=1, le=365)
-    # `Numeric(5,4)` en la columna: 9.9999 es el máximo representable. El mínimo legal es
-    # 0.25 (art. 80 LFT) y cada patrón puede dar más, así que aquí solo se exige positivo.
-    factor_prima_vacacional: ImporteExacto | None = Field(default=None, gt=0, le=Decimal("9.9999"))
+    # `Numeric(5,4)` en la columna: 9.9999 es el máximo representable y son 4 decimales. El
+    # mínimo legal es 0.25 (art. 80 LFT) y cada patrón puede dar más, así que por abajo solo
+    # se exige positivo. Los límites de arriba evitan que un valor fuera de molde salga como
+    # 500 de MySQL en vez de 422 con su explicación.
+    factor_prima_vacacional: Annotated[Decimal, BeforeValidator(_sin_float), Field(gt=0, le=Decimal("9.9999"), decimal_places=4)] | None = None
 
 
 class ConfiguracionEmpresaOut(BaseModel):
@@ -486,3 +510,54 @@ class MapConceptoProvisionOut(BaseModel):
 class MapeosEmpresaOut(BaseModel):
     departamentos: list[MapDepartamentoOut]
     conceptos_provision: list[MapConceptoProvisionOut]
+
+
+class ConceptoObservadoOut(BaseModel):
+    """Un concepto de nómina que la empresa **realmente emitió**, con lo que hace falta para
+    reconocerlo sin conocer su clave.
+
+    `clave` es la clave interna del sistema de nómina del patrón y puede venir nula: el
+    complemento no la exige y B-02 ya emite `CLAVE_VACIA` por ello. Un concepto sin clave no
+    se puede mapear (`map_concepto_provision` la lleva en la PK), así que la pantalla lo
+    muestra para que se vea el hueco, pero no lo puede clasificar.
+
+    `concepto` es el texto libre que escribió el patrón —"AGUINALDO", "PRIMA VACACIONAL"—, y
+    es lo que la persona reconoce. Cuando el mismo `(naturaleza, tipo, clave)` viajó con
+    varios textos distintos se muestra uno solo; B-02 ya señala esa inconsistencia con
+    `CONCEPTO_INCONSISTENTE`, así que aquí no se repite el diagnóstico.
+    """
+
+    naturaleza: str
+    tipo: str
+    clave: str | None
+    concepto: str | None
+    descripcion_sat: str | None
+    comprobantes: int
+    importe: Decimal
+    categoria: str | None
+
+
+class DepartamentoObservadoOut(BaseModel):
+    departamento_texto: str
+    comprobantes: int
+    centro_costo: str | None
+
+
+class ObservadosEmpresaOut(BaseModel):
+    """Lo que la nómina de la empresa emitió de verdad, para que configurar sea **reconocer y
+    elegir**, no teclear.
+
+    Nadie conoce de memoria las claves internas de su sistema de nómina —las inventa ese
+    sistema—, así que pedirlas era pedir un dato que el usuario no tiene. Esta lista invierte
+    el flujo: el servidor enumera lo que existe con su descripción, y la persona solo asigna
+    categoría o centro de costo.
+
+    `sin_clasificar` / `sin_mapear` son los conteos que la pantalla necesita para decir "te
+    faltan 3": mientras `sin_clasificar` no sea cero, B-08 no puede distinguir "no se pagó
+    aguinaldo" de "sí se pagó y no sé dónde".
+    """
+
+    conceptos: list[ConceptoObservadoOut]
+    departamentos: list[DepartamentoObservadoOut]
+    sin_clasificar: int
+    sin_mapear: int

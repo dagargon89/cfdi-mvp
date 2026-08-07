@@ -31,34 +31,44 @@ correcciones manuales de que una recarga las pise sin dejar rastro).
 Permisos, sin margen (regla 3)
 ------------------------------
 La configuración fiscal es política federal y aplica a todas las empresas ⇒ `require_admin`.
-La configuración de una empresa es política laboral suya ⇒ `require_empresa(OPERADOR)`, con el
+La configuración de una empresa es política laboral suya ⇒ `require_empresa`, con el
 `empresa_id` del **path**, nunca del cuerpo: el que manda el navegador es un dato hostil.
+Ahí el reparto es el mismo que en el resto de la API —leer `CONSULTA`, escribir `OPERADOR`—
+y no por simetría: un usuario de `CONSULTA` ya puede generar los informes cuyo resultado
+depende de la zona salarial, así que esconderle la entrada mientras se le muestra la salida
+no protege nada y le deja un informe degradado que no puede explicarse.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
 from app.api.v1.schemas import (
+    ConceptoObservadoOut,
     ConfiguracionEmpresaIn,
     ConfiguracionEmpresaOut,
     ConfiguracionFiscalOut,
+    DepartamentoObservadoOut,
     MapConceptoProvisionOut,
     MapDepartamentoOut,
     MapeosEmpresaIn,
     MapeosEmpresaOut,
     MarcaPercepcionIn,
     MarcaPercepcionOut,
+    ObservadosEmpresaOut,
     ParamFiscalConfirmarIn,
     ParamFiscalGuardarIn,
     ParamFiscalOut,
 )
+from app.informes import catalogos
+from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
     CatalogoPercepcionMarca,
     ConfiguracionEmpresa,
@@ -68,6 +78,7 @@ from app.models.configuracion_fiscal import (
 )
 from app.models.empresa import Empresa
 from app.models.enums import OrigenValor, RolEmpresa
+from app.models.nomina import NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor
 from app.models.usuario import Usuario
 from app.services import bitacora as bitacora_service
 from app.services import configuracion_fiscal as cfg
@@ -116,6 +127,7 @@ def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
         factor_exencion=fila.factor_exencion,
         integra_sbc=fila.integra_sbc,
         es_provisionable=fila.es_provisionable,
+        sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
         confirmado=fila.confirmado_en is not None,
         confirmado_por=fila.confirmado_por,
         confirmado_en=fila.confirmado_en.isoformat() if fila.confirmado_en else None,
@@ -132,6 +144,7 @@ def _marca_a_detalle(fila: CatalogoPercepcionMarca) -> dict[str, Any]:
         "factor_exencion": str(fila.factor_exencion) if fila.factor_exencion is not None else None,
         "integra_sbc": fila.integra_sbc,
         "es_provisionable": fila.es_provisionable,
+        "sujeto_a_tope_conjunto": fila.sujeto_a_tope_conjunto,
         "confirmado": fila.confirmado_en is not None,
     }
 
@@ -143,6 +156,7 @@ def _marca_in_a_detalle(body: MarcaPercepcionIn) -> dict[str, Any]:
         "factor_exencion": str(body.factor_exencion) if body.factor_exencion is not None else None,
         "integra_sbc": body.integra_sbc,
         "es_provisionable": body.es_provisionable,
+        "sujeto_a_tope_conjunto": body.sujeto_a_tope_conjunto,
     }
 
 
@@ -153,6 +167,9 @@ def _difieren(fila: CatalogoPercepcionMarca, body: MarcaPercepcionIn) -> bool:
         or fila.factor_exencion != body.factor_exencion
         or fila.integra_sbc != body.integra_sbc
         or fila.es_provisionable != body.es_provisionable
+        # Sin este renglón, confirmar una marca de previsión social con un cuerpo que no
+        # menciona el tope pasaría con 200 y activaría una bandera que nadie miró.
+        or fila.sujeto_a_tope_conjunto != body.sujeto_a_tope_conjunto
     )
 
 
@@ -351,6 +368,31 @@ async def confirmar_fiscal(
 # --------------------------------------------------------------------------------------
 
 
+def _exige_tipo_del_sat(tipo: str) -> None:
+    """El `tipo` del path tiene que existir en `c_TipoPercepcion`, no solo medir 3 posiciones.
+
+    Comprobar el largo dejaba pasar `ZZZ` y, peor, `150` por `015`: una marca huérfana que se
+    captura y se confirma sin ruido mientras la `015` de verdad sigue sin confirmar y sin
+    calcular — silencioso en las dos puntas. La lista blanca vive en el servicio y la comparte
+    con el cargador de semillas, igual que `CLAVES_PARAM_FISCAL`.
+    """
+    try:
+        cfg.exige_tipo_percepcion_conocido(tipo)
+    except cfg.CatalogoDelSatIlegible as exc:
+        # No es culpa del cuerpo que llegó: lo que falla es la herramienta de validación. Un
+        # 422 le diría al usuario que corrija algo que está bien. `503` dice la verdad —el
+        # servidor no puede atender esto ahora— y deja el rastro para el operador.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"codigo": "CATALOGO_SAT_ILEGIBLE", "mensaje": str(exc)},
+        ) from exc
+    except cfg.ErrorDeConfiguracion as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"codigo": "TIPO_PERCEPCION_INVALIDO", "mensaje": str(exc)},
+        ) from exc
+
+
 @router.get("/percepciones", response_model=list[MarcaPercepcionOut])
 async def listar_percepciones(
     admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)
@@ -371,17 +413,7 @@ async def guardar_percepcion(
     """Captura o corrige las marcas de un tipo de percepción. Igual que los importes: **capturar
     no confirma**, y si algo cambia, la confirmación anterior se limpia — un `factor_exencion`
     distinto es una exención distinta y vuelve a la cola de revisión."""
-    if len(tipo) != 3:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "codigo": "TIPO_PERCEPCION_INVALIDO",
-                "mensaje": (
-                    f"`tipo_percepcion` debe tener 3 posiciones y llegó {tipo!r}. Las claves del catálogo "
-                    "del SAT llevan sus ceros a la izquierda: '001' no es '1'."
-                ),
-            },
-        )
+    _exige_tipo_del_sat(tipo)
 
     fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
     anterior = _marca_a_detalle(fila) if fila is not None else None
@@ -393,6 +425,7 @@ async def guardar_percepcion(
             factor_exencion=body.factor_exencion,
             integra_sbc=body.integra_sbc,
             es_provisionable=body.es_provisionable,
+            sujeto_a_tope_conjunto=body.sujeto_a_tope_conjunto,
         )
         db.add(fila)
     else:
@@ -404,6 +437,7 @@ async def guardar_percepcion(
         fila.factor_exencion = body.factor_exencion
         fila.integra_sbc = body.integra_sbc
         fila.es_provisionable = body.es_provisionable
+        fila.sujeto_a_tope_conjunto = body.sujeto_a_tope_conjunto
     await db.flush()
     await db.refresh(fila)  # escala real de `Numeric(9,4)`; ver el mismo comentario en `guardar_fiscal`
 
@@ -433,6 +467,7 @@ async def confirmar_percepcion(
     juego completo de marcas —no solo el tipo— por la misma razón que los importes: lo que se
     confirma es *lo que se revisó*, y si cambió entre la pantalla y el clic, se rechaza con 409.
     """
+    _exige_tipo_del_sat(tipo)
     fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
     if fila is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
@@ -473,18 +508,29 @@ async def confirmar_percepcion(
 # --------------------------------------------------------------------------------------
 
 
-async def _exige_empresa(db: AsyncSession, empresa_id: int) -> None:
+async def _exige_empresa(db: AsyncSession, empresa_id: int) -> Empresa:
     """Un administrador global pasa `require_empresa` para *cualquier* `empresa_id`, exista o
     no (`deps.py:85`). Sin esta comprobación, escribir la configuración de una empresa
-    inexistente reventaría como error de llave foránea (500) en vez de decir 404."""
-    if await db.get(Empresa, empresa_id) is None:
+    inexistente reventaría como error de llave foránea (500) en vez de decir 404.
+
+    Devuelve la empresa porque el universo de nómina se acota por su RFC (`rfc_emisor`), no
+    solo por `empresa_id`: la empresa es el patrón (§11 del diseño)."""
+    empresa = await db.get(Empresa, empresa_id)
+    if empresa is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    return empresa
 
 
 @router_empresa.get("", response_model=ConfiguracionEmpresaOut)
 async def obtener_configuracion_empresa(
     empresa_id: int,
-    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.OPERADOR)),
+    # Leer pide CONSULTA, escribir pide OPERADOR — el reparto del resto de la API
+    # (`informes.py:53` contra `:34`, y lo mismo en comprobantes, descargas, eventos y
+    # efirma). Y el fondo pesa más que la simetría: un usuario de CONSULTA ya puede generar
+    # los informes cuyo resultado depende de la zona salarial, así que esconderle la entrada
+    # mientras se le muestra la salida no protege nada y le deja un informe degradado que no
+    # puede explicarse.
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> ConfiguracionEmpresaOut:
     """Los tres campos, incluso cuando nunca se capturaron: viajan en `null`, no se omiten.
@@ -552,7 +598,7 @@ def _config_empresa_a_detalle(config: ConfiguracionEmpresa) -> dict[str, Any]:
 @router_empresa.get("/mapeos", response_model=MapeosEmpresaOut)
 async def obtener_mapeos(
     empresa_id: int,
-    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.OPERADOR)),
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
     db: AsyncSession = Depends(get_db),
 ) -> MapeosEmpresaOut:
     await _exige_empresa(db, empresa_id)
@@ -672,3 +718,127 @@ def _exige_sin_duplicados(claves: list[Any], seccion: str, nombre: str) -> None:
                 },
             )
         vistas.add(clave)
+
+
+# --------------------------------------------------------------------------------------
+# Lo que la nómina emitió de verdad: configurar es reconocer y elegir, no teclear
+# --------------------------------------------------------------------------------------
+
+# Las tres tablas de conceptos del complemento de Nómina, con su naturaleza y las columnas
+# que cambian de nombre en cada una. `otro_pago` no lleva gravado/exento: su importe es uno
+# solo. Tenerlas en una tabla evita escribir la misma consulta tres veces con un nombre
+# distinto y que las tres se separen a la primera corrección.
+_TABLAS_DE_CONCEPTO: tuple[tuple[str, Any, Any, Any], ...] = (
+    ("P", NominaPercepcion, NominaPercepcion.tipo_percepcion, NominaPercepcion.importe_gravado + NominaPercepcion.importe_exento),
+    ("D", NominaDeduccion, NominaDeduccion.tipo_deduccion, NominaDeduccion.importe),
+    ("O", NominaOtroPago, NominaOtroPago.tipo_otro_pago, NominaOtroPago.importe),
+)
+
+
+@router_empresa.get("/conceptos-observados", response_model=ObservadosEmpresaOut)
+async def conceptos_observados(
+    empresa_id: int,
+    ctx: ContextoEmpresa = Depends(require_empresa(RolEmpresa.CONSULTA)),
+    db: AsyncSession = Depends(get_db),
+) -> ObservadosEmpresaOut:
+    """Los conceptos y departamentos que **aparecen de verdad** en los CFDI de nómina de la
+    empresa, con su descripción y la categoría o el centro de costo que ya tengan.
+
+    Existe porque pedirle al usuario que teclee `P/002/047` era pedirle un dato que no tiene:
+    esas claves las inventa el sistema de nómina del patrón y nadie las conoce de memoria.
+    Con esta lista la pantalla enumera lo que la nómina emitió, la persona **reconoce la
+    descripción** —"Aguinaldo", "Prima vacacional"— y elige categoría; nunca teclea una clave.
+    Es también la única forma de saber si la clasificación está **completa**, que es la
+    condición que B-08 necesita para poder distinguir "no se pagó aguinaldo" de "sí se pagó y
+    no sé en cuál concepto viene".
+
+    **Sin filtro de fecha ni de estatus, a propósito.** No es un informe: es el inventario de
+    lo que hay que configurar, y un concepto que solo apareció en una nómina de hace dos años
+    o en un CFDI cancelado sigue necesitando categoría — si no, la clasificación nunca queda
+    completa y B-08 nunca se genera.
+
+    Cuatro consultas agregadas en total (una por naturaleza más la de departamentos), todas
+    con `GROUP BY` en la base: ni una por renglón (regla 11).
+    """
+    empresa = await _exige_empresa(db, empresa_id)
+
+    categorias = await cfg.categorias_de_provision(db, empresa_id)
+    centros = await cfg.centro_de_costo(db, empresa_id)
+
+    conceptos: list[ConceptoObservadoOut] = []
+    for naturaleza, modelo, columna_tipo, columna_importe in _TABLAS_DE_CONCEPTO:
+        filas = (
+            await db.execute(
+                select(
+                    columna_tipo,
+                    modelo.clave,
+                    # El patrón puede haber usado varios textos para la misma clave; se muestra
+                    # uno. B-02 ya emite `CONCEPTO_INCONSISTENTE` para ese caso, así que aquí
+                    # repetir el diagnóstico solo duplicaría la fuente de verdad.
+                    func.min(modelo.concepto),
+                    func.count(func.distinct(Comprobante.comprobante_id)),
+                    func.coalesce(func.sum(columna_importe), 0),
+                )
+                .join(Comprobante, Comprobante.comprobante_id == modelo.comprobante_id)
+                .where(
+                    Comprobante.empresa_id == empresa_id,
+                    # La empresa es el patrón (§11 del diseño): los conceptos que hay que
+                    # clasificar son los que ella emitió, no los de una nómina recibida.
+                    Comprobante.rfc_emisor == empresa.rfc,
+                    Comprobante.tipo_comprobante == "N",
+                )
+                .group_by(columna_tipo, modelo.clave)
+                .order_by(columna_tipo, modelo.clave)
+            )
+        ).all()
+        for tipo, clave, concepto, comprobantes, importe in filas:
+            categoria = categorias.get((naturaleza, tipo, clave)) if clave is not None else None
+            conceptos.append(
+                ConceptoObservadoOut(
+                    naturaleza=naturaleza,
+                    tipo=tipo,
+                    clave=clave,
+                    concepto=concepto,
+                    descripcion_sat=catalogos.descripcion(naturaleza, tipo),
+                    comprobantes=comprobantes,
+                    importe=importe if isinstance(importe, Decimal) else Decimal(str(importe)),
+                    categoria=categoria.value if categoria is not None else None,
+                )
+            )
+
+    filas_depto = (
+        await db.execute(
+            select(
+                NominaReceptor.departamento,
+                func.count(func.distinct(Comprobante.comprobante_id)),
+            )
+            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+            .where(
+                Comprobante.empresa_id == empresa_id,
+                Comprobante.rfc_emisor == empresa.rfc,
+                Comprobante.tipo_comprobante == "N",
+                # Un departamento nulo no se puede mapear (`departamento_texto` va en la PK de
+                # `map_departamento`), así que listarlo solo agregaría un renglón inaccionable.
+                # B-06 lo trata aparte con su propia bandera.
+                NominaReceptor.departamento.is_not(None),
+            )
+            .group_by(NominaReceptor.departamento)
+            .order_by(NominaReceptor.departamento)
+        )
+    ).all()
+    departamentos = [
+        DepartamentoObservadoOut(
+            departamento_texto=texto, comprobantes=cuenta, centro_costo=centros.get(texto)
+        )
+        for texto, cuenta in filas_depto
+    ]
+
+    return ObservadosEmpresaOut(
+        conceptos=conceptos,
+        departamentos=departamentos,
+        # Un concepto sin clave no se puede clasificar (la clave va en la PK del mapeo), así
+        # que tampoco cuenta como pendiente: contarlo dejaría el marcador clavado en un número
+        # que nadie puede bajar a cero, y B-08 nunca podría generarse.
+        sin_clasificar=sum(1 for c in conceptos if c.categoria is None and c.clave is not None),
+        sin_mapear=sum(1 for d in departamentos if d.centro_costo is None),
+    )

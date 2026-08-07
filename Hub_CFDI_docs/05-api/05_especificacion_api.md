@@ -213,27 +213,57 @@ pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe p
 hay tramo con esa `vigencia_desde`. Bitácora.
 
 ### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
-`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, confirmado, confirmado_por, confirmado_en}`.
-`PUT /{tipo}` body: los cinco campos de marca. `base_exencion: NINGUNA` exige `factor_exencion: null` y
-cualquier otra base lo exige presente y positivo (**422** si no). `tipo` son 3 posiciones, texto ('001'
-nunca 1). Igual que los importes: **capturar no confirma**, y cambiar una marca limpia la confirmación.
+`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, confirmado, confirmado_por, confirmado_en}`.
+`PUT /{tipo}` body: los **seis** campos de marca, todos obligatorios. `base_exencion: NINGUNA` exige
+`factor_exencion: null` y prohíbe `sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor
+presente y positivo (**422** si no). Igual que los importes: **capturar no confirma**, y cambiar una
+marca limpia la confirmación.
+
+`sujeto_a_tope_conjunto` **no lleva default**: es el mismo cuerpo con el que se confirma, y un default
+dejaría que un cliente que ni lo menciona activara —o creara— una marca de previsión social sin el tope
+del art. 93 a la vista, que es la condición que la migración `c7a1e0b4d92f` declaró inaceptable.
+
+`{tipo}` se valida contra `c_TipoPercepcion` del catálogo embebido de `satcfdi` (44 claves), no solo por
+longitud: **422 `TIPO_PERCEPCION_INVALIDO`** si no existe. `150` en vez de `015` crearía una marca
+huérfana confirmable mientras la `015` real sigue sin calcular — silencioso en las dos puntas. Si el
+catálogo no se puede leer, **503 `CATALOGO_SAT_ILEGIBLE`**: no se escribe sin poder validar.
 
 ### POST /v1/configuracion/percepciones/{tipo}/confirmar — Activar las marcas de un tipo *(admin)*
 Body: el juego completo de marcas que se está confirmando. **409 `MARCAS_CAMBIARON`** si difiere de lo
 almacenado. Sin este método la puerta de confirmación de esta tabla sería una puerta tapiada: la captura
 nunca confirma, así que ninguna marca podría llegar a calcular. Bitácora.
 
-### GET·PUT /v1/empresas/{empresa_id}/configuracion — Política laboral *(operador+)*
+### GET·PUT /v1/empresas/{empresa_id}/configuracion — Política laboral *(GET consulta+ · PUT operador+)*
 Body/respuesta: `{ "zona_salarial": "GENERAL"|"ZLFN"|null, "dias_aguinaldo": int|null, "factor_prima_vacacional": "0.2500"|null }`.
 Los tres campos **viajan siempre, incluso nulos**: "no configurado" es un estado que degrada B-10 (sin
 zona salarial no se evalúa el salario mínimo) y un campo omitido no lo comunica. El `PUT` reemplaza los
 tres. `empresa_id` sale del path y lo valida `require_empresa`; el cuerpo no lo lleva. Bitácora.
 
-### GET·PUT /v1/empresas/{empresa_id}/configuracion/mapeos — Centros de costo y provisiones *(operador+)*
+### GET·PUT /v1/empresas/{empresa_id}/configuracion/mapeos — Centros de costo y provisiones *(GET consulta+ · PUT operador+)*
 Body/respuesta: `{ "departamentos": [{departamento_texto, centro_costo}], "conceptos_provision": [{naturaleza, tipo, clave, categoria}] }`
-(`categoria` ∈ `AGUINALDO|VACACIONES|PRIMA_VACACIONAL`). El `PUT` **reemplaza las dos listas completas**:
-lo que no venga deja de existir. **422 `MAPEO_DUPLICADO`** si un cuerpo trae dos renglones con la misma
-clave natural. Bitácora con las dos listas enteras, antes y después.
+(`categoria` ∈ `AGUINALDO|VACACIONES|PRIMA_VACACIONAL|NO_APLICA`). El `PUT` **reemplaza las dos listas
+completas**: lo que no venga deja de existir. **422 `MAPEO_DUPLICADO`** si un cuerpo trae dos renglones
+con la misma clave natural. Bitácora con las dos listas enteras, antes y después.
+
+`NO_APLICA` es lo que permite que la clasificación esté **completa**. B-08 necesita saber cuánto
+aguinaldo se pagó; con un solo concepto sin clasificar, "aguinaldo pagado = 0" es indistinguible de "sí
+se pagó y no sé en cuál concepto viene". Sin esta categoría, marcar "este concepto no es provisión" solo
+se podría hacer no capturándolo, que es exactamente lo que hace quien todavía no lo revisó.
+
+### GET /v1/empresas/{empresa_id}/configuracion/conceptos-observados — Lo que la nómina emitió *(consulta+)*
+**200:** `{ "conceptos": [{naturaleza, tipo, clave, concepto, descripcion_sat, comprobantes, importe, categoria}], "departamentos": [{departamento_texto, comprobantes, centro_costo}], "sin_clasificar": int, "sin_mapear": int }`.
+
+Los conceptos y departamentos que **aparecen de verdad** en los CFDI de nómina de la empresa, con la
+categoría o el centro de costo que ya tengan (o `null`). Existe porque pedirle al usuario que teclee
+`P/002/047` era pedirle un dato que no tiene: esas claves las inventa el sistema de nómina del patrón.
+Con esta lista la pantalla enumera lo que existe, la persona **reconoce la descripción** y elige
+categoría; nunca teclea una clave.
+
+`clave` puede venir nula (el complemento no la exige) y entonces el concepto no se puede clasificar —
+`map_concepto_provision` la lleva en la PK—, así que tampoco cuenta en `sin_clasificar`. **Sin filtro de
+fecha ni de estatus, a propósito:** no es un informe sino el inventario de lo que hay que configurar, y
+un concepto que solo apareció hace dos años sigue necesitando categoría para que la clasificación quede
+completa. Cuatro consultas agregadas en total, con `GROUP BY` en la base (regla 11).
 
 > **No existe un endpoint de "recargar semillas desde YAML"**, a propósito: `cargar_desde_yaml` hace
 > `commit`/`rollback` sobre la sesión de quien la llama, y ese `rollback` descartaría la fila de bitácora

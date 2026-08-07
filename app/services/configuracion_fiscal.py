@@ -63,6 +63,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar
 
@@ -106,6 +107,13 @@ CLAVES_PARAM_FISCAL: frozenset[str] = frozenset(
     }
 )
 
+# `param_fiscal.valor` es `Numeric(18,6)`: 12 dígitos enteros y 6 decimales. Fuera de ese
+# molde MySQL no guarda el número, revienta con un `DataError 1264/1406` a media escritura —
+# un 500 opaco donde debía haber un mensaje que dijera qué está mal. Se comprueba aquí, en la
+# puerta, para que el cargador de YAML y la captura manual reciban el mismo error.
+_VALOR_MAXIMO: Decimal = Decimal(10) ** 12
+_DECIMALES_MAXIMOS = 6
+
 
 class ErrorDeConfiguracion(ValueError):
     """Un dato de configuración fiscal que no se puede aceptar tal como viene.
@@ -130,6 +138,59 @@ class CorreccionManualProtegida(ErrorDeConfiguracion):
     hace el cargador de semillas, no la captura manual). Es una negativa a escribir, no un
     error del dato: el cargador la traduce en un renglón omitido con su explicación.
     """
+
+
+class CatalogoDelSatIlegible(ErrorDeConfiguracion):
+    """No se pudo enumerar `c_TipoPercepcion` del catálogo embebido de `satcfdi`.
+
+    Se distingue de un dato inválido porque no lo es: lo que falla es la herramienta con la
+    que se iba a validar. Quien la atrape debe **negarse a escribir** (ver
+    `exige_tipo_percepcion_conocido`), no dejar pasar el renglón.
+    """
+
+
+@lru_cache(maxsize=1)
+def tipos_percepcion_del_sat() -> frozenset[str]:
+    """Las claves de `c_TipoPercepcion` que trae la versión pinada de `satcfdi` (44 hoy).
+
+    Import perezoso y cacheado: enumerar el catálogo abre un sqlite y despickla cada
+    renglón, y no todo el que importa este módulo lo necesita.
+    """
+    from app.informes import catalogos
+
+    return frozenset(clave for clave, _ in catalogos.tipos_de("P"))
+
+
+def exige_tipo_percepcion_conocido(tipo: str, contexto: str = "") -> None:
+    """Rechaza un `tipo_percepcion` que no está en el catálogo del SAT.
+
+    Es el mismo argumento que la lista blanca `CLAVES_PARAM_FISCAL`, y aquí muerde más
+    fuerte: `150` en vez de `015` crea una marca huérfana que se puede confirmar sin ruido,
+    mientras la `015` de verdad sigue sin confirmar y sin calcular. Silencioso en las dos
+    puntas — B-03 no aplicaría la exención que sí toca, y nadie leería jamás la que se
+    capturó. El conjunto es cerrado y verificado (44 claves), así que no hay motivo para
+    aceptar nada fuera de él.
+
+    Si el catálogo no se puede leer, **no se deja pasar**: lanza `CatalogoDelSatIlegible`.
+    La regla de `app/informes/catalogos.py` —"un catálogo ilegible no aborta el informe"—
+    es sobre resolver una *descripción* al leer; aquí el catálogo es la única defensa de una
+    *escritura*, y escribir sin poder validar es justo lo que esta función existe para
+    impedir.
+    """
+    prefijo = f"{contexto}: " if contexto else ""
+    conocidos = tipos_percepcion_del_sat()
+    if not conocidos:
+        raise CatalogoDelSatIlegible(
+            f"{prefijo}no se pudo leer el catálogo `c_TipoPercepcion` de `satcfdi`, así que no hay con qué "
+            f"comprobar que {tipo!r} existe. No se escribe: una marca sobre un tipo inventado se confirma "
+            "sin ruido y después no la lee nadie nunca."
+        )
+    if tipo not in conocidos:
+        raise ErrorDeConfiguracion(
+            f"{prefijo}`tipo_percepcion` = {tipo!r} no existe en el catálogo `c_TipoPercepcion` del SAT "
+            f"({len(conocidos)} claves en la versión instalada de `satcfdi`). Revisa los ceros a la "
+            "izquierda: '015' y '150' se teclean casi igual y solo uno es un tipo de percepción."
+        )
 
 
 @dataclass(frozen=True)
@@ -349,6 +410,23 @@ async def guardar_param_fiscal(
         raise ErrorDeConfiguracion(
             f"{prefijo}`valor` debe ser positivo (llegó {valor}). Un cero o un negativo en un tope de "
             "exención o en un salario mínimo produce cálculos falsos sin que nadie los note."
+        )
+    if valor >= _VALOR_MAXIMO:
+        raise ErrorDeConfiguracion(
+            f"{prefijo}`valor` no cabe en la columna (llegó {valor}; el máximo son 12 dígitos enteros). "
+            "Sin este rechazo MySQL revienta a media escritura con un error que no dice qué renglón fue."
+        )
+    exponente = valor.as_tuple().exponent
+    if isinstance(exponente, int) and -exponente > _DECIMALES_MAXIMOS:
+        # Rechazar y no redondear. La columna guarda 6 decimales, así que un valor con más se
+        # almacenaría *distinto del que la persona revisó* — y entonces su siguiente intento de
+        # confirmarlo chocaría con un 409 "el valor cambió" que no podría explicarse, porque el
+        # que cambió fue el sistema. Ningún valor fiscal real (UMA, salario mínimo, tipo de
+        # cambio) pasa de 4 decimales: el límite no aprieta a nadie y cierra el hueco.
+        raise ErrorDeConfiguracion(
+            f"{prefijo}`valor` trae {-exponente} decimales y la columna guarda {_DECIMALES_MAXIMOS} "
+            f"(llegó {valor}). Redondearlo en silencio guardaría una cifra distinta de la que revisaste; "
+            "recórtalo tú a 6 decimales para que lo confirmado sea exactamente lo que miraste."
         )
     if not fuente.strip():
         raise ErrorDeConfiguracion(
@@ -725,8 +803,10 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
             "el tope conjunto del art. 93 de la LISR limita una exención, y aquí no hay ninguna que "
             "limitar. O el tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
         )
+    tipo_percepcion = _texto(_requerido(fila, "tipo_percepcion", ctx), "tipo_percepcion", ctx, largo=3)
+    exige_tipo_percepcion_conocido(tipo_percepcion, ctx)
     return _FilaMarca(
-        tipo_percepcion=_texto(_requerido(fila, "tipo_percepcion", ctx), "tipo_percepcion", ctx, largo=3),
+        tipo_percepcion=tipo_percepcion,
         es_ingreso_ordinario=_booleano(_requerido(fila, "es_ingreso_ordinario", ctx), "es_ingreso_ordinario", ctx),
         base_exencion=base,
         factor_exencion=factor,
