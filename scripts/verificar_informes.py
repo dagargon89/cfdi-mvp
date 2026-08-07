@@ -76,10 +76,16 @@ _HOJAS_ESPERADAS = {"Datos", "Parámetros", "Banderas", "Diccionario"}
 _MASCARA_RE = re.compile(r"^\*{4}([^*]{4})?$")  # `enmascarar()`: "****" o "****" + últimos 4
 
 # Grano garantizado no vacío cuando hay nóminas normalizadas en el rango: una fila por
-# CFDI (B-01, B-02), por empleado (B-04, B-05) o por (empleado, tipo, clave) de deducción
-# (B-07). B-10 tiene grano de *hallazgo*: cero filas ahí significa "sin hallazgos", un
-# resultado legítimo que no debe tratarse como falla — solo se avisa.
-_CLAVES_CON_FILAS_GARANTIZADAS = {"B-01", "B-02", "B-04", "B-05", "B-07"}
+# CFDI (B-01, B-02), por nodo de percepción (B-03), por empleado (B-04, B-05) o por
+# (empleado, tipo, clave) de deducción (B-07). B-10 tiene grano de *hallazgo*: cero filas ahí
+# significa "sin hallazgos", un resultado legítimo que no debe tratarse como falla — solo se
+# avisa.
+#
+# B-03 entra en la lista aunque sus columnas de topes salgan vacías mientras la configuración
+# fiscal esté sin confirmar: lo que degrada son cuatro columnas, no el grano. Un CFDI de
+# nómina normalizado siempre trae al menos un nodo de percepción, así que cero filas ahí es
+# una falla igual que en B-02.
+_CLAVES_CON_FILAS_GARANTIZADAS = {"B-01", "B-02", "B-03", "B-04", "B-05", "B-07"}
 
 
 _MAX_FUGAS_REPORTADAS = 10

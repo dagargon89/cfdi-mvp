@@ -11,6 +11,7 @@ from typing import Any
 from app.informes import (
     b01_catalogo_sat,
     b02_conceptos_patron,
+    b03_gravado_exento,
     b04_matriz_empleado_periodo,
     b05_acumulado_anual,
     b07_prestamos,
@@ -21,6 +22,7 @@ from app.informes.base import DefinicionInforme
 _MODULOS: tuple[Any, ...] = (
     b01_catalogo_sat,
     b02_conceptos_patron,
+    b03_gravado_exento,
     b04_matriz_empleado_periodo,
     b05_acumulado_anual,
     b07_prestamos,
