@@ -231,8 +231,12 @@ confirmarlo. 39 de las 44 marcas sembradas traen una. Viaja en el `GET` para que
 al lado del botón de confirmar — sin ella, confirmar sería a ciegas, que es lo que el invariante existe
 para impedir. Es editable en el `PUT` porque resolver la duda es parte de revisarla, y **obligatoria
 aunque admita `null`** para que borrar una duda cueste escribir `null` en vez de omitir un campo.
-Cambiarla **no** limpia la confirmación ni provoca `409` al confirmar: es procedencia, como la `fuente`
-de `param_fiscal`, no una marca que altere ningún cálculo.
+Nunca provoca `409` al confirmar (no viaja en ese cuerpo), pero **sí limpia la confirmación de la marca
+cuando aparece o cambia** — y no cuando desaparece. La asimetría es deliberada: confirmar es "una persona
+revisó esto y responde por ello", así que una duda que esa persona no tenía delante invalida esa
+revisión, mientras que resolver una duda no invalida nada. Aquí **no** aplica el precedente de la
+`fuente` de `param_fiscal` (que sí conserva la confirmación al cambiar): la fuente dice de dónde salió el
+valor, esta nota dice que el valor podría estar mal.
 
 `sujeto_a_tope_conjunto` **no lleva default**: es el mismo cuerpo con el que se confirma, y un default
 dejaría que un cliente que ni lo menciona activara —o creara— una marca de previsión social sin el tope

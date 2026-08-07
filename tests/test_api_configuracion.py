@@ -1396,40 +1396,104 @@ async def test_el_put_que_omite_la_nota_no_la_borra_en_silencio(client, db: Asyn
     assert r.json()["nota_revision"] is None, "un texto en blanco es la misma intención que `null`"
 
 
-async def test_editar_la_nota_no_limpia_la_confirmacion_ni_estorba_al_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
-    """La nota es procedencia, no una marca que calcule: mismo criterio con el que
-    `guardar_param_fiscal` no tira la confirmación cuando solo cambia la `fuente`. Y por eso
-    tampoco entra en la comparación del `confirmar`: obligar a reenviar 800 caracteres de
-    prosa verbatim solo añadiría un 409 por una diferencia de espacios."""
-    await _admin(db)
-    base = {
-        "es_ingreso_ordinario": True,
-        "base_exencion": "NINGUNA",
-        "factor_exencion": None,
-        "integra_sbc": True,
-        "es_provisionable": False,
-        "sujeto_a_tope_conjunto": False,
-    }
-    await client.put("/v1/configuracion/percepciones/010", json={**base, "nota_revision": _DUDA}, headers=ADMIN)
+_MARCAS_010 = {
+    "es_ingreso_ordinario": True,
+    "base_exencion": "NINGUNA",
+    "factor_exencion": None,
+    "integra_sbc": True,
+    "es_provisionable": False,
+    "sujeto_a_tope_conjunto": False,
+}
 
-    # El cuerpo del confirmar son las seis marcas, sin la nota.
-    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=base, headers=ADMIN)
-    assert r.status_code == 200, r.text
-    assert r.json()["confirmado"] is True
 
-    db.expire_all()
-    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
-
+async def _confirmar_010(client, db: AsyncSession, *, con_nota: str | None) -> None:  # type: ignore[no-untyped-def]
+    """Deja la marca `010` capturada con esa nota y **confirmada**."""
     r = await client.put(
-        "/v1/configuracion/percepciones/010",
-        json={**base, "nota_revision": "Verificado contra el art. 27 LSS el 2026-08-06: la marca es correcta."},
-        headers=ADMIN,
+        "/v1/configuracion/percepciones/010", json={**_MARCAS_010, "nota_revision": con_nota}, headers=ADMIN
     )
     assert r.status_code == 200, r.text
-    assert r.json()["confirmado"] is True, "cambiar solo la nota no devuelve la marca a la cola"
+    # El cuerpo del confirmar son las seis marcas, sin la nota: confirmar no es editar.
+    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=_MARCAS_010, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+
+async def _nota_de_010(client, nota: str | None) -> dict:  # type: ignore[no-untyped-def, type-arg]
+    r = await client.put(
+        "/v1/configuracion/percepciones/010", json={**_MARCAS_010, "nota_revision": nota}, headers=ADMIN
+    )
+    assert r.status_code == 200, r.text
+    return dict(r.json())
+
+
+async def test_una_duda_nueva_devuelve_a_la_cola_una_marca_confirmada(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Confirmar significa "una persona revisó esto y responde por ello". Si después aparece
+    una duda que esa persona no tenía delante, mantener la confirmación afirmaría una revisión
+    que, contra esa información, no ocurrió.
+
+    Ronda 3: antes la nota se trataba como la `fuente` de `param_fiscal` —cambiarla conservaba
+    la confirmación— y es un paralelo que no aplica: la fuente dice **de dónde salió** el
+    valor, la nota dice que el valor **podría estar mal**.
+    """
+    await _admin(db)
+    await _confirmar_010(client, db, con_nota=None)
+
+    cuerpo = await _nota_de_010(client, _DUDA)
+    assert cuerpo["confirmado"] is False
+    assert cuerpo["nota_revision"] == _DUDA
+
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}, "una duda nueva saca la marca de los cálculos"
+
+
+async def test_una_duda_distinta_tambien_devuelve_a_la_cola(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Segunda transición: ya había duda y ahora dice otra cosa. Quien confirmó leyó la
+    anterior, no esta."""
+    await _admin(db)
+    await _confirmar_010(client, db, con_nota=_DUDA)
+
+    otra = "Además, el art. 27 LSS cambió con la reforma del DOF 15-01-2026: hay que releer la fracción VII."
+    cuerpo = await _nota_de_010(client, otra)
+    assert cuerpo["confirmado"] is False
+
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+async def test_resolver_la_duda_no_devuelve_a_la_cola(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Tercera transición, y la que hace que la regla sea **asimétrica**: borrar la nota es
+    resolver la duda, y resolver una duda no invalida ninguna revisión — al contrario. Si
+    también limpiara, resolver una duda castigaría al que la resolvió y nadie lo haría."""
+    await _admin(db)
+    await _confirmar_010(client, db, con_nota=_DUDA)
+
+    cuerpo = await _nota_de_010(client, None)
+    assert cuerpo["nota_revision"] is None
+    assert cuerpo["confirmado"] is True, "resolver la duda no puede sacar la marca de los cálculos"
 
     db.expire_all()
     assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+    # Y reescribir la MISMA nota tampoco es información nueva: no limpia.
+    await _confirmar_010(client, db, con_nota=_DUDA)
+    cuerpo = await _nota_de_010(client, _DUDA)
+    assert cuerpo["confirmado"] is True
+
+
+async def test_la_nota_no_estorba_al_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La nota no entra en la comparación del `confirmar` y no puede producir un `409`:
+    obligar a reenviar verbatim 800 caracteres de prosa solo añadiría un rechazo por una
+    diferencia de espacios en blanco. Que la duda se **vea** al confirmar lo garantiza el
+    `GET`, que la devuelve."""
+    await _admin(db)
+    await _nota_de_010(client, _DUDA)
+
+    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=_MARCAS_010, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+    assert r.json()["nota_revision"] == _DUDA, "la marca se confirma con su duda a la vista, no sin ella"
 
 
 async def test_las_39_dudas_sembradas_llegan_al_endpoint(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]

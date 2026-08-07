@@ -452,9 +452,10 @@ class MarcaPercepcionIn(MarcasPercepcion):
     un `PUT` que corrige un factor y no menciona la nota **borraría en silencio** una duda que
     alguien derivó contra la LISR. Borrarla tiene que costar escribir `null`.
 
-    No está en el cuerpo de `POST .../confirmar` (`MarcasPercepcion`), y es deliberado por
-    partida doble: confirmar no es editar, y la nota tampoco entra en la comparación que
-    devuelve `409` — ver `_difieren` en `app/api/v1/configuracion.py`.
+    No está en el cuerpo de `POST .../confirmar` (`MarcasPercepcion`): confirmar no es editar,
+    y la nota tampoco entra en la comparación que devuelve `409` — ver `_difieren` en
+    `app/api/v1/configuracion.py`. Lo que sí hace, cuando **aparece o cambia** en un `PUT`, es
+    limpiar la confirmación de esa marca; que desaparezca, no (ver `_duda_nueva`).
     """
 
     nota_revision: str | None

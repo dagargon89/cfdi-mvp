@@ -459,3 +459,59 @@ async def test_el_cargador_no_pisa_una_correccion_manual(db: AsyncSession, tmp_p
     assert fila is not None
     assert fila.origen is OrigenValor.SEMILLA
     assert fila.fuente == "INEGI 2026"
+
+
+async def test_una_duda_nueva_en_la_semilla_devuelve_la_marca_a_la_cola(db: AsyncSession, tmp_path: Path) -> None:
+    """El caso que motiva la regla: alguien confirmó la marca, y una recarga posterior de la
+    semilla le añade una duda que esa persona nunca tuvo delante.
+
+    La regla es **asimétrica** —aparecer o cambiar limpia; desaparecer, no— y aquí se recorren
+    las tres transiciones por la vía del cargador, que es por donde llegan las 39 dudas.
+    """
+    base = (
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '010'\n    es_ingreso_ordinario: true\n    base_exencion: NINGUNA\n"
+        "    integra_sbc: true\n    es_provisionable: false\n"
+    )
+    duda = "    nota_revision: 'el art. 27, fracción VII LSS excluye los premios hasta el 10% del SBC.'\n"
+    otra = "    nota_revision: 'y la reforma del DOF 15-01-2026 obliga a releer esa fracción.'\n"
+
+    async def _confirmar() -> None:
+        marca = await db.get(CatalogoPercepcionMarca, "010")
+        assert marca is not None
+        marca.confirmado_por = "otro@demo.test"
+        marca.confirmado_en = datetime(2026, 8, 1, 9, 0, 0)
+        await db.commit()
+
+    async def _recargar(texto: str) -> CatalogoPercepcionMarca:
+        ruta = tmp_path / "marcas.yaml"
+        ruta.write_text(texto, encoding="utf-8")
+        await cfg.cargar_desde_yaml(db, ruta)
+        db.expire_all()
+        marca = await db.get(CatalogoPercepcionMarca, "010")
+        assert marca is not None
+        return marca
+
+    # 1. Nula -> con nota: limpia.
+    await _recargar(base)
+    await _confirmar()
+    marca = await _recargar(base + duda)
+    assert marca.confirmado_en is None, "quien confirmó no tenía esta duda delante"
+
+    # 2. Con nota -> otra nota: limpia.
+    await _confirmar()
+    marca = await _recargar(base + otra)
+    assert marca.confirmado_en is None
+
+    # 3. Con nota -> nula: NO limpia. Resolver una duda no invalida ninguna revisión.
+    await _confirmar()
+    marca = await _recargar(base)
+    assert marca.confirmado_en is not None, "resolver la duda no puede castigar al que la resolvió"
+    assert marca.nota_revision is None
+
+    # 4. La misma nota otra vez tampoco es información nueva.
+    marca = await _recargar(base + duda)
+    assert marca.confirmado_en is None  # apareció de nuevo: limpia
+    await _confirmar()
+    marca = await _recargar(base + duda)
+    assert marca.confirmado_en is not None, "recargar sin cambios es idempotente"

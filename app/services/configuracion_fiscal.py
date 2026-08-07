@@ -986,6 +986,14 @@ async def cargar_desde_yaml_detallado(
                         or destino.integra_sbc != marca.integra_sbc
                         or destino.es_provisionable != marca.es_provisionable
                         or destino.sujeto_a_tope_conjunto != marca.sujeto_a_tope_conjunto
+                        # Una duda **nueva o distinta** también devuelve la marca a la cola, y
+                        # de forma asimétrica: que la nota desaparezca no limpia nada. Ver
+                        # `_duda_nueva` en `app/api/v1/configuracion.py` para el argumento
+                        # completo; en corto: confirmar significa "una persona revisó esto y
+                        # responde por ello", y si aparece una duda que esa persona no tenía
+                        # delante, la confirmación afirma una revisión que no ocurrió contra
+                        # esa información. Resolverla, en cambio, no invalida nada.
+                        or (marca.nota_revision is not None and marca.nota_revision != destino.nota_revision)
                     ):
                         destino.confirmado_por = None
                         destino.confirmado_en = None
@@ -995,10 +1003,6 @@ async def cargar_desde_yaml_detallado(
                     destino.integra_sbc = marca.integra_sbc
                     destino.es_provisionable = marca.es_provisionable
                     destino.sujeto_a_tope_conjunto = marca.sujeto_a_tope_conjunto
-                    # Fuera de la comparación de arriba a propósito: la nota es procedencia
-                    # —por qué dudar de estas marcas—, no una marca que altere ningún cálculo.
-                    # Mismo criterio que `guardar_param_fiscal`, que no tira la confirmación
-                    # cuando solo cambia la `fuente`: lo revisado sigue siendo lo mismo.
                     destino.nota_revision = marca.nota_revision
                 resumen["catalogo_percepcion_marca"] += 1
 

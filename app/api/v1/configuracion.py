@@ -167,13 +167,16 @@ def _difieren(fila: CatalogoPercepcionMarca, body: MarcasPercepcion) -> bool:
     """Si las marcas que **calculan** cambiaron. Decide dos cosas: si el `PUT` tiene que
     limpiar la confirmación, y si el `confirmar` responde 409.
 
-    `nota_revision` queda fuera a propósito. Es procedencia —por qué dudar de estas marcas—,
-    no una marca que altere ningún cálculo, y el precedente del proyecto ya está fijado:
-    `guardar_param_fiscal` no tira la confirmación cuando solo cambia la `fuente`, porque la
-    cifra revisada sigue siendo la misma. Meterla aquí obligaría además a que confirmar
-    reenviara verbatim un texto de 800 caracteres, y un `409` por una diferencia de espacios
-    en prosa es justo el fallo inexplicable que evitamos al rechazar el redondeo silencioso.
-    Que la duda se vea al confirmar lo garantiza el `GET`, que la devuelve.
+    `nota_revision` queda fuera de **esta** comparación, y por dos razones distintas según
+    para qué se use la función:
+
+    - Para el `409` del `confirmar`: el cuerpo de confirmar (`MarcasPercepcion`) ni siquiera
+      lleva la nota. Obligar a reenviar verbatim un texto de 800 caracteres solo añadiría un
+      `409` por una diferencia de espacios en prosa — el mismo fallo inexplicable que evitamos
+      al rechazar el redondeo silencioso. Que la duda se vea al confirmar lo garantiza el
+      `GET`, que la devuelve.
+    - Para limpiar la confirmación en el `PUT`: la nota sí cuenta, pero **asimétricamente**, y
+      eso no cabe en una comparación de igualdad. Va aparte, en `_duda_nueva`.
     """
     return (
         fila.es_ingreso_ordinario != body.es_ingreso_ordinario
@@ -377,6 +380,25 @@ async def confirmar_fiscal(
     return _param_a_salida(fila)
 
 
+def _duda_nueva(fila: CatalogoPercepcionMarca, body: MarcaPercepcionIn) -> bool:
+    """Si el `PUT` trae una duda que la marca no tenía, o una distinta de la que tenía.
+
+    **Asimétrica a propósito**, y es lo que la distingue de `_difieren`:
+
+    - nula → con nota, y nota → otra nota, devuelven la marca a la cola de revisión;
+    - nota → nula, no. Resolver una duda no invalida nada; al contrario.
+
+    Por qué la nota sí limpia la confirmación y la `fuente` de `param_fiscal` no, que parecen
+    el mismo caso y no lo son: **`fuente` dice de dónde salió el valor; `nota_revision` dice
+    que el valor podría estar mal.** Confirmar significa "una persona revisó esto y responde
+    por ello"; si después aparece una duda que esa persona no tenía delante, mantener la
+    confirmación afirma una revisión que, contra esa información, no ocurrió. Un campo neutro
+    que cambia es ambiguo; un campo cuyo contenido *es* una advertencia, cuando aparece, no lo
+    es — y esa falta de ambigüedad es justo lo que permite la regla asimétrica.
+    """
+    return body.nota_revision is not None and body.nota_revision != fila.nota_revision
+
+
 # --------------------------------------------------------------------------------------
 # catalogo_percepcion_marca (§3.1)
 # --------------------------------------------------------------------------------------
@@ -426,7 +448,8 @@ async def guardar_percepcion(
 ) -> MarcaPercepcionOut:
     """Captura o corrige las marcas de un tipo de percepción. Igual que los importes: **capturar
     no confirma**, y si algo cambia, la confirmación anterior se limpia — un `factor_exencion`
-    distinto es una exención distinta y vuelve a la cola de revisión."""
+    distinto es una exención distinta y vuelve a la cola de revisión. Una **duda nueva** hace
+    lo mismo, aunque las seis marcas no se muevan: ver `_duda_nueva`."""
     _exige_tipo_del_sat(tipo)
 
     fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
@@ -444,7 +467,7 @@ async def guardar_percepcion(
         )
         db.add(fila)
     else:
-        if _difieren(fila, body):
+        if _difieren(fila, body) or _duda_nueva(fila, body):
             fila.confirmado_por = None
             fila.confirmado_en = None
         fila.es_ingreso_ordinario = body.es_ingreso_ordinario
@@ -453,7 +476,6 @@ async def guardar_percepcion(
         fila.integra_sbc = body.integra_sbc
         fila.es_provisionable = body.es_provisionable
         fila.sujeto_a_tope_conjunto = body.sujeto_a_tope_conjunto
-        # Fuera del `_difieren` de arriba: editar la nota no limpia la confirmación (ver ahí).
         fila.nota_revision = body.nota_revision
     await db.flush()
     await db.refresh(fila)  # escala real de `Numeric(9,4)`; ver el mismo comentario en `guardar_fiscal`

@@ -64,8 +64,11 @@
 #                     columna `catalogo_percepcion_marca.nota_revision` y la API la devuelve
 #                     junto a la marca, para que la pantalla la muestre al lado del botón de
 #                     confirmar. Bloque literal (`|-`) para conservar los subpuntos (a)/(b).
-#                     Cambiarla NO limpia la confirmación: es procedencia, como la `fuente`
-#                     de `param_fiscal`, no una marca que altere ningún cálculo.
+#                     Si al recargar APARECE una duda donde no la había, o CAMBIA la que
+#                     había, la confirmación de esa marca se limpia: quien la confirmó no
+#                     tenía esa duda delante. Que la duda DESAPAREZCA no limpia nada —
+#                     resolverla no invalida ninguna revisión, y si castigara al que la
+#                     resolvió, nadie la resolvería.
 #
 # ======================================================================================
 # TRES LÍMITES DEL MODELO QUE NINGÚN RENGLÓN PUEDE EXPRESAR

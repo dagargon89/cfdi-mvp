@@ -156,8 +156,12 @@ class CatalogoPercepcionMarca(Base):
     # párrafos con subpuntos, no una etiqueta. Un ancho fijo mal elegido las truncaría en
     # silencio (`DataError 1406` en el mejor caso) justo en la parte que explica la duda.
     #
-    # Cambiarla NO limpia la confirmación: es procedencia, como la `fuente` de `param_fiscal`
-    # —la marca revisada sigue siendo la misma—, y ese es el precedente que fija el proyecto.
+    # Una duda **nueva o distinta** limpia la confirmación; que la duda desaparezca, no. La
+    # asimetría es el punto: confirmar significa "una persona revisó esto y responde por ello",
+    # y una duda que esa persona no tenía delante invalida esa revisión, mientras que resolver
+    # una duda no invalida nada. No aplica aquí el precedente de la `fuente` de `param_fiscal`
+    # —que sí conserva la confirmación al cambiar—: la fuente dice de dónde salió el valor,
+    # esta nota dice que el valor podría estar mal.
     nota_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Mismo invariante que `param_fiscal`: sembrar propone, solo una persona activa.
     confirmado_por: Mapped[str | None] = mapped_column(String(128), nullable=True)
