@@ -165,11 +165,20 @@ anual propio. Incluirlos en la base ordinaria **sobreestimaría la base anual de
 columna 11 de B-05: un número inflado en la constancia de alguien que recibió una
 indemnización.
 
-### 5.3 Los 39 tipos marcados `REVISAR` — la lista completa
+### 5.3 Los 39 tipos con duda declarada — la lista completa
 
 De 44 tipos, **39 llevan una duda declarada** y solo 5 no (`001`, `002`, `003`, `021`, `028`).
 Es un número alto a propósito: el modelo de marcas es un booleano y un factor por tipo, y
 buena parte del art. 93 no cabe ahí. **Es mejor una duda declarada que un factor inventado.**
+
+> **Dónde vive cada duda (cambió en la ronda 2 de la tarea 4).** Ya no es un comentario
+> `# REVISAR (0NN): ...` del YAML: es el campo **`nota_revision`** del propio renglón, que se
+> carga a la columna `catalogo_percepcion_marca.nota_revision` y viaja en
+> `GET /v1/configuracion/percepciones`. El motivo es que la pantalla de confirmación mostraba
+> 44 botones "Confirmar" sin ninguna de estas 39 razones a la vista —pedía confirmar a ciegas
+> justo lo que el invariante existe para impedir—, porque los comentarios no se cargan. Esta
+> sección sigue siendo la lista agrupada por gravedad, útil para leer de corrido; **el texto
+> que manda es el del campo**, y no se dejó una copia en comentario para que no diverjan.
 
 #### A. Decisiones de régimen — empezar por aquí (1 tipo)
 
@@ -358,7 +367,7 @@ exactamente lo que hace la persona que lee este documento—. Valida coherencia 
 - una base de exención distinta de `NINGUNA` trae factor positivo, y `NINGUNA` no trae factor;
 - los cinco tipos del régimen de separación/jubilación no son ingreso ordinario;
 - todo `param_fiscal` declara una fuente con liga o fecha, no una genérica;
-- toda línea `REVISAR` dice **de qué tipo** es la duda;
+- toda `nota_revision` dice **de qué tipo** es la duda;
 - las tres semillas se cargan y **ninguna queda confirmada**.
 
 Un factor de exención mal capturado no lo atrapa ninguna prueba. Por eso existe este README.

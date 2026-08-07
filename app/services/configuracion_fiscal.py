@@ -63,7 +63,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from functools import lru_cache
 from pathlib import Path
 from typing import TypeVar
 
@@ -149,16 +148,21 @@ class CatalogoDelSatIlegible(ErrorDeConfiguracion):
     """
 
 
-@lru_cache(maxsize=1)
 def tipos_percepcion_del_sat() -> frozenset[str]:
     """Las claves de `c_TipoPercepcion` que trae la versión pinada de `satcfdi` (44 hoy).
 
-    Import perezoso y cacheado: enumerar el catálogo abre un sqlite y despickla cada
-    renglón, y no todo el que importa este módulo lo necesita.
+    Import perezoso: enumerar el catálogo abre un sqlite y despickla cada renglón, y no todo
+    el que importa este módulo lo necesita.
+
+    **Sin `lru_cache` propio, a propósito.** La caché vive en un solo sitio,
+    `catalogos._tipos_de_cache`, que ya memoiza el resultado y —desde la ronda 2— no memoiza
+    los fallos. Poner una segunda capa aquí no ahorraría nada medible (construir un
+    `frozenset` de 44 cadenas) y sí duplicaría el invariante "el fallo no se queda pegado" en
+    un lugar donde la próxima persona no lo buscaría. Propaga `CatalogoIlegible`.
     """
     from app.informes import catalogos
 
-    return frozenset(clave for clave, _ in catalogos.tipos_de("P"))
+    return frozenset(clave for clave, _ in catalogos.tipos_de_estricto("P"))
 
 
 def exige_tipo_percepcion_conocido(tipo: str, contexto: str = "") -> None:
@@ -176,14 +180,28 @@ def exige_tipo_percepcion_conocido(tipo: str, contexto: str = "") -> None:
     es sobre resolver una *descripción* al leer; aquí el catálogo es la única defensa de una
     *escritura*, y escribir sin poder validar es justo lo que esta función existe para
     impedir.
+
+    Ese rechazo es **transitorio**: el fallo de lectura no se memoiza (ver
+    `catalogos._tipos_de_cache`), así que en cuanto el catálogo vuelva a ser legible la
+    siguiente petición pasa, sin reiniciar nada.
     """
     prefijo = f"{contexto}: " if contexto else ""
-    conocidos = tipos_percepcion_del_sat()
-    if not conocidos:
+    from app.informes.catalogos import CatalogoIlegible
+
+    try:
+        conocidos = tipos_percepcion_del_sat()
+    except CatalogoIlegible as exc:
         raise CatalogoDelSatIlegible(
-            f"{prefijo}no se pudo leer el catálogo `c_TipoPercepcion` de `satcfdi`, así que no hay con qué "
-            f"comprobar que {tipo!r} existe. No se escribe: una marca sobre un tipo inventado se confirma "
-            "sin ruido y después no la lee nadie nunca."
+            f"{prefijo}no se pudo leer el catálogo `c_TipoPercepcion` de `satcfdi` ({exc}), así que no hay "
+            f"con qué comprobar que {tipo!r} existe. No se escribe: una marca sobre un tipo inventado se "
+            "confirma sin ruido y después no la lee nadie nunca. Vuelve a intentarlo."
+        ) from exc
+    if not conocidos:
+        # El catálogo se leyó y está vacío. No debería pasar nunca, pero si pasa tampoco hay
+        # con qué validar, y el criterio es el mismo: no se escribe.
+        raise CatalogoDelSatIlegible(
+            f"{prefijo}el catálogo `c_TipoPercepcion` de `satcfdi` se leyó pero no trae ningún tipo, así que "
+            f"no hay con qué comprobar que {tipo!r} existe. No se escribe."
         )
     if tipo not in conocidos:
         raise ErrorDeConfiguracion(
@@ -533,6 +551,7 @@ class _FilaMarca:
     integra_sbc: bool
     es_provisionable: bool
     sujeto_a_tope_conjunto: bool
+    nota_revision: str | None
 
 
 @dataclass(frozen=True)
@@ -803,6 +822,12 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
             "el tope conjunto del art. 93 de la LISR limita una exención, y aquí no hay ninguna que "
             "limitar. O el tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
         )
+    # La duda declarada del renglón, si la trae. Es opcional: 5 de los 44 tipos no tienen
+    # ninguna. Va como campo y no como comentario porque los comentarios no se cargan, y la
+    # pantalla de confirmación necesita enseñarla al lado del botón (ver el modelo).
+    nota_bruta = fila.get("nota_revision")
+    nota = None if nota_bruta is None else _texto(nota_bruta, "nota_revision", ctx)
+
     tipo_percepcion = _texto(_requerido(fila, "tipo_percepcion", ctx), "tipo_percepcion", ctx, largo=3)
     exige_tipo_percepcion_conocido(tipo_percepcion, ctx)
     return _FilaMarca(
@@ -813,6 +838,7 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
         integra_sbc=_booleano(_requerido(fila, "integra_sbc", ctx), "integra_sbc", ctx),
         es_provisionable=_booleano(_requerido(fila, "es_provisionable", ctx), "es_provisionable", ctx),
         sujeto_a_tope_conjunto=tope,
+        nota_revision=nota,
     )
 
 
@@ -946,6 +972,7 @@ async def cargar_desde_yaml_detallado(
                             integra_sbc=marca.integra_sbc,
                             es_provisionable=marca.es_provisionable,
                             sujeto_a_tope_conjunto=marca.sujeto_a_tope_conjunto,
+                            nota_revision=marca.nota_revision,
                         )
                     )
                 else:
@@ -968,6 +995,11 @@ async def cargar_desde_yaml_detallado(
                     destino.integra_sbc = marca.integra_sbc
                     destino.es_provisionable = marca.es_provisionable
                     destino.sujeto_a_tope_conjunto = marca.sujeto_a_tope_conjunto
+                    # Fuera de la comparación de arriba a propósito: la nota es procedencia
+                    # —por qué dudar de estas marcas—, no una marca que altere ningún cálculo.
+                    # Mismo criterio que `guardar_param_fiscal`, que no tira la confirmación
+                    # cuando solo cambia la `fuente`: lo revisado sigue siendo lo mismo.
+                    destino.nota_revision = marca.nota_revision
                 resumen["catalogo_percepcion_marca"] += 1
 
         if plan.vacaciones:

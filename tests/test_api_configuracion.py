@@ -425,6 +425,7 @@ async def test_percepciones_capturar_no_confirma_y_confirmar_las_activa(client, 
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": False,
+            "nota_revision": None,
         },
         headers=ADMIN,
     )
@@ -515,6 +516,7 @@ async def test_corregir_una_marca_confirmada_la_devuelve_a_la_cola(client, db: A
             "integra_sbc": False,
             "es_provisionable": False,
             "sujeto_a_tope_conjunto": False,
+            "nota_revision": None,
         },
         headers=ADMIN,
     )
@@ -545,6 +547,7 @@ async def test_percepcion_con_base_ninguna_y_factor_da_422(client, db: AsyncSess
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": False,
+            "nota_revision": None,
         },
         headers=ADMIN,
     )
@@ -914,6 +917,7 @@ async def test_put_de_un_tipo_que_no_existe_en_el_catalogo_del_sat_da_422(client
         "integra_sbc": True,
         "es_provisionable": False,
         "sujeto_a_tope_conjunto": False,
+        "nota_revision": None,
     }
 
     for tipo in ("ZZZ", "150", "999"):
@@ -957,7 +961,11 @@ async def test_confirmar_un_tipo_inventado_tambien_se_rechaza(client, db: AsyncS
 
 
 def _marca_015(**cambios: object) -> dict[str, object]:
-    """`015` (Becas para trabajadores y/o hijos): previsión social sujeta al tope conjunto."""
+    """`015` (Becas para trabajadores y/o hijos): previsión social sujeta al tope conjunto.
+
+    Las seis marcas que calculan — es el cuerpo del `POST .../confirmar` tal cual, y la base
+    del `PUT`, que además lleva `nota_revision` (ver `_captura_015`).
+    """
     cuerpo: dict[str, object] = {
         "es_ingreso_ordinario": False,
         "base_exencion": "PORCENTAJE",
@@ -970,13 +978,18 @@ def _marca_015(**cambios: object) -> dict[str, object]:
     return cuerpo
 
 
+def _captura_015(**cambios: object) -> dict[str, object]:
+    """Cuerpo del `PUT` de la 015: las seis marcas más la duda declarada."""
+    return _marca_015(nota_revision=None, **cambios)
+
+
 async def test_el_tope_conjunto_viaja_en_las_dos_direcciones(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
     """Sin este campo en el esquema, `PUT /percepciones/015` creaba la fila con la bandera en
     `false` en silencio y B-03 exentaría de más: los seis tipos de previsión social sujetos al
     tope del art. 93 son indistinguibles de los otros diez con la misma `base_exencion`."""
     await _admin(db)
 
-    r = await client.put("/v1/configuracion/percepciones/015", json=_marca_015(), headers=ADMIN)
+    r = await client.put("/v1/configuracion/percepciones/015", json=_captura_015(), headers=ADMIN)
     assert r.status_code == 200, r.text
     assert r.json()["sujeto_a_tope_conjunto"] is True
 
@@ -997,7 +1010,7 @@ async def test_el_cuerpo_que_omite_el_tope_no_se_acepta(client, db: AsyncSession
     limpió las 44 confirmaciones anteriores."""
     await _admin(db)
 
-    sin_tope = _marca_015()
+    sin_tope = _captura_015()
     del sin_tope["sujeto_a_tope_conjunto"]
 
     r = await client.put("/v1/configuracion/percepciones/015", json=sin_tope, headers=ADMIN)
@@ -1009,7 +1022,7 @@ async def test_confirmar_sin_ver_el_tope_da_409(client, db: AsyncSession) -> Non
     """La marca almacenada lleva el tope; el revisor mandó un cuerpo que dice que no. Aunque
     los otros cinco campos coincidan, lo que se revisó no es lo que hay."""
     await _admin(db)
-    r = await client.put("/v1/configuracion/percepciones/015", json=_marca_015(), headers=ADMIN)
+    r = await client.put("/v1/configuracion/percepciones/015", json=_captura_015(), headers=ADMIN)
     assert r.status_code == 200, r.text
 
     r = await client.post(
@@ -1026,7 +1039,7 @@ async def test_confirmar_sin_ver_el_tope_da_409(client, db: AsyncSession) -> Non
 
 async def test_el_tope_queda_en_la_bitacora_al_capturar_y_al_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
     await _admin(db)
-    await client.put("/v1/configuracion/percepciones/015", json=_marca_015(), headers=ADMIN)
+    await client.put("/v1/configuracion/percepciones/015", json=_captura_015(), headers=ADMIN)
     r = await client.post("/v1/configuracion/percepciones/015/confirmar", json=_marca_015(), headers=ADMIN)
     assert r.status_code == 200, r.text
 
@@ -1053,6 +1066,7 @@ async def test_el_tope_no_tiene_sentido_sin_exencion(client, db: AsyncSession) -
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": True,
+            "nota_revision": None,
         },
         headers=ADMIN,
     )
@@ -1307,3 +1321,200 @@ async def test_conceptos_observados_de_una_empresa_ajena_responde_como_si_no_exi
         headers={"Authorization": "Bearer uid-con"},
     )
     assert r.status_code == 404, r.text
+
+
+# --------------------------------------------------------------------------------------
+# La duda declarada viaja con la marca: confirmar sin verla es confirmar a ciegas
+# --------------------------------------------------------------------------------------
+
+
+_DUDA = (
+    "el SBC no es un sí/no. El art. 27, fracción VII LSS excluye los premios por asistencia y "
+    "puntualidad siempre que no rebasen el 10% del salario base de cotización, y el modelo no "
+    "expresa ese tope."
+)
+
+
+async def test_la_nota_de_revision_viaja_en_la_respuesta(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """39 de las 44 marcas se sembraron con una duda declarada. Mientras vivieron en un
+    comentario del YAML no llegaban a la base, y la pantalla solo podía ofrecer 44 botones
+    "Confirmar" sin una sola razón para dudar — pedir confirmar a ciegas es exactamente lo que
+    el invariante existe para impedir, así que la sección ni se construyó."""
+    await _admin(db)
+
+    r = await client.put(
+        "/v1/configuracion/percepciones/010",
+        json={
+            "es_ingreso_ordinario": True,
+            "base_exencion": "NINGUNA",
+            "factor_exencion": None,
+            "integra_sbc": True,
+            "es_provisionable": False,
+            "sujeto_a_tope_conjunto": False,
+            "nota_revision": _DUDA,
+        },
+        headers=ADMIN,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["nota_revision"] == _DUDA
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["nota_revision"] == _DUDA
+
+    db.expire_all()
+    fila = await db.get(CatalogoPercepcionMarca, "010")
+    assert fila is not None and fila.nota_revision == _DUDA
+
+
+async def test_el_put_que_omite_la_nota_no_la_borra_en_silencio(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La nota es obligatoria aunque admita `null`. Con un default, corregir un factor sin
+    mencionarla borraría una duda que alguien derivó contra la LISR — y el `GET` posterior
+    diría que ese tipo está limpio. Borrarla tiene que costar escribir `null`."""
+    await _admin(db)
+    base = {
+        "es_ingreso_ordinario": True,
+        "base_exencion": "NINGUNA",
+        "factor_exencion": None,
+        "integra_sbc": True,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+    }
+    r = await client.put("/v1/configuracion/percepciones/010", json={**base, "nota_revision": _DUDA}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+
+    r = await client.put("/v1/configuracion/percepciones/010", json=base, headers=ADMIN)
+    assert r.status_code == 422, r.text
+
+    db.expire_all()
+    fila = await db.get(CatalogoPercepcionMarca, "010")
+    assert fila is not None and fila.nota_revision == _DUDA
+
+    # Borrarla explícitamente sí se puede: resolver la duda es parte de revisar la marca.
+    r = await client.put("/v1/configuracion/percepciones/010", json={**base, "nota_revision": "   "}, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["nota_revision"] is None, "un texto en blanco es la misma intención que `null`"
+
+
+async def test_editar_la_nota_no_limpia_la_confirmacion_ni_estorba_al_confirmar(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La nota es procedencia, no una marca que calcule: mismo criterio con el que
+    `guardar_param_fiscal` no tira la confirmación cuando solo cambia la `fuente`. Y por eso
+    tampoco entra en la comparación del `confirmar`: obligar a reenviar 800 caracteres de
+    prosa verbatim solo añadiría un 409 por una diferencia de espacios."""
+    await _admin(db)
+    base = {
+        "es_ingreso_ordinario": True,
+        "base_exencion": "NINGUNA",
+        "factor_exencion": None,
+        "integra_sbc": True,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+    }
+    await client.put("/v1/configuracion/percepciones/010", json={**base, "nota_revision": _DUDA}, headers=ADMIN)
+
+    # El cuerpo del confirmar son las seis marcas, sin la nota.
+    r = await client.post("/v1/configuracion/percepciones/010/confirmar", json=base, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+    r = await client.put(
+        "/v1/configuracion/percepciones/010",
+        json={**base, "nota_revision": "Verificado contra el art. 27 LSS el 2026-08-06: la marca es correcta."},
+        headers=ADMIN,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True, "cambiar solo la nota no devuelve la marca a la cola"
+
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+
+async def test_las_39_dudas_sembradas_llegan_al_endpoint(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """De punta a punta con la semilla real: el YAML del repositorio, el cargador y el `GET`.
+    Es la cadena que la pantalla necesita completa para poder ofrecer un botón de confirmar."""
+    from pathlib import Path
+
+    await _admin(db)
+    raiz = Path(__file__).resolve().parent.parent / "config" / "fiscal"
+    await cfg.cargar_desde_yaml(db, raiz / "catalogo_percepcion.yaml")
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    marcas = r.json()
+    assert len(marcas) == 44
+    con_nota = [m for m in marcas if m["nota_revision"]]
+    assert len(con_nota) == 39
+    assert all(m["confirmado"] is False for m in marcas), "sembrar propone, no activa"
+    # Verbatim: el valor de la nota está en el texto derivado contra la ley, no en un resumen.
+    por_tipo = {m["tipo_percepcion"]: m["nota_revision"] for m in marcas}
+    assert "art. 27, fracción VII LSS" in por_tipo["010"]
+    assert por_tipo["001"] is None
+
+
+# --------------------------------------------------------------------------------------
+# Un fallo transitorio del catálogo del SAT produce un rechazo transitorio
+# --------------------------------------------------------------------------------------
+
+
+async def test_el_503_del_catalogo_ilegible_no_se_queda_pegado(  # type: ignore[no-untyped-def]
+    client, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ronda 2. El arreglo de la ronda 1 introdujo una denegación de servicio permanente:
+    `catalogos._tipos_de_cache` atrapaba el fallo de lectura y **cacheaba la tupla vacía**, así
+    que un tropiezo de un instante —un sqlite a medio montar, un `satcfdi` reinstalándose—
+    dejaba todo `PUT`/`POST` de percepciones en 503 hasta reiniciar el API, aunque el catálogo
+    volviera a ser legible un segundo después.
+
+    La raíz era que "el catálogo dice que no hay tipos" y "no pude leer el catálogo" eran la
+    misma tupla vacía. Ahora el fallo se propaga como `CatalogoIlegible`, y `lru_cache` **no
+    memoiza excepciones**: la siguiente llamada reintenta sola.
+
+    La segunda mitad de la prueba es la que importa y la que falla sin el arreglo: se restaura
+    el catálogo y se comprueba que la petición pasa **sin limpiar ninguna caché a mano**.
+    """
+    from app.informes import catalogos
+
+    await _admin(db)
+    cuerpo = {
+        "es_ingreso_ordinario": True,
+        "base_exencion": "NINGUNA",
+        "factor_exencion": None,
+        "integra_sbc": True,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+        "nota_revision": None,
+    }
+
+    # Partir de una caché fría: si otra prueba ya la llenó, la avería simulada ni se consultaría.
+    catalogos._tipos_de_cache.cache_clear()
+
+    def _catalogo_roto(_tabla: str) -> dict[object, object]:
+        raise OSError("database disk image is malformed")
+
+    # La avería se enciende y se apaga con una bandera, no con `monkeypatch.undo()`: `undo()`
+    # deshace **todos** los parches activos, incluido el de `verificar_id_token` que instala el
+    # fixture `client`, y la segunda petición se iría en 401 — un verde/rojo por el motivo
+    # equivocado.
+    real = catalogos._select_all
+    averiado = {"si": True}
+    monkeypatch.setattr(catalogos, "_select_all", lambda: _catalogo_roto if averiado["si"] else real())
+
+    r = await client.put("/v1/configuracion/percepciones/010", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 503, r.text
+    assert r.json()["error"]["codigo"] == "CATALOGO_SAT_ILEGIBLE"
+    assert (await db.scalar(select(func.count()).select_from(CatalogoPercepcionMarca))) == 0, (
+        "falla cerrado: sin catálogo con qué validar, no se escribe"
+    )
+
+    averiado["si"] = False
+
+    r = await client.put("/v1/configuracion/percepciones/010", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 200, (
+        "el rechazo tiene que durar lo que dure la avería: un fallo transitorio no puede "
+        f"quedarse cacheado hasta que alguien reinicie el proceso. {r.text}"
+    )
+
+    catalogos._tipos_de_cache.cache_clear()

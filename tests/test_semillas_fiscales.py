@@ -144,11 +144,50 @@ def test_todo_parametro_fiscal_declara_su_fuente() -> None:
 
 
 def test_toda_marca_dudosa_esta_senalada() -> None:
-    """Un valor no confirmado lleva `REVISAR` con su tipo, para que la revisión sepa dónde mirar."""
-    texto = (_RAIZ / "catalogo_percepcion.yaml").read_text(encoding="utf-8")
-    for linea in texto.splitlines():
-        if "REVISAR" in linea:
-            assert any(c.isdigit() for c in linea), f"la duda debe decir de qué tipo es: {linea!r}"
+    """Las 39 dudas declaradas son un **campo**, no un comentario.
+
+    Ronda 2 de la tarea 4. Antes esta prueba recorría las líneas buscando la cadena `REVISAR`
+    y comprobaba que llevaran un dígito; al pasar las dudas a `nota_revision` se habría quedado
+    sin ninguna línea que mirar y habría seguido en verde sin comprobar nada — la prueba
+    fantasma otra vez. Ahora comprueba lo que de verdad importa: que las 39 sigan ahí y que
+    lleguen a la fila, porque los comentarios no se cargan y la pantalla de confirmación las
+    necesita al lado del botón.
+    """
+    datos = yaml.safe_load((_RAIZ / "catalogo_percepcion.yaml").read_text(encoding="utf-8"))
+    filas = datos["catalogo_percepcion_marca"]
+    con_duda = {f["tipo_percepcion"] for f in filas if (f.get("nota_revision") or "").strip()}
+    sin_duda = {f["tipo_percepcion"] for f in filas} - con_duda
+
+    assert len(filas) == 44
+    assert sin_duda == {"001", "002", "003", "021", "028"}, (
+        "cambió el conjunto de tipos sin duda declarada; si es a propósito, actualiza también "
+        "config/fiscal/README.md §5.3"
+    )
+    assert len(con_duda) == 39
+    for fila in filas:
+        nota = fila.get("nota_revision")
+        if nota is not None:
+            # Decir QUÉ genera la duda, no solo que la hay: una nota de tres palabras no le
+            # sirve a quien tiene que decidir si confirma.
+            assert len(nota.strip()) > 40, f"{fila['tipo_percepcion']}: la duda es demasiado escueta"
+
+
+async def test_las_dudas_declaradas_llegan_a_la_base(db: AsyncSession) -> None:
+    """El defecto que motivó la columna: las 39 dudas estaban en comentarios `# REVISAR` del
+    YAML, los comentarios no se cargan, y la pantalla acababa ofreciendo 44 botones
+    "Confirmar" sin una sola razón para dudar a la vista. Es el mismo caso que
+    `sujeto_a_tope_conjunto`: si algo tiene que verse al confirmar, tiene que ser una columna.
+    """
+    await cfg.cargar_desde_yaml(db, _RAIZ / "catalogo_percepcion.yaml")
+    marcas = await cfg.marcas_propuestas(db)
+
+    con_nota = {tipo for tipo, m in marcas.items() if m.nota_revision}
+    assert len(con_nota) == 39
+    # Verbatim, no resumida: el valor de la nota está en el texto que se derivó contra la ley.
+    assert "art. 27, fracción VII LSS" in (marcas["010"].nota_revision or "")
+    # Los subpuntos (a)/(b) sobreviven al viaje: son renglones lógicos, no ajuste de ancho.
+    nota_011 = marcas["011"].nota_revision or ""
+    assert "\n(a) " in nota_011 and "\n(b) " in nota_011
 
 
 async def test_las_semillas_se_cargan_y_ninguna_queda_confirmada(db: AsyncSession) -> None:

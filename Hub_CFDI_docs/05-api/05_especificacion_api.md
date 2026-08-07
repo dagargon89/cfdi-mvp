@@ -201,9 +201,16 @@ Body: `{ "valor": "117.31", "vigencia_desde": "2026-02-01", "vigencia_hasta": nu
 **200** con el parámetro resultante: `origen: MANUAL` y `confirmado: false` — capturar no confirma.
 **409 `VIGENCIA_SOLAPADA`** si el tramo se pisa con otro de la misma clave (no se cierra el anterior por
 cuenta propia: cerrarlo haría indistinguible el error de teclear mal el año). **422
-`CONFIGURACION_INVALIDA`** si la clave no está en la lista blanca, el valor no es positivo, la fuente va
-vacía o las vigencias son incoherentes. Corregir la **cifra** de un tramo ya confirmado limpia su
-confirmación. Bitácora con el valor anterior y el nuevo.
+`CONFIGURACION_INVALIDA`** si la clave no está en la lista blanca, el valor no es positivo, **no cabe en
+`Numeric(18,6)`** (12 dígitos enteros), **trae más de 6 decimales**, la fuente va vacía o las vigencias
+son incoherentes. Corregir la **cifra** de un tramo ya confirmado limpia su confirmación. Bitácora con el
+valor anterior y el nuevo.
+
+Los decimales de más **se rechazan, no se redondean**: guardar 6 donde llegaron 10 almacenaría una cifra
+distinta de la que la persona revisó, y su siguiente `POST .../confirmar` chocaría con un `409
+VALOR_CAMBIO` inexplicable — el que cambió fue el servidor. Ningún valor fiscal real pasa de 4 decimales.
+El valor se devuelve siempre con la escala de la columna (`"117.310000"`), la misma en el `PUT` y en el
+`GET`.
 
 ### POST /v1/configuracion/fiscal/{clave}/confirmar — Activar un valor propuesto *(admin)*
 Body: `{ "vigencia_desde": "2026-02-01", "valor": "117.31" }`. El cliente manda **el valor que está
@@ -213,11 +220,19 @@ pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe p
 hay tramo con esa `vigencia_desde`. Bitácora.
 
 ### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
-`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, confirmado, confirmado_por, confirmado_en}`.
-`PUT /{tipo}` body: los **seis** campos de marca, todos obligatorios. `base_exencion: NINGUNA` exige
-`factor_exencion: null` y prohíbe `sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor
-presente y positivo (**422** si no). Igual que los importes: **capturar no confirma**, y cambiar una
-marca limpia la confirmación.
+`GET` → lista de `{tipo_percepcion, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, confirmado, confirmado_por, confirmado_en}`.
+`PUT /{tipo}` body: los **seis** campos de marca **más `nota_revision`**, todos obligatorios (la nota
+admite `null`). `base_exencion: NINGUNA` exige `factor_exencion: null` y prohíbe
+`sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor presente y positivo (**422** si no).
+Igual que los importes: **capturar no confirma**, y cambiar una marca limpia la confirmación.
+
+`nota_revision` es **la duda declarada** de ese tipo: qué la genera y qué habría que verificar antes de
+confirmarlo. 39 de las 44 marcas sembradas traen una. Viaja en el `GET` para que la pantalla la muestre
+al lado del botón de confirmar — sin ella, confirmar sería a ciegas, que es lo que el invariante existe
+para impedir. Es editable en el `PUT` porque resolver la duda es parte de revisarla, y **obligatoria
+aunque admita `null`** para que borrar una duda cueste escribir `null` en vez de omitir un campo.
+Cambiarla **no** limpia la confirmación ni provoca `409` al confirmar: es procedencia, como la `fuente`
+de `param_fiscal`, no una marca que altere ningún cálculo.
 
 `sujeto_a_tope_conjunto` **no lleva default**: es el mismo cuerpo con el que se confirma, y un default
 dejaría que un cliente que ni lo menciona activara —o creara— una marca de previsión social sin el tope
@@ -229,7 +244,8 @@ huérfana confirmable mientras la `015` real sigue sin calcular — silencioso e
 catálogo no se puede leer, **503 `CATALOGO_SAT_ILEGIBLE`**: no se escribe sin poder validar.
 
 ### POST /v1/configuracion/percepciones/{tipo}/confirmar — Activar las marcas de un tipo *(admin)*
-Body: el juego completo de marcas que se está confirmando. **409 `MARCAS_CAMBIARON`** si difiere de lo
+Body: las **seis marcas que calculan**, sin `nota_revision` — confirmar no es editar; quien resuelve la
+duda la borra con un `PUT`, que es el otro acto. **409 `MARCAS_CAMBIARON`** si difiere de lo
 almacenado. Sin este método la puerta de confirmación de esta tabla sería una puerta tapiada: la captura
 nunca confirma, así que ninguna marca podría llegar a calcular. Bitácora.
 

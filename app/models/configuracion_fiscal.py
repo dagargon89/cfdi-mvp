@@ -49,7 +49,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, false
+from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -142,6 +142,23 @@ class CatalogoPercepcionMarca(Base):
     sujeto_a_tope_conjunto: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # La duda declarada de este renglón: qué la genera y qué habría que verificar antes de
+    # confirmarlo. 39 de los 44 tipos traen una.
+    #
+    # Es una columna por la misma razón que `sujeto_a_tope_conjunto`, y el defecto que la
+    # motiva es idéntico: estas 39 dudas vivían en comentarios `# REVISAR` del YAML de la
+    # semilla, los comentarios no se cargan, y la pantalla de confirmación acababa mostrando
+    # 44 botones "Confirmar" sin una sola de las razones para dudar — pidiendo confirmar a
+    # ciegas justo lo que el invariante de confirmación existe para impedir. **Si algo tiene
+    # que verse al confirmar, tiene que ser un campo.**
+    #
+    # `Text` y no `String(n)`: la nota más larga de la semilla pasa de 780 caracteres y son
+    # párrafos con subpuntos, no una etiqueta. Un ancho fijo mal elegido las truncaría en
+    # silencio (`DataError 1406` en el mejor caso) justo en la parte que explica la duda.
+    #
+    # Cambiarla NO limpia la confirmación: es procedencia, como la `fuente` de `param_fiscal`
+    # —la marca revisada sigue siendo la misma—, y ese es el precedente que fija el proyecto.
+    nota_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Mismo invariante que `param_fiscal`: sembrar propone, solo una persona activa.
     confirmado_por: Mapped[str | None] = mapped_column(String(128), nullable=True)
     confirmado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

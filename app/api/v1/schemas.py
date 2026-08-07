@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, EmailStr, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import (
     BaseExencion,
@@ -394,9 +394,11 @@ class ParamFiscalConfirmarIn(BaseModel):
     valor: ImporteExacto
 
 
-class MarcaPercepcionIn(BaseModel):
-    """Las marcas del §3.1 de un tipo de percepción. Mismas reglas que el cargador de
-    semillas (`_leer_marca`): sin base de exención no hay factor, y con base sí lo hay.
+class MarcasPercepcion(BaseModel):
+    """Las seis marcas del §3.1 que **calculan**: lo que se revisa y lo que se confirma.
+
+    Mismas reglas que el cargador de semillas (`_leer_marca`): sin base de exención no hay
+    factor, y con base sí lo hay.
 
     **Los seis campos son obligatorios, incluido `sujeto_a_tope_conjunto`.** No lleva default
     a propósito: este es el cuerpo que también confirma, y confirmar es afirmar que se miró
@@ -421,7 +423,7 @@ class MarcaPercepcionIn(BaseModel):
     sujeto_a_tope_conjunto: bool
 
     @model_validator(mode="after")
-    def _coherencia_de_exencion(self) -> MarcaPercepcionIn:
+    def _coherencia_de_exencion(self) -> MarcasPercepcion:
         if self.base_exencion is BaseExencion.NINGUNA and self.factor_exencion is not None:
             raise ValueError("con `base_exencion: NINGUNA` no puede haber `factor_exencion`.")
         if self.base_exencion is not BaseExencion.NINGUNA and self.factor_exencion is None:
@@ -436,6 +438,39 @@ class MarcaPercepcionIn(BaseModel):
         return self
 
 
+class MarcaPercepcionIn(MarcasPercepcion):
+    """Cuerpo del `PUT`: las seis marcas **más** la duda declarada del renglón.
+
+    `nota_revision` es editable porque **resolver la duda es parte de revisarla**. Un
+    administrador que corrige una marca contra el texto del art. 93 tiene que poder decir "ya
+    lo verifiqué, la duda queda resuelta" o dejar una más estrecha; si la nota quedara
+    congelada en lo que escribió la semilla, la pantalla mostraría para siempre un aviso que
+    ya no aplica, y la gente aprendería a ignorarlo — que es la forma más rápida de gastar la
+    misma puerta que estas notas vinieron a proteger.
+
+    **Obligatorio aunque admita `null`**, por la misma razón que el tope: con un default,
+    un `PUT` que corrige un factor y no menciona la nota **borraría en silencio** una duda que
+    alguien derivó contra la LISR. Borrarla tiene que costar escribir `null`.
+
+    No está en el cuerpo de `POST .../confirmar` (`MarcasPercepcion`), y es deliberado por
+    partida doble: confirmar no es editar, y la nota tampoco entra en la comparación que
+    devuelve `409` — ver `_difieren` en `app/api/v1/configuracion.py`.
+    """
+
+    nota_revision: str | None
+
+    @field_validator("nota_revision", mode="after")
+    @classmethod
+    def _normaliza_nota(cls, valor: str | None) -> str | None:
+        # "" y "   " son la misma intención que `null` (no hay duda declarada) y tienen que
+        # guardarse igual, o `GET` devolvería a veces `""` y a veces `null` para el mismo
+        # estado y la pantalla tendría que comprobar los dos.
+        if valor is None:
+            return None
+        limpio = valor.strip()
+        return limpio or None
+
+
 class MarcaPercepcionOut(BaseModel):
     tipo_percepcion: str
     es_ingreso_ordinario: bool
@@ -444,6 +479,9 @@ class MarcaPercepcionOut(BaseModel):
     integra_sbc: bool
     es_provisionable: bool
     sujeto_a_tope_conjunto: bool
+    # La duda declarada, para que la pantalla la enseñe al lado del botón de confirmar. 39 de
+    # los 44 tipos sembrados traen una; sin ella en la respuesta, confirmar sería a ciegas.
+    nota_revision: str | None
     confirmado: bool
     confirmado_por: str | None
     confirmado_en: str | None

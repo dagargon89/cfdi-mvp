@@ -62,6 +62,7 @@ from app.api.v1.schemas import (
     MapeosEmpresaOut,
     MarcaPercepcionIn,
     MarcaPercepcionOut,
+    MarcasPercepcion,
     ObservadosEmpresaOut,
     ParamFiscalConfirmarIn,
     ParamFiscalGuardarIn,
@@ -128,6 +129,7 @@ def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
         integra_sbc=fila.integra_sbc,
         es_provisionable=fila.es_provisionable,
         sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
+        nota_revision=fila.nota_revision,
         confirmado=fila.confirmado_en is not None,
         confirmado_por=fila.confirmado_por,
         confirmado_en=fila.confirmado_en.isoformat() if fila.confirmado_en else None,
@@ -145,11 +147,12 @@ def _marca_a_detalle(fila: CatalogoPercepcionMarca) -> dict[str, Any]:
         "integra_sbc": fila.integra_sbc,
         "es_provisionable": fila.es_provisionable,
         "sujeto_a_tope_conjunto": fila.sujeto_a_tope_conjunto,
+        "nota_revision": fila.nota_revision,
         "confirmado": fila.confirmado_en is not None,
     }
 
 
-def _marca_in_a_detalle(body: MarcaPercepcionIn) -> dict[str, Any]:
+def _marca_in_a_detalle(body: MarcasPercepcion) -> dict[str, Any]:
     return {
         "es_ingreso_ordinario": body.es_ingreso_ordinario,
         "base_exencion": body.base_exencion.value,
@@ -160,7 +163,18 @@ def _marca_in_a_detalle(body: MarcaPercepcionIn) -> dict[str, Any]:
     }
 
 
-def _difieren(fila: CatalogoPercepcionMarca, body: MarcaPercepcionIn) -> bool:
+def _difieren(fila: CatalogoPercepcionMarca, body: MarcasPercepcion) -> bool:
+    """Si las marcas que **calculan** cambiaron. Decide dos cosas: si el `PUT` tiene que
+    limpiar la confirmación, y si el `confirmar` responde 409.
+
+    `nota_revision` queda fuera a propósito. Es procedencia —por qué dudar de estas marcas—,
+    no una marca que altere ningún cálculo, y el precedente del proyecto ya está fijado:
+    `guardar_param_fiscal` no tira la confirmación cuando solo cambia la `fuente`, porque la
+    cifra revisada sigue siendo la misma. Meterla aquí obligaría además a que confirmar
+    reenviara verbatim un texto de 800 caracteres, y un `409` por una diferencia de espacios
+    en prosa es justo el fallo inexplicable que evitamos al rechazar el redondeo silencioso.
+    Que la duda se vea al confirmar lo garantiza el `GET`, que la devuelve.
+    """
     return (
         fila.es_ingreso_ordinario != body.es_ingreso_ordinario
         or fila.base_exencion is not body.base_exencion
@@ -426,6 +440,7 @@ async def guardar_percepcion(
             integra_sbc=body.integra_sbc,
             es_provisionable=body.es_provisionable,
             sujeto_a_tope_conjunto=body.sujeto_a_tope_conjunto,
+            nota_revision=body.nota_revision,
         )
         db.add(fila)
     else:
@@ -438,6 +453,8 @@ async def guardar_percepcion(
         fila.integra_sbc = body.integra_sbc
         fila.es_provisionable = body.es_provisionable
         fila.sujeto_a_tope_conjunto = body.sujeto_a_tope_conjunto
+        # Fuera del `_difieren` de arriba: editar la nota no limpia la confirmación (ver ahí).
+        fila.nota_revision = body.nota_revision
     await db.flush()
     await db.refresh(fila)  # escala real de `Numeric(9,4)`; ver el mismo comentario en `guardar_fiscal`
 
@@ -455,7 +472,7 @@ async def guardar_percepcion(
 @router.post("/percepciones/{tipo}/confirmar", response_model=MarcaPercepcionOut)
 async def confirmar_percepcion(
     tipo: str,
-    body: MarcaPercepcionIn,
+    body: MarcasPercepcion,
     admin: Usuario = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> MarcaPercepcionOut:
@@ -466,6 +483,10 @@ async def confirmar_percepcion(
     captura nunca confirma, así que ninguna marca podría llegar jamás a calcular. Y pide el
     juego completo de marcas —no solo el tipo— por la misma razón que los importes: lo que se
     confirma es *lo que se revisó*, y si cambió entre la pantalla y el clic, se rechaza con 409.
+
+    El cuerpo son las seis marcas que calculan (`MarcasPercepcion`), **sin `nota_revision`**:
+    confirmar no es editar. Quien resuelve la duda al revisarla la borra o la reescribe con un
+    `PUT`, que es el acto de capturar — los dos actos siguen separados también aquí.
     """
     _exige_tipo_del_sat(tipo)
     fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)

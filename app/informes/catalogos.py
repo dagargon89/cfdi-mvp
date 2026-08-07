@@ -66,6 +66,17 @@ def _select_all() -> Callable[[str], dict[Any, Any]]:
     return cast("Callable[[str], dict[Any, Any]]", select_all)
 
 
+class CatalogoIlegible(RuntimeError):
+    """No se pudo **leer** la tabla del catálogo embebido de `satcfdi`.
+
+    Existe para separar dos cosas que antes eran la misma tupla vacía: "el catálogo dice que
+    no hay tipos" y "no pude abrir el catálogo". Mientras enumerar el catálogo solo servía
+    para poner descripciones en un informe, confundirlas era inocuo; desde que decide si una
+    escritura se acepta (`exige_tipo_percepcion_conocido`), la diferencia es la que separa
+    "rechaza este renglón" de "no puedo opinar, no escribas".
+    """
+
+
 @lru_cache(maxsize=8)
 def _tipos_de_cache(naturaleza: str) -> tuple[tuple[str, str], ...]:
     """Cuerpo cacheable de `tipos_de` (ver esa función para la firma pública).
@@ -74,15 +85,25 @@ def _tipos_de_cache(naturaleza: str) -> tuple[tuple[str, str], ...]:
     función pública la convierte a `list` porque así la declara la interfaz de la tarea y
     porque las pruebas comparan el resultado con `==` contra listas y listas vacías
     (`tipos_de("X") == []`, que con una tupla sería `() == []` → `False`).
+
+    **Un fallo de lectura se propaga como `CatalogoIlegible` y NO se memoiza.** `lru_cache`
+    solo guarda los retornos, nunca las excepciones, así que la siguiente llamada vuelve a
+    intentar. Antes esta función atrapaba el error y devolvía `()`, y ese `()` sí quedaba
+    cacheado para siempre: un fallo de un instante —un sqlite a medio montar, un `satcfdi`
+    reinstalándose— dejaba el proceso entero opinando que el catálogo está vacío hasta que
+    alguien reiniciara el API. Inocuo mientras solo faltaba una descripción; una denegación
+    de servicio permanente desde que `PUT /percepciones/{tipo}` depende de esta lista. Un
+    fallo transitorio tiene que producir un rechazo transitorio.
     """
     tabla = _TABLAS.get(naturaleza)
     if tabla is None:
+        # Naturaleza desconocida no es un fallo, es una respuesta: no existe esa tabla y no
+        # va a existir. Cachearla está bien.
         return ()
     try:
         mapa = _select_all()(tabla)
-    except Exception as exc:  # noqa: BLE001 — un catálogo ilegible no debe abortar el informe
-        logger.warning("catalogos: no se pudo enumerar la tabla %s: %s", tabla, exc)
-        return ()
+    except Exception as exc:
+        raise CatalogoIlegible(f"no se pudo enumerar la tabla {tabla} del catálogo de satcfdi: {exc}") from exc
     return tuple(sorted(((str(clave), str(texto)) for clave, texto in mapa.items()), key=lambda par: par[0]))
 
 
@@ -94,6 +115,25 @@ def tipos_de(naturaleza: str) -> list[tuple[str, str]]:
     otro valor devuelve `[]`. Internamente se apoya en `_tipos_de_cache`, cacheada con
     `lru_cache`: enumerar el catálogo completo cuesta más que resolver una sola clave
     (`descripcion`), y B-01 la llama una vez por naturaleza en cada corrida.
+
+    **Falla abierto**: si el catálogo no se puede leer devuelve `[]` y lo registra, porque un
+    catálogo ilegible no debe abortar un informe. Quien necesite distinguir ese caso —porque
+    de él depende aceptar o no una escritura— usa `tipos_de_estricto`.
+    """
+    try:
+        return list(_tipos_de_cache(naturaleza))
+    except CatalogoIlegible as exc:
+        logger.warning("catalogos: %s", exc)
+        return []
+
+
+def tipos_de_estricto(naturaleza: str) -> list[tuple[str, str]]:
+    """Igual que `tipos_de`, pero **propaga** `CatalogoIlegible` en vez de devolver `[]`.
+
+    Para quien valida una escritura contra el catálogo: ahí "no pude leerlo" no puede
+    confundirse con "no está en la lista", porque el primero debe negarse a escribir y el
+    segundo debe rechazar el dato. Y como el fallo no se memoiza, el rechazo dura lo que dure
+    la avería.
     """
     return list(_tipos_de_cache(naturaleza))
 
