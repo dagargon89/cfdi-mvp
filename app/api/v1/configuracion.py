@@ -20,6 +20,16 @@ escritores de la misma clave, y el limpiado de la confirmación cuando la cifra 
 Construir un `ParamFiscal` a mano con `db.add(...)` compilaría, pasaría las pruebas y
 evaporaría las tres garantías en silencio. **No lo hagas**: la puerta es una sola.
 
+Y por qué las guardas de la confirmación tampoco viven aquí
+------------------------------------------------------------
+Por el mismo motivo, con un cliente más: además de la pantalla, confirma
+`app/scripts/administrar_configuracion.py` (la persona que administra el Hub no siempre tiene
+navegador delante). Si la comparación del importe y la de la huella vivieran en estos
+endpoints, el script tendría que reimplementarlas y sería una puerta trasera con la forma
+exacta de la puerta buena. Viven en `configuracion_fiscal.confirmar_param_fiscal` y
+`confirmar_marca_percepcion`; aquí solo se traducen sus excepciones a códigos HTTP y se
+escribe la fila de bitácora, que es lo único que sí cambia según por dónde se entró.
+
 Qué NO se expone aquí
 ---------------------
 No hay endpoint de "recargar semillas desde YAML". `cargar_desde_yaml` hace `commit`/
@@ -41,13 +51,11 @@ no protege nada y le deja un informe degradado que no puede explicarse.
 
 from __future__ import annotations
 
-import hashlib
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
@@ -73,7 +81,6 @@ from app.api.v1.schemas import (
     ParamFiscalOut,
 )
 from app.informes import catalogos
-from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
     CatalogoPercepcionMarca,
     ConfiguracionEmpresa,
@@ -83,7 +90,6 @@ from app.models.configuracion_fiscal import (
 )
 from app.models.empresa import Empresa
 from app.models.enums import OrigenValor, RolEmpresa
-from app.models.nomina import NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor
 from app.models.usuario import Usuario
 from app.services import bitacora as bitacora_service
 from app.services import configuracion_fiscal as cfg
@@ -92,21 +98,9 @@ from app.services import sincronizacion_fiscal as sincronizacion
 router = APIRouter(prefix="/configuracion", tags=["configuracion-fiscal"])
 router_empresa = APIRouter(prefix="/empresas/{empresa_id}/configuracion", tags=["configuracion-fiscal"])
 
-# `param_fiscal.confirmado_por` y `catalogo_percepcion_marca.confirmado_por` son VARCHAR(128)
-# y `usuarios.correo` es VARCHAR(190). El recorte evita un DataError 1406 de MySQL a media
-# escritura y no pierde nada auditable: la fila de bitácora de la misma transacción guarda el
-# `actor` completo (VARCHAR(190)).
-_LARGO_CONFIRMADO_POR = 128
-
-
-def _ahora() -> datetime:
-    """`datetime` sin zona, como todas las columnas `DateTime` del proyecto (que son naive en
-    UTC). Mismo patrón que `app/worker/tasks.py`."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _actor(correo: str) -> str:
-    return correo[:_LARGO_CONFIRMADO_POR]
+# Re-exportado desde el servicio, donde vive junto a la guarda que lo usa. Se mantiene el
+# nombre en este módulo porque es el que emite `MarcaPercepcionOut.nota_revision_hash`.
+huella_de_nota = cfg.huella_de_nota
 
 
 def _param_a_salida(fila: ParamFiscal) -> ParamFiscalOut:
@@ -135,24 +129,6 @@ def _descripcion_percepcion(tipo: str) -> str | None:
     escritura con 503. El reparto es deliberado (ver el docstring de `app/informes/catalogos.py`).
     """
     return dict(catalogos.tipos_de("P")).get(tipo)
-
-
-def huella_de_nota(nota: str | None) -> str | None:
-    """Huella de una duda declarada, para que confirmar pueda exigir **haberla visto**.
-
-    SHA-256 del texto en UTF-8, o `None` si no hay duda. Es un valor **opaco**: lo emite el
-    `GET` y el cliente lo devuelve tal cual en el `POST .../confirmar`. Nadie fuera de este
-    módulo tiene que saber qué algoritmo es, y ese es el punto — si el cliente lo calculara,
-    tendría que reproducir la normalización byte a byte y cualquier diferencia sería un `409`
-    que no se podría explicar.
-
-    Se hashea el texto **ya normalizado** tal como está en la base (`_normaliza_nota` en el
-    `PUT` y `_texto` en el cargador ya recortan espacios y convierten el vacío en `None`), así
-    que la misma duda siempre produce la misma huella.
-    """
-    if nota is None:
-        return None
-    return hashlib.sha256(nota.encode("utf-8")).hexdigest()
 
 
 def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
@@ -189,41 +165,17 @@ def _marca_a_detalle(fila: CatalogoPercepcionMarca) -> dict[str, Any]:
     }
 
 
-def _marca_in_a_detalle(body: MarcasPercepcion) -> dict[str, Any]:
-    return {
-        "es_ingreso_ordinario": body.es_ingreso_ordinario,
-        "base_exencion": body.base_exencion.value,
-        "factor_exencion": str(body.factor_exencion) if body.factor_exencion is not None else None,
-        "integra_sbc": body.integra_sbc,
-        "es_provisionable": body.es_provisionable,
-        "sujeto_a_tope_conjunto": body.sujeto_a_tope_conjunto,
-    }
-
-
-def _difieren(fila: CatalogoPercepcionMarca, body: MarcasPercepcion) -> bool:
-    """Si las marcas que **calculan** cambiaron. Decide dos cosas: si el `PUT` tiene que
-    limpiar la confirmación, y si el `confirmar` responde 409.
-
-    `nota_revision` queda fuera de **esta** comparación, y por dos razones distintas según
-    para qué se use la función:
-
-    - Para el `409` del `confirmar`: el cuerpo de confirmar (`MarcasPercepcion`) ni siquiera
-      lleva la nota. Obligar a reenviar verbatim un texto de 800 caracteres solo añadiría un
-      `409` por una diferencia de espacios en prosa — el mismo fallo inexplicable que evitamos
-      al rechazar el redondeo silencioso. Que la duda se vea al confirmar lo garantiza el
-      `GET`, que la devuelve.
-    - Para limpiar la confirmación en el `PUT`: la nota sí cuenta, pero **asimétricamente**, y
-      eso no cabe en una comparación de igualdad. Va aparte, en `_duda_nueva`.
-    """
-    return (
-        fila.es_ingreso_ordinario != body.es_ingreso_ordinario
-        or fila.base_exencion is not body.base_exencion
-        or fila.factor_exencion != body.factor_exencion
-        or fila.integra_sbc != body.integra_sbc
-        or fila.es_provisionable != body.es_provisionable
-        # Sin este renglón, confirmar una marca de previsión social con un cuerpo que no
-        # menciona el tope pasaría con 200 y activaría una bandera que nadie miró.
-        or fila.sujeto_a_tope_conjunto != body.sujeto_a_tope_conjunto
+def _marcas_de(body: MarcasPercepcion) -> cfg.MarcasQueCalculan:
+    """El cuerpo Pydantic en la forma que entienden las guardas del servicio. La conversión es
+    explícita y no un `model_dump()`: `MarcaPercepcionIn` y `MarcaPercepcionConfirmarIn` traen
+    un campo de más cada uno, y un `**dict` los colaría o reventaría según cuál llegara."""
+    return cfg.MarcasQueCalculan(
+        es_ingreso_ordinario=body.es_ingreso_ordinario,
+        base_exencion=body.base_exencion,
+        factor_exencion=body.factor_exencion,
+        integra_sbc=body.integra_sbc,
+        es_provisionable=body.es_provisionable,
+        sujeto_a_tope_conjunto=body.sujeto_a_tope_conjunto,
     )
 
 
@@ -265,50 +217,6 @@ async def listar_fiscal(
     )
 
 
-async def _snapshot_del_tramo(db: AsyncSession, clave: str, vigencia_desde: date) -> dict[str, Any] | None:
-    """El contenido del tramo **antes** de escribirlo, para el `detalle` de la bitácora.
-
-    Dos decisiones que parecen detalle y no lo son:
-
-    1. **Selecciona columnas, no la entidad.** Cargar el `ParamFiscal` por el ORM lo metería
-       en el mapa de identidad, y la lectura `FOR UPDATE` de `guardar_param_fiscal` devolvería
-       *ese mismo objeto* sin refrescar sus atributos (SQLAlchemy no pisa lo ya cargado salvo
-       con `populate_existing()`): el candado seguiría tomándose, pero la comprobación de
-       solapamiento razonaría sobre el snapshot viejo. Una fila de columnas no toca el mapa de
-       identidad.
-    2. **Toma el candado sobre el mismo rango** que `guardar_param_fiscal` (`clave = ...`), no
-       sobre la fila exacta. Un rango más angosto aquí y uno más ancho después abriría un ciclo
-       de espera entre dos peticiones de la misma clave con `vigencia_desde` distintos; con el
-       mismo rango, la segunda petición simplemente espera a la primera.
-    """
-    fila = (
-        await db.execute(
-            select(
-                ParamFiscal.vigencia_desde,
-                ParamFiscal.ejercicio,
-                ParamFiscal.valor,
-                ParamFiscal.vigencia_hasta,
-                ParamFiscal.origen,
-                ParamFiscal.fuente,
-                ParamFiscal.confirmado_en,
-            )
-            .where(ParamFiscal.clave == clave)
-            .with_for_update()
-        )
-    ).all()
-    previa = next((f for f in fila if f.vigencia_desde == vigencia_desde), None)
-    if previa is None:
-        return None
-    return {
-        "valor": str(previa.valor),
-        "ejercicio": previa.ejercicio,
-        "vigencia_hasta": previa.vigencia_hasta.isoformat() if previa.vigencia_hasta else None,
-        "origen": previa.origen.value,
-        "fuente": previa.fuente,
-        "confirmado": previa.confirmado_en is not None,
-    }
-
-
 @router.put("/fiscal/{clave}", response_model=ParamFiscalOut)
 async def guardar_fiscal(
     clave: str,
@@ -323,7 +231,7 @@ async def guardar_fiscal(
     sin solapamiento) vive en `guardar_param_fiscal` y no se duplica aquí — duplicarla haría
     que las dos copias se separaran y que la del endpoint pareciera la autoridad.
     """
-    anterior = await _snapshot_del_tramo(db, clave, body.vigencia_desde)
+    anterior = await cfg.snapshot_de_tramo(db, clave, body.vigencia_desde)
     try:
         fila = await cfg.guardar_param_fiscal(
             db,
@@ -358,21 +266,10 @@ async def guardar_fiscal(
         entidad=f"param_fiscal:{clave}@{body.vigencia_desde.isoformat()}",
         # El anterior y el nuevo, que es lo que sustituye al diff de git en una configuración
         # que se administra desde una pantalla.
-        detalle={"clave": clave, "anterior": anterior, "nuevo": _param_a_detalle(fila)},
+        detalle={"clave": clave, "anterior": anterior, "nuevo": cfg.detalle_de_tramo(fila)},
     )
     await db.commit()
     return _param_a_salida(fila)
-
-
-def _param_a_detalle(fila: ParamFiscal) -> dict[str, Any]:
-    return {
-        "valor": str(fila.valor),
-        "ejercicio": fila.ejercicio,
-        "vigencia_hasta": fila.vigencia_hasta.isoformat() if fila.vigencia_hasta else None,
-        "origen": fila.origen.value,
-        "fuente": fila.fuente,
-        "confirmado": fila.confirmado_en is not None,
-    }
 
 
 @router.post("/fiscal/{clave}/confirmar", response_model=ParamFiscalOut)
@@ -385,39 +282,27 @@ async def confirmar_fiscal(
     """Confirma un tramo propuesto: a partir de aquí `valor_vigente` lo devuelve y los informes
     calculan con él.
 
-    El `FOR UPDATE` toma el mismo rango por clave que `guardar_param_fiscal`, así que una
-    captura simultánea de la misma clave espera en vez de colarse entre la comparación del
-    valor y la escritura de la confirmación.
+    Toda la guarda —el `FOR UPDATE` sobre el mismo rango que `guardar_param_fiscal` y el
+    rechazo si el importe confirmado no coincide con el almacenado— vive en
+    `cfg.confirmar_param_fiscal`, que es la misma que ejerce la línea de comandos. Aquí solo
+    se traducen sus excepciones y se escribe la bitácora.
     """
-    tramos = list((await db.scalars(select(ParamFiscal).where(ParamFiscal.clave == clave).with_for_update())).all())
-    fila = next((t for t in tramos if t.vigencia_desde == body.vigencia_desde), None)
-    if fila is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
-
-    if fila.valor != body.valor:
-        # `Decimal("117.31") == Decimal("117.310000")` es verdadero: la comparación es por
-        # valor numérico, no por escala, así que el cliente no tiene que adivinar los decimales
-        # con los que la columna `Numeric(18,6)` devolvió la cifra.
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "codigo": "VALOR_CAMBIO",
-                "mensaje": (
-                    f"El valor de `{clave}` cambió mientras revisabas: está en {fila.valor} y confirmaste "
-                    f"{body.valor}. Vuelve a cargar la pantalla y revísalo otra vez antes de confirmar."
-                ),
-            },
+    try:
+        fila, cambio = await cfg.confirmar_param_fiscal(
+            db, clave=clave, vigencia_desde=body.vigencia_desde, valor=body.valor, actor=admin.correo
         )
+    except cfg.NoEncontrado as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.") from exc
+    except cfg.ValorCambio as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "VALOR_CAMBIO", "mensaje": str(exc)}
+        ) from exc
 
-    if fila.confirmado_en is not None:
-        # Idempotente: reconfirmar lo ya confirmado no cambia nada, así que tampoco reescribe
-        # quién lo confirmó (sería borrar el rastro del que sí lo revisó) ni deja bitácora de
-        # un cambio que no ocurrió.
+    if not cambio:
+        # Idempotente: reconfirmar lo ya confirmado no cambia nada, así que tampoco deja
+        # bitácora de un cambio que no ocurrió.
         return _param_a_salida(fila)
 
-    fila.confirmado_por = _actor(admin.correo)
-    fila.confirmado_en = _ahora()
-    await db.flush()
     await bitacora_service.registrar(
         db,
         actor=admin.correo,
@@ -450,35 +335,6 @@ def _duda_nueva(fila: CatalogoPercepcionMarca, body: MarcaPercepcionIn) -> bool:
     es — y esa falta de ambigüedad es justo lo que permite la regla asimétrica.
     """
     return body.nota_revision is not None and body.nota_revision != fila.nota_revision
-
-
-def _duda_no_vista(fila: CatalogoPercepcionMarca, huella_enviada: str | None) -> bool:
-    """Si quien confirma **no tenía delante la duda que la marca tiene ahora**.
-
-    Es el hueco que `_difieren` deja abierto a propósito, en su forma concurrente: A abre `001`
-    sin duda, B le agrega una por `PUT` (o la agrega una recarga de semilla), A pulsa Confirmar
-    → las seis marcas no cambiaron → `200`, confirmado, con una duda que nunca vio. Justo lo
-    que la pantalla existe para impedir.
-
-    **Se compara la huella y no el texto.** La razón por la que `_difieren` excluye
-    `nota_revision` sigue siendo buena y no cambia: obligar a reenviar 800 caracteres de prosa
-    verbatim produciría un `409` por un espacio en blanco. La huella conserva la garantía sin
-    esa fragilidad.
-
-    **Asimétrica, exactamente como `_duda_nueva`, y por el mismo argumento:**
-
-    - la marca tiene duda ahora y la huella no coincide (o no vino) → `409`: se estaría
-      confirmando sin haber visto la advertencia vigente;
-    - la marca **no** tiene duda ahora → pasa, venga la huella que venga. Quien revisó lo hizo
-      con una duda que desde entonces alguien resolvió, es decir contra *más* información de la
-      que hay hoy. Resolver una duda no invalida una revisión; que aparezca una, sí.
-
-    Sin esa asimetría, resolver una duda invalidaría las confirmaciones en vuelo y la pantalla
-    devolvería `409` a alguien que hizo exactamente lo correcto.
-    """
-    if fila.nota_revision is None:
-        return False
-    return huella_enviada != huella_de_nota(fila.nota_revision)
 
 
 # --------------------------------------------------------------------------------------
@@ -561,7 +417,7 @@ async def guardar_percepcion(
         )
         db.add(fila)
     else:
-        if _difieren(fila, body) or _duda_nueva(fila, body):
+        if cfg.marcas_difieren(fila, _marcas_de(body)) or _duda_nueva(fila, body):
             fila.confirmado_por = None
             fila.confirmado_en = None
         fila.es_ingreso_ordinario = body.es_ingreso_ordinario
@@ -603,44 +459,44 @@ async def confirmar_percepcion(
     El cuerpo son las seis marcas que calculan, **sin el texto de `nota_revision`** pero **con
     su huella**: confirmar no es editar —quien resuelve la duda la borra o la reescribe con un
     `PUT`, que es el otro acto—, pero sí es afirmar que se miró lo que se activa, y la duda es
-    parte de eso. Ver `_duda_no_vista` para el caso concurrente que cierra la huella y
+    parte de eso. Ver `cfg.duda_no_vista` para el caso concurrente que cierra la huella y
     `MarcaPercepcionConfirmarIn` para por qué es la huella y no el texto.
     """
-    _exige_tipo_del_sat(tipo)
-    fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
-    if fila is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
-    # Antes que `_difieren`: si apareció una duda, ese es el diagnóstico útil aunque además
-    # hayan cambiado las marcas — "mira la advertencia nueva" dice más que "algo cambió".
-    if _duda_no_vista(fila, body.nota_revision_hash):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "codigo": "DUDA_NO_VISTA",
-                "mensaje": (
-                    f"El tipo {tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste "
-                    "(la agregó otra persona o una recarga de semillas). Vuelve a cargar la pantalla, lee la "
-                    "duda y confirma después: confirmar es responder por lo que se miró."
-                ),
-            },
+    try:
+        fila, cambio = await cfg.confirmar_marca_percepcion(
+            db,
+            tipo=tipo,
+            marcas=_marcas_de(body),
+            nota_revision_hash=body.nota_revision_hash,
+            actor=admin.correo,
         )
-    if _difieren(fila, body):
+    except cfg.CatalogoDelSatIlegible as exc:
+        # No es culpa del cuerpo que llegó: lo que falla es la herramienta de validación. Un
+        # 422 le diría al usuario que corrija algo que está bien.
         raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={
-                "codigo": "MARCAS_CAMBIARON",
-                "mensaje": (
-                    f"Las marcas del tipo {tipo} cambiaron mientras las revisabas. Vuelve a cargar la "
-                    "pantalla y revísalas otra vez antes de confirmarlas."
-                ),
-            },
-        )
-    if fila.confirmado_en is not None:
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"codigo": "CATALOGO_SAT_ILEGIBLE", "mensaje": str(exc)},
+        ) from exc
+    except cfg.NoEncontrado as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.") from exc
+    except cfg.DudaNoVista as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "DUDA_NO_VISTA", "mensaje": str(exc)}
+        ) from exc
+    except cfg.MarcasCambiaron as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "MARCAS_CAMBIARON", "mensaje": str(exc)}
+        ) from exc
+    except cfg.ErrorDeConfiguracion as exc:
+        # Lo único que queda: el tipo no existe en `c_TipoPercepcion`.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"codigo": "TIPO_PERCEPCION_INVALIDO", "mensaje": str(exc)},
+        ) from exc
+
+    if not cambio:
         return _marca_a_salida(fila)
 
-    fila.confirmado_por = _actor(admin.correo)
-    fila.confirmado_en = _ahora()
-    await db.flush()
     await bitacora_service.registrar(
         db,
         actor=admin.correo,
@@ -648,8 +504,8 @@ async def confirmar_percepcion(
         entidad=f"catalogo_percepcion_marca:{tipo}",
         detalle={
             "tipo_percepcion": tipo,
-            "anterior": {**_marca_in_a_detalle(body), "confirmado": False},
-            "nuevo": {**_marca_in_a_detalle(body), "confirmado": True},
+            "anterior": {**cfg.detalle_de_marcas(_marcas_de(body)), "confirmado": False},
+            "nuevo": {**cfg.detalle_de_marcas(_marcas_de(body)), "confirmado": True},
         },
     )
     await db.commit()
@@ -715,7 +571,7 @@ async def guardar_configuracion_empresa(
         config = ConfiguracionEmpresa(empresa_id=empresa_id)
         db.add(config)
     else:
-        anterior = _config_empresa_a_detalle(config)
+        anterior = cfg.detalle_de_config_empresa(config)
     config.zona_salarial = body.zona_salarial
     config.dias_aguinaldo = body.dias_aguinaldo
     config.factor_prima_vacacional = body.factor_prima_vacacional
@@ -727,7 +583,7 @@ async def guardar_configuracion_empresa(
         actor=ctx.usuario.correo,
         accion="guardar_configuracion_empresa",
         entidad=f"empresa:{empresa_id}",
-        detalle={"anterior": anterior, "nuevo": _config_empresa_a_detalle(config)},
+        detalle={"anterior": anterior, "nuevo": cfg.detalle_de_config_empresa(config)},
     )
     await db.commit()
     return ConfiguracionEmpresaOut(
@@ -736,16 +592,6 @@ async def guardar_configuracion_empresa(
         dias_aguinaldo=config.dias_aguinaldo,
         factor_prima_vacacional=config.factor_prima_vacacional,
     )
-
-
-def _config_empresa_a_detalle(config: ConfiguracionEmpresa) -> dict[str, Any]:
-    return {
-        "zona_salarial": config.zona_salarial.value if config.zona_salarial else None,
-        "dias_aguinaldo": config.dias_aguinaldo,
-        "factor_prima_vacacional": (
-            str(config.factor_prima_vacacional) if config.factor_prima_vacacional is not None else None
-        ),
-    }
 
 
 @router_empresa.get("/mapeos", response_model=MapeosEmpresaOut)
@@ -877,17 +723,6 @@ def _exige_sin_duplicados(claves: list[Any], seccion: str, nombre: str) -> None:
 # Lo que la nómina emitió de verdad: configurar es reconocer y elegir, no teclear
 # --------------------------------------------------------------------------------------
 
-# Las tres tablas de conceptos del complemento de Nómina, con su naturaleza y las columnas
-# que cambian de nombre en cada una. `otro_pago` no lleva gravado/exento: su importe es uno
-# solo. Tenerlas en una tabla evita escribir la misma consulta tres veces con un nombre
-# distinto y que las tres se separen a la primera corrección.
-_TABLAS_DE_CONCEPTO: tuple[tuple[str, Any, Any, Any], ...] = (
-    ("P", NominaPercepcion, NominaPercepcion.tipo_percepcion, NominaPercepcion.importe_gravado + NominaPercepcion.importe_exento),
-    ("D", NominaDeduccion, NominaDeduccion.tipo_deduccion, NominaDeduccion.importe),
-    ("O", NominaOtroPago, NominaOtroPago.tipo_otro_pago, NominaOtroPago.importe),
-)
-
-
 @router_empresa.get("/conceptos-observados", response_model=ObservadosEmpresaOut)
 async def conceptos_observados(
     empresa_id: int,
@@ -911,79 +746,31 @@ async def conceptos_observados(
     completa y B-08 nunca se genera.
 
     Cuatro consultas agregadas en total (una por naturaleza más la de departamentos), todas
-    con `GROUP BY` en la base: ni una por renglón (regla 11).
+    con `GROUP BY` en la base: ni una por renglón (regla 11). La consulta vive en
+    `cfg.observados_de_empresa` porque `app/scripts/administrar_configuracion.py` enumera el
+    mismo inventario, y dos copias mostrarían dos listas distintas de lo que falta clasificar.
     """
     empresa = await _exige_empresa(db, empresa_id)
+    observados = await cfg.observados_de_empresa(db, empresa)
 
-    categorias = await cfg.categorias_de_provision(db, empresa_id)
-    centros = await cfg.centro_de_costo(db, empresa_id)
-
-    conceptos: list[ConceptoObservadoOut] = []
-    for naturaleza, modelo, columna_tipo, columna_importe in _TABLAS_DE_CONCEPTO:
-        filas = (
-            await db.execute(
-                select(
-                    columna_tipo,
-                    modelo.clave,
-                    # El patrón puede haber usado varios textos para la misma clave; se muestra
-                    # uno. B-02 ya emite `CONCEPTO_INCONSISTENTE` para ese caso, así que aquí
-                    # repetir el diagnóstico solo duplicaría la fuente de verdad.
-                    func.min(modelo.concepto),
-                    func.count(func.distinct(Comprobante.comprobante_id)),
-                    func.coalesce(func.sum(columna_importe), 0),
-                )
-                .join(Comprobante, Comprobante.comprobante_id == modelo.comprobante_id)
-                .where(
-                    Comprobante.empresa_id == empresa_id,
-                    # La empresa es el patrón (§11 del diseño): los conceptos que hay que
-                    # clasificar son los que ella emitió, no los de una nómina recibida.
-                    Comprobante.rfc_emisor == empresa.rfc,
-                    Comprobante.tipo_comprobante == "N",
-                )
-                .group_by(columna_tipo, modelo.clave)
-                .order_by(columna_tipo, modelo.clave)
-            )
-        ).all()
-        for tipo, clave, concepto, comprobantes, importe in filas:
-            categoria = categorias.get((naturaleza, tipo, clave)) if clave is not None else None
-            conceptos.append(
-                ConceptoObservadoOut(
-                    naturaleza=naturaleza,
-                    tipo=tipo,
-                    clave=clave,
-                    concepto=concepto,
-                    descripcion_sat=catalogos.descripcion(naturaleza, tipo),
-                    comprobantes=comprobantes,
-                    importe=importe if isinstance(importe, Decimal) else Decimal(str(importe)),
-                    categoria=categoria.value if categoria is not None else None,
-                )
-            )
-
-    filas_depto = (
-        await db.execute(
-            select(
-                NominaReceptor.departamento,
-                func.count(func.distinct(Comprobante.comprobante_id)),
-            )
-            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
-            .where(
-                Comprobante.empresa_id == empresa_id,
-                Comprobante.rfc_emisor == empresa.rfc,
-                Comprobante.tipo_comprobante == "N",
-                # Un departamento nulo no se puede mapear (`departamento_texto` va en la PK de
-                # `map_departamento`), así que listarlo solo agregaría un renglón inaccionable.
-                # B-06 lo trata aparte con su propia bandera.
-                NominaReceptor.departamento.is_not(None),
-            )
-            .group_by(NominaReceptor.departamento)
-            .order_by(NominaReceptor.departamento)
+    conceptos = [
+        ConceptoObservadoOut(
+            naturaleza=c.naturaleza,
+            tipo=c.tipo,
+            clave=c.clave,
+            concepto=c.concepto,
+            descripcion_sat=catalogos.descripcion(c.naturaleza, c.tipo),
+            comprobantes=c.comprobantes,
+            importe=c.importe,
+            categoria=c.categoria.value if c.categoria is not None else None,
         )
-    ).all()
+        for c in observados.conceptos
+    ]
     departamentos = [
         DepartamentoObservadoOut(
-            departamento_texto=texto, comprobantes=cuenta, centro_costo=centros.get(texto)
+            departamento_texto=d.departamento_texto, comprobantes=d.comprobantes, centro_costo=d.centro_costo
         )
-        for texto, cuenta in filas_depto
+        for d in observados.departamentos
     ]
 
     return ObservadosEmpresaOut(

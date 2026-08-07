@@ -58,18 +58,20 @@ silenciosa en un error al cargar, que es barato.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import yaml
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
     CatalogoPercepcionMarca,
     ConfiguracionEmpresa,
@@ -80,6 +82,7 @@ from app.models.configuracion_fiscal import (
 )
 from app.models.empresa import Empresa
 from app.models.enums import BaseExencion, CategoriaProvision, OrigenValor, ZonaSalarial
+from app.models.nomina import NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor
 
 _E = TypeVar("_E", bound=Enum)
 
@@ -146,6 +149,24 @@ class CatalogoDelSatIlegible(ErrorDeConfiguracion):
     que se iba a validar. Quien la atrape debe **negarse a escribir** (ver
     `exige_tipo_percepcion_conocido`), no dejar pasar el renglón.
     """
+
+
+class NoEncontrado(ErrorDeConfiguracion):
+    """Se pidió confirmar un renglón que no existe. Es un caso aparte de "el dato está mal":
+    la superficie HTTP lo traduce en `404` y la línea de comandos en un mensaje que dice qué
+    clave y qué vigencia buscó."""
+
+
+class ValorCambio(ErrorDeConfiguracion):
+    """Se confirmó un importe distinto del almacenado. Ver `confirmar_param_fiscal`."""
+
+
+class DudaNoVista(ErrorDeConfiguracion):
+    """Se confirmó una marca sin tener delante la duda que hoy tiene. Ver `duda_no_vista`."""
+
+
+class MarcasCambiaron(ErrorDeConfiguracion):
+    """Se confirmaron marcas distintas de las almacenadas. Ver `marcas_difieren`."""
 
 
 def tipos_percepcion_del_sat() -> frozenset[str]:
@@ -328,6 +349,152 @@ async def categorias_de_provision(db: AsyncSession, empresa_id: int) -> dict[tup
         )
     ).all()
     return {(naturaleza, tipo, clave): categoria for naturaleza, tipo, clave, categoria in filas}
+
+
+# --------------------------------------------------------------------------------------
+# Lo que la nómina emitió de verdad: configurar es reconocer y elegir, no teclear
+# --------------------------------------------------------------------------------------
+
+# Las tres tablas de conceptos del complemento de Nómina, con su naturaleza y las columnas
+# que cambian de nombre en cada una. `otro_pago` no lleva gravado/exento: su importe es uno
+# solo. Tenerlas en una tabla evita escribir la misma consulta tres veces con un nombre
+# distinto y que las tres se separen a la primera corrección.
+_TABLAS_DE_CONCEPTO: tuple[tuple[str, Any, Any, Any], ...] = (
+    (
+        "P",
+        NominaPercepcion,
+        NominaPercepcion.tipo_percepcion,
+        NominaPercepcion.importe_gravado + NominaPercepcion.importe_exento,
+    ),
+    ("D", NominaDeduccion, NominaDeduccion.tipo_deduccion, NominaDeduccion.importe),
+    ("O", NominaOtroPago, NominaOtroPago.tipo_otro_pago, NominaOtroPago.importe),
+)
+
+
+@dataclass(frozen=True)
+class ConceptoObservado:
+    """Un concepto de nómina que la empresa **realmente emitió**, con lo que hace falta para
+    reconocerlo sin conocer su clave.
+
+    `clave` es la clave interna del sistema de nómina del patrón y puede venir nula: el
+    complemento no la exige. Un concepto sin clave no se puede clasificar
+    (`map_concepto_provision` la lleva en la PK), así que se muestra para que se vea el hueco,
+    pero no se puede clasificar.
+    """
+
+    naturaleza: str
+    tipo: str
+    clave: str | None
+    concepto: str | None
+    comprobantes: int
+    importe: Decimal
+    categoria: CategoriaProvision | None
+
+
+@dataclass(frozen=True)
+class DepartamentoObservado:
+    departamento_texto: str
+    comprobantes: int
+    centro_costo: str | None
+
+
+@dataclass(frozen=True)
+class Observados:
+    conceptos: list[ConceptoObservado]
+    departamentos: list[DepartamentoObservado]
+
+
+async def observados_de_empresa(db: AsyncSession, empresa: Empresa) -> Observados:
+    """Los conceptos y departamentos que **aparecen de verdad** en los CFDI de nómina de la
+    empresa, con la categoría o el centro de costo que ya tengan.
+
+    Existe porque pedirle al usuario que teclee `P/002/047` era pedirle un dato que no tiene:
+    esas claves las inventa el sistema de nómina del patrón y nadie las conoce de memoria. Con
+    esta lista se enumera lo que la nómina emitió, la persona **reconoce la descripción**
+    —"Aguinaldo", "Prima vacacional"— y elige categoría; nunca teclea una clave. Es también la
+    única forma de saber si la clasificación está **completa**, que es la condición que B-08
+    necesita para distinguir "no se pagó aguinaldo" de "sí se pagó y no sé en cuál concepto".
+
+    **Sin filtro de fecha ni de estatus, a propósito.** No es un informe: es el inventario de
+    lo que hay que configurar, y un concepto que solo apareció en una nómina de hace dos años
+    o en un CFDI cancelado sigue necesitando categoría — si no, la clasificación nunca queda
+    completa y B-08 nunca se genera.
+
+    Cuatro consultas agregadas en total (una por naturaleza más la de departamentos), todas
+    con `GROUP BY` en la base: ni una por renglón (regla 11). Vive aquí y no en la superficie
+    HTTP porque la pantalla y `app/scripts/administrar_configuracion.py` tienen que enumerar
+    **lo mismo**: dos copias de esta consulta se separarían y la lista del script mostraría un
+    inventario distinto del que dice si la clasificación está completa.
+    """
+    categorias = await categorias_de_provision(db, empresa.empresa_id)
+    centros = await centro_de_costo(db, empresa.empresa_id)
+
+    conceptos: list[ConceptoObservado] = []
+    for naturaleza, modelo, columna_tipo, columna_importe in _TABLAS_DE_CONCEPTO:
+        filas = (
+            await db.execute(
+                select(
+                    columna_tipo,
+                    modelo.clave,
+                    # El patrón puede haber usado varios textos para la misma clave; se muestra
+                    # uno. B-02 ya emite `CONCEPTO_INCONSISTENTE` para ese caso, así que aquí
+                    # repetir el diagnóstico solo duplicaría la fuente de verdad.
+                    func.min(modelo.concepto),
+                    func.count(func.distinct(Comprobante.comprobante_id)),
+                    func.coalesce(func.sum(columna_importe), 0),
+                )
+                .join(Comprobante, Comprobante.comprobante_id == modelo.comprobante_id)
+                .where(
+                    Comprobante.empresa_id == empresa.empresa_id,
+                    # La empresa es el patrón (§11 del diseño): los conceptos que hay que
+                    # clasificar son los que ella emitió, no los de una nómina recibida.
+                    Comprobante.rfc_emisor == empresa.rfc,
+                    Comprobante.tipo_comprobante == "N",
+                )
+                .group_by(columna_tipo, modelo.clave)
+                .order_by(columna_tipo, modelo.clave)
+            )
+        ).all()
+        for tipo, clave, concepto, comprobantes, importe in filas:
+            conceptos.append(
+                ConceptoObservado(
+                    naturaleza=naturaleza,
+                    tipo=tipo,
+                    clave=clave,
+                    concepto=concepto,
+                    comprobantes=comprobantes,
+                    importe=importe if isinstance(importe, Decimal) else Decimal(str(importe)),
+                    categoria=categorias.get((naturaleza, tipo, clave)) if clave is not None else None,
+                )
+            )
+
+    filas_depto = (
+        await db.execute(
+            select(
+                NominaReceptor.departamento,
+                func.count(func.distinct(Comprobante.comprobante_id)),
+            )
+            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+            .where(
+                Comprobante.empresa_id == empresa.empresa_id,
+                Comprobante.rfc_emisor == empresa.rfc,
+                Comprobante.tipo_comprobante == "N",
+                # Un departamento nulo no se puede mapear (`departamento_texto` va en la PK de
+                # `map_departamento`), así que listarlo solo agregaría un renglón inaccionable.
+                # B-06 lo trata aparte con su propia bandera.
+                NominaReceptor.departamento.is_not(None),
+            )
+            .group_by(NominaReceptor.departamento)
+            .order_by(NominaReceptor.departamento)
+        )
+    ).all()
+    return Observados(
+        conceptos=conceptos,
+        departamentos=[
+            DepartamentoObservado(departamento_texto=texto, comprobantes=cuenta, centro_costo=centros.get(texto))
+            for texto, cuenta in filas_depto
+        ],
+    )
 
 
 async def dias_de_vacaciones(db: AsyncSession, anios: int) -> int | None:
@@ -524,6 +691,296 @@ async def guardar_param_fiscal(
             fila.origen = origen
     await db.flush()
     return fila
+
+
+# --------------------------------------------------------------------------------------
+# Confirmación: la puerta que activa un valor fiscal
+# --------------------------------------------------------------------------------------
+#
+# Vive aquí, y no en `app/api/v1/configuracion.py`, por el mismo argumento que
+# `guardar_param_fiscal`: hay **dos** clientes que confirman —la pantalla y
+# `app/scripts/administrar_configuracion.py`— y una segunda copia de estas guardas en el
+# script sería una puerta trasera con la forma exacta de la puerta buena. Las funciones no
+# escriben bitácora ni hacen `commit`: eso lo hace quien llama, en la misma transacción, y es
+# lo que le permite a cada cliente dejar constancia de *por dónde* entró.
+
+# `param_fiscal.confirmado_por` y `catalogo_percepcion_marca.confirmado_por` son VARCHAR(128)
+# y `usuarios.correo` es VARCHAR(190). El recorte evita un DataError 1406 de MySQL a media
+# escritura y no pierde nada auditable: la fila de bitácora de la misma transacción guarda el
+# `actor` completo (VARCHAR(190)).
+_LARGO_CONFIRMADO_POR = 128
+
+
+def _ahora() -> datetime:
+    """`datetime` sin zona, como todas las columnas `DateTime` del proyecto (que son naive en
+    UTC). Mismo patrón que `app/worker/tasks.py`."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def huella_de_nota(nota: str | None) -> str | None:
+    """Huella de una duda declarada, para que confirmar pueda exigir **haberla visto**.
+
+    SHA-256 del texto en UTF-8, o `None` si no hay duda. Es un valor **opaco**: lo emite quien
+    lista las marcas (el `GET` de la API, o el `estado` de la línea de comandos) y el cliente
+    lo devuelve tal cual al confirmar. Nadie fuera de este módulo tiene que saber qué algoritmo
+    es, y ese es el punto — si el cliente lo calculara, tendría que reproducir la normalización
+    byte a byte y cualquier diferencia sería un rechazo que no se podría explicar.
+
+    Se hashea el texto **ya normalizado** tal como está en la base (`_normaliza_nota` en el
+    `PUT` y `_texto` en el cargador ya recortan espacios y convierten el vacío en `None`), así
+    que la misma duda siempre produce la misma huella.
+    """
+    if nota is None:
+        return None
+    return hashlib.sha256(nota.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class MarcasQueCalculan:
+    """Las seis marcas del §3.1 que **calculan**: lo que se revisa y lo que se confirma.
+
+    Es la forma que entienden las guardas, independiente de Pydantic y de argparse, para que
+    la pantalla y la línea de comandos comparen contra lo mismo. `nota_revision` no está: no
+    entra en la comparación (ver `marcas_difieren`) y su guarda propia es la huella.
+    """
+
+    es_ingreso_ordinario: bool
+    base_exencion: BaseExencion
+    factor_exencion: Decimal | None
+    integra_sbc: bool
+    es_provisionable: bool
+    sujeto_a_tope_conjunto: bool
+
+    @classmethod
+    def de_fila(cls, fila: CatalogoPercepcionMarca) -> MarcasQueCalculan:
+        return cls(
+            es_ingreso_ordinario=fila.es_ingreso_ordinario,
+            base_exencion=fila.base_exencion,
+            factor_exencion=fila.factor_exencion,
+            integra_sbc=fila.integra_sbc,
+            es_provisionable=fila.es_provisionable,
+            sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
+        )
+
+
+def marcas_difieren(fila: CatalogoPercepcionMarca, marcas: MarcasQueCalculan) -> bool:
+    """Si las marcas que **calculan** cambiaron. Decide dos cosas: si la captura tiene que
+    limpiar la confirmación, y si el confirmar se rechaza.
+
+    `nota_revision` queda fuera de **esta** comparación, y por dos razones distintas según
+    para qué se use la función:
+
+    - Para el rechazo al confirmar: lo que se confirma no lleva la nota. Obligar a reenviar
+      verbatim un texto de 800 caracteres solo añadiría un rechazo por una diferencia de
+      espacios en prosa — el mismo fallo inexplicable que evitamos al rechazar el redondeo
+      silencioso. Que la duda se vea al confirmar lo garantiza la huella.
+    - Para limpiar la confirmación al capturar: la nota sí cuenta, pero **asimétricamente**, y
+      eso no cabe en una comparación de igualdad. Va aparte, en `_duda_nueva`.
+    """
+    return (
+        fila.es_ingreso_ordinario != marcas.es_ingreso_ordinario
+        or fila.base_exencion is not marcas.base_exencion
+        or fila.factor_exencion != marcas.factor_exencion
+        or fila.integra_sbc != marcas.integra_sbc
+        or fila.es_provisionable != marcas.es_provisionable
+        # Sin este renglón, confirmar una marca de previsión social con un cuerpo que no
+        # menciona el tope pasaría y activaría una bandera que nadie miró.
+        or fila.sujeto_a_tope_conjunto != marcas.sujeto_a_tope_conjunto
+    )
+
+
+def duda_no_vista(fila: CatalogoPercepcionMarca, huella_enviada: str | None) -> bool:
+    """Si quien confirma **no tenía delante la duda que la marca tiene ahora**.
+
+    Es el hueco que `marcas_difieren` deja abierto a propósito, en su forma concurrente: A abre
+    `001` sin duda, B le agrega una (o la agrega una recarga de semilla), A confirma → las seis
+    marcas no cambiaron → pasa, confirmado, con una duda que nunca vio. Justo lo que la puerta
+    de confirmación existe para impedir.
+
+    **Se compara la huella y no el texto.** La razón por la que `marcas_difieren` excluye
+    `nota_revision` sigue siendo buena y no cambia: obligar a reenviar 800 caracteres de prosa
+    verbatim produciría un rechazo por un espacio en blanco. La huella conserva la garantía sin
+    esa fragilidad.
+
+    **Asimétrica, exactamente como `_duda_nueva`, y por el mismo argumento:**
+
+    - la marca tiene duda ahora y la huella no coincide (o no vino) → se rechaza: se estaría
+      confirmando sin haber visto la advertencia vigente;
+    - la marca **no** tiene duda ahora → pasa, venga la huella que venga. Quien revisó lo hizo
+      con una duda que desde entonces alguien resolvió, es decir contra *más* información de la
+      que hay hoy. Resolver una duda no invalida una revisión; que aparezca una, sí.
+    """
+    if fila.nota_revision is None:
+        return False
+    return huella_enviada != huella_de_nota(fila.nota_revision)
+
+
+def detalle_de_tramo(fila: ParamFiscal) -> dict[str, Any]:
+    """El tramo en tipos que el `JSON` de `bitacora` sabe guardar. El `Decimal` va como texto:
+    serializarlo a `float` en el rastro de auditoría perdería precisión justo en el dato que se
+    está auditando."""
+    return {
+        "valor": str(fila.valor),
+        "ejercicio": fila.ejercicio,
+        "vigencia_hasta": fila.vigencia_hasta.isoformat() if fila.vigencia_hasta else None,
+        "origen": fila.origen.value,
+        "fuente": fila.fuente,
+        "confirmado": fila.confirmado_en is not None,
+    }
+
+
+def detalle_de_marcas(marcas: MarcasQueCalculan) -> dict[str, Any]:
+    """Las seis marcas para el `detalle` de bitácora, con el `Decimal` como texto."""
+    return {
+        "es_ingreso_ordinario": marcas.es_ingreso_ordinario,
+        "base_exencion": marcas.base_exencion.value,
+        "factor_exencion": str(marcas.factor_exencion) if marcas.factor_exencion is not None else None,
+        "integra_sbc": marcas.integra_sbc,
+        "es_provisionable": marcas.es_provisionable,
+        "sujeto_a_tope_conjunto": marcas.sujeto_a_tope_conjunto,
+    }
+
+
+def detalle_de_config_empresa(config: ConfiguracionEmpresa) -> dict[str, Any]:
+    """La política laboral de una empresa para el `detalle` de bitácora."""
+    return {
+        "zona_salarial": config.zona_salarial.value if config.zona_salarial else None,
+        "dias_aguinaldo": config.dias_aguinaldo,
+        "factor_prima_vacacional": (
+            str(config.factor_prima_vacacional) if config.factor_prima_vacacional is not None else None
+        ),
+    }
+
+
+async def snapshot_de_tramo(db: AsyncSession, clave: str, vigencia_desde: date) -> dict[str, Any] | None:
+    """El contenido del tramo **antes** de escribirlo, para el `detalle` de la bitácora.
+
+    Dos decisiones que parecen detalle y no lo son:
+
+    1. **Selecciona columnas, no la entidad.** Cargar el `ParamFiscal` por el ORM lo metería
+       en el mapa de identidad, y la lectura `FOR UPDATE` de `guardar_param_fiscal` devolvería
+       *ese mismo objeto* sin refrescar sus atributos (SQLAlchemy no pisa lo ya cargado salvo
+       con `populate_existing()`): el candado seguiría tomándose, pero la comprobación de
+       solapamiento razonaría sobre el snapshot viejo. Una fila de columnas no toca el mapa de
+       identidad.
+    2. **Toma el candado sobre el mismo rango** que `guardar_param_fiscal` (`clave = ...`), no
+       sobre la fila exacta. Un rango más angosto aquí y uno más ancho después abriría un ciclo
+       de espera entre dos escrituras de la misma clave con `vigencia_desde` distintos; con el
+       mismo rango, la segunda simplemente espera a la primera.
+    """
+    fila = (
+        await db.execute(
+            select(
+                ParamFiscal.vigencia_desde,
+                ParamFiscal.ejercicio,
+                ParamFiscal.valor,
+                ParamFiscal.vigencia_hasta,
+                ParamFiscal.origen,
+                ParamFiscal.fuente,
+                ParamFiscal.confirmado_en,
+            )
+            .where(ParamFiscal.clave == clave)
+            .with_for_update()
+        )
+    ).all()
+    previa = next((f for f in fila if f.vigencia_desde == vigencia_desde), None)
+    if previa is None:
+        return None
+    return {
+        "valor": str(previa.valor),
+        "ejercicio": previa.ejercicio,
+        "vigencia_hasta": previa.vigencia_hasta.isoformat() if previa.vigencia_hasta else None,
+        "origen": previa.origen.value,
+        "fuente": previa.fuente,
+        "confirmado": previa.confirmado_en is not None,
+    }
+
+
+async def confirmar_param_fiscal(
+    db: AsyncSession, *, clave: str, vigencia_desde: date, valor: Decimal, actor: str
+) -> tuple[ParamFiscal, bool]:
+    """Confirma un tramo propuesto: a partir de aquí `valor_vigente` lo devuelve y los informes
+    calculan con él. Devuelve la fila y **si cambió algo** (falso al reconfirmar lo ya
+    confirmado, que es idempotente y no merece renglón de bitácora).
+
+    **Exige `valor`, el importe que se está confirmando, y rechaza si no coincide con el
+    almacenado.** Sin esa comparación, una propuesta que cambió entre que se leyó y que se
+    confirmó —una recarga de semillas, otro administrador, la sincronización de Banxico— se
+    confirmaría a ciegas, que es justo el escenario contra el que existe el invariante.
+
+    El `FOR UPDATE` toma el mismo rango por clave que `guardar_param_fiscal`, así que una
+    captura simultánea de la misma clave espera en vez de colarse entre la comparación del
+    valor y la escritura de la confirmación.
+
+    No escribe bitácora ni hace `commit`: quien llama lo hace en la misma transacción.
+    """
+    tramos = list((await db.scalars(select(ParamFiscal).where(ParamFiscal.clave == clave).with_for_update())).all())
+    fila = next((t for t in tramos if t.vigencia_desde == vigencia_desde), None)
+    if fila is None:
+        raise NoEncontrado(f"No hay ningún tramo de `{clave}` que arranque el {vigencia_desde}.")
+
+    if fila.valor != valor:
+        # `Decimal("117.31") == Decimal("117.310000")` es verdadero: la comparación es por
+        # valor numérico, no por escala, así que quien confirma no tiene que adivinar los
+        # decimales con los que la columna `Numeric(18,6)` devolvió la cifra.
+        raise ValorCambio(
+            f"El valor de `{clave}` cambió mientras revisabas: está en {fila.valor} y confirmaste "
+            f"{valor}. Vuelve a leer el estado y revísalo otra vez antes de confirmar."
+        )
+
+    if fila.confirmado_en is not None:
+        # Idempotente: reconfirmar lo ya confirmado no cambia nada, así que tampoco reescribe
+        # quién lo confirmó (sería borrar el rastro del que sí lo revisó).
+        return fila, False
+
+    fila.confirmado_por = actor[:_LARGO_CONFIRMADO_POR]
+    fila.confirmado_en = _ahora()
+    await db.flush()
+    return fila, True
+
+
+async def confirmar_marca_percepcion(
+    db: AsyncSession,
+    *,
+    tipo: str,
+    marcas: MarcasQueCalculan,
+    nota_revision_hash: str | None,
+    actor: str,
+) -> tuple[CatalogoPercepcionMarca, bool]:
+    """Confirma las marcas de un tipo de percepción: a partir de aquí `marcas_de_percepcion`
+    las devuelve y los informes calculan exenciones con ellas. Devuelve la fila y si cambió algo.
+
+    Pide el juego completo de marcas —no solo el tipo— por la misma razón que los importes: lo
+    que se confirma es *lo que se revisó*, y si cambió entre la lectura y el acto, se rechaza.
+    Y pide la **huella** de la duda: confirmar no es editar, pero sí es afirmar que se miró lo
+    que se activa, y la duda es parte de eso (ver `duda_no_vista`).
+
+    No escribe bitácora ni hace `commit`: quien llama lo hace en la misma transacción.
+    """
+    exige_tipo_percepcion_conocido(tipo)
+    fila = await db.get(CatalogoPercepcionMarca, tipo, with_for_update=True)
+    if fila is None:
+        raise NoEncontrado(f"No hay marcas capturadas para el tipo de percepción {tipo}.")
+    # Antes que `marcas_difieren`: si apareció una duda, ese es el diagnóstico útil aunque
+    # además hayan cambiado las marcas — "mira la advertencia nueva" dice más que "algo cambió".
+    if duda_no_vista(fila, nota_revision_hash):
+        raise DudaNoVista(
+            f"El tipo {tipo} tiene una duda declarada que no estaba a la vista cuando lo revisaste "
+            "(la agregó otra persona o una recarga de semillas). Vuelve a leer el estado, lee la "
+            "duda y confirma después: confirmar es responder por lo que se miró."
+        )
+    if marcas_difieren(fila, marcas):
+        raise MarcasCambiaron(
+            f"Las marcas del tipo {tipo} cambiaron mientras las revisabas. Vuelve a leer el estado "
+            "y revísalas otra vez antes de confirmarlas."
+        )
+    if fila.confirmado_en is not None:
+        return fila, False
+
+    fila.confirmado_por = actor[:_LARGO_CONFIRMADO_POR]
+    fila.confirmado_en = _ahora()
+    await db.flush()
+    return fila, True
 
 
 # --------------------------------------------------------------------------------------
