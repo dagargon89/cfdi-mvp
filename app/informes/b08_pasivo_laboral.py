@@ -66,6 +66,14 @@ B-08.R1 — El salario diario base, y por qué el orden importa
 No es un adorno: sin ese dato nadie que reciba el Excel puede saber si la cifra está inflada
 por la vía 2, y las dos vías conviven en la misma hoja.
 
+**Y el numerador y el denominador se arman del MISMO conjunto de comprobantes.** Fue un defecto
+Critical de la primera versión (la fórmula literal de la ficha se puede leer como dos conjuntos
+distintos, y así se implementó): un periodo que aportaba días sin importe `001` subestimaba el
+salario un 33% y uno con `num_dias_pagados` nulo lo inflaba un 50%, en los dos casos **con la
+etiqueta de la vía confiable y sin una sola bandera**. Ahora un periodo entra en los dos lados o
+en ninguno, y quedarse fuera deja bandera. Ver `_salarios_diarios`, que lleva las dos cifras
+medidas.
+
 Cómo se calcula cada columna
 -------------------------------
 Sea `dias_ejercicio` el largo real del año (365, o 366 si es bisiesto — así un año completo
@@ -93,10 +101,30 @@ naturales entre `max(fecha_inicio_rel_laboral, 1-ene)` y la fecha de corte, ambo
 
 Lo que este informe NO puede saber, declarado
 ------------------------------------------------
+Los cinco huecos van rotulados en la hoja `Parámetros` (`_NOTAS`) y no solo aquí, y los tres que
+se pueden acotar con el dato que ya está en el universo llevan además bandera o columna: un
+residuo declarado en un docstring no llega al contador que recibe el Excel.
+
 - **Una baja no es observable en el CFDI.** No existe fecha de terminación en el complemento
-  de nómina, así que el devengo de todos los empleados corre hasta la fecha de corte. La
-  provisión de alguien que dejó la organización a media año sale **de más**; conviene correr
-  el informe con `fecha_corte` al cierre y conciliar la plantilla contra recursos humanos.
+  de nómina, así que el devengo de todos los empleados corre hasta la fecha de corte y la
+  provisión de quien dejó la organización a media año sale **de más**. Declararlo era el piso y
+  no bastaba: la columna **«Último CFDI del ejercicio»** dice por dónde empezar a conciliar, y
+  `POSIBLE_BAJA_EN_EL_EJERCICIO` marca a quien dejó de recibir recibos mucho antes que el resto
+  de la plantilla. Ninguna de las dos cosas adivina nada — es el `max(fecha_pago)` que ya viene
+  en el universo — y convierten "concilia 300 personas" en "revisa estas tres".
+- **La cobertura de los datos puede quedarse muy por detrás del corte.** El devengo legal corre
+  hasta el corte con independencia de lo que se haya descargado, así que un informe con corte al
+  31 de diciembre sobre un histórico que llega a julio da una cifra anual **correcta como devengo
+  y equívoca como observación**. Se emite `COBERTURA_INCOMPLETA_AL_CORTE` con los días sin datos:
+  la cifra no cambia, pero quien la firma tiene que saber sobre qué se proyectó.
+- **Lo pagado se identifica por su fecha de pago, no por el ejercicio que liquida.** El
+  complemento no declara a qué ejercicio corresponde la prestación pagada, así que un aguinaldo
+  de 2025 pagado en enero de 2026 se resta del devengado de 2026 (en una prueba, la provisión
+  pasa de 7 500 a 500). Es lo que pide la ficha —"lo pagado en el ejercicio"— y va rotulado.
+- **Las vacaciones no arrastran ejercicios anteriores.** El art. 78 LFT permite acumular hasta
+  18 meses; este cálculo solo devenga el derecho del ejercicio, así que un empleado con saldo
+  de 2025 aparece con un año de derecho y su provisión **subestima**. Cerrarlo exige el saldo de
+  recursos humanos, que este sistema no tiene.
 - **Sin `fecha_inicio_rel_laboral` no hay antigüedad ni proporción devengada**, y por eso las
   columnas calculadas de ese empleado salen **vacías, nunca en cero**, con
   `FALTA_FECHA_INICIO_RELACION_LABORAL`. No se supone "trabajó todo el año": para alguien
@@ -115,13 +143,19 @@ Restricciones que este módulo cumple
 - **El motor enmascara, el informe declara.** CURP y NSS van como `Columna(sensible=True)` y
   este módulo nunca llama a `enmascarar()`. **Ningún mensaje de bandera interpola CURP ni
   NSS** —fue una fuga real en B-10—; el ámbito de las banderas por empleado lleva el RFC.
-- **Cero N+1** (regla 11): los últimos 3 periodos ordinarios de todos los empleados salen de
-  **una** consulta con `ROW_NUMBER() OVER (PARTITION BY rfc_receptor)`, no de una consulta por
-  empleado; la tabla de vacaciones se resuelve una vez por antigüedad distinta (un puñado),
-  no una vez por fila.
+- **Cero N+1** (regla 11) y **ningún bucle con entrada/salida**: los últimos 3 periodos
+  ordinarios de todos los empleados salen de **una** consulta con
+  `ROW_NUMBER() OVER (PARTITION BY rfc_receptor)`, no de una por empleado; `tabla_vacaciones`
+  se trae entera de **una** consulta (14 renglones de dos enteros) y se resuelve en memoria; y
+  las categorías de provisión se leen **una** vez, de `observados_de_empresa`, que ya las trae
+  resueltas por concepto.
 - **Ningún importe fiscal codificado** (§2.12): los días de aguinaldo, el factor de prima y
   los días de vacaciones salen de `configuracion_empresa` y de `tabla_vacaciones`. Las claves
   de catálogo del SAT van como texto.
+- **Una celda vacía suma cero al totalizar en Excel**, así que cuando alguna fila no puede
+  calcular su provisión total el libro lo dice con un renglón propio en la hoja `Parámetros`.
+  Dejar la celda vacía es lo correcto —un cero afirmaría que a esa persona no se le debe nada—,
+  pero sin el conteo la decisión correcta produce un total corto con apariencia de completo.
 """
 
 from __future__ import annotations
@@ -138,6 +172,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.informes import catalogos, universo_nomina
 from app.informes.base import Bandera, Columna, ResultadoInforme
 from app.models.comprobante import Comprobante
+from app.models.configuracion_fiscal import TablaVacaciones
 from app.models.empresa import Empresa
 from app.models.enums import CategoriaProvision, EstatusCfdi
 from app.models.nomina import Nomina, NominaPercepcion
@@ -181,6 +216,22 @@ empezar— y no todos: el mensaje dice cuántos hay en total. Mismo criterio que
 `universo_nomina.MUESTRA_UUID_COLAPSO`. **Solo RFC**: la CURP y el NSS jamás entran en el
 mensaje ni en el ámbito de una bandera (la hoja `Banderas` no se enmascara)."""
 
+MARGEN_COBERTURA_DIAS = 31
+"""Cuántos días puede la fecha de corte adelantarse al último CFDI observado antes de que el
+informe emita `COBERTURA_INCOMPLETA_AL_CORTE`.
+
+31 días —un mes natural— por el mismo criterio de `universo_nomina.MARGEN_TIMBRADO_DIAS`: una
+bandera de más se lee y se descarta, una de menos no se ve nunca. El corte de un cierre normal
+cae el mismo día o pocos días después del último pago del ejercicio, así que en la operación
+sana esta bandera no aparece.
+
+**Por qué hacía falta.** El devengo del art. 87 LFT corre hasta el corte con independencia de
+lo que se haya descargado, así que el informe daba una cifra anual completa sobre un histórico
+que llegaba a julio y **el libro no lo decía en ninguna parte**: en la corrida real eran 117 182.62
+con cero banderas, una proyección de 12 meses sobre 6.5 observados, presentada como devengo
+observado. La cifra no cambia —es la correcta— pero quien la firma tiene que saber sobre qué se
+proyectó."""
+
 MAX_CONCEPTOS_EN_AVISO = 15
 """Cuántos conceptos sin clasificar se enumeran en el aviso que bloquea el informe. La empresa
 real tiene tres, así que en la práctica se enumeran todos; el tope existe para que una empresa
@@ -201,10 +252,21 @@ _NOTAS: tuple[str, ...] = (
     "Los días de vacaciones pendientes son una ESTIMACIÓN por devengo proporcional: el saldo real "
     "de vacaciones lo lleva recursos humanos y este sistema no lo tiene. Lo único observable en el "
     "CFDI es cuánto se pagó por ese concepto.",
+    "SOLO SE DEVENGA EL DERECHO DE VACACIONES DE ESTE EJERCICIO: el cálculo no arrastra saldos de "
+    "ejercicios anteriores, que el artículo 78 de la LFT permite acumular hasta 18 meses. Un "
+    "empleado que no tomó sus vacaciones de 2025 aparece aquí con un solo año de derecho, así que "
+    "la provisión de vacaciones y de prima vacacional SUBESTIMA el pasivo en esos casos. El saldo "
+    "acumulado hay que pedirlo a recursos humanos.",
+    "LO PAGADO SE IDENTIFICA POR SU FECHA DE PAGO, no por el ejercicio que liquida: un aguinaldo "
+    "de 2025 pagado en enero de 2026 se resta del devengado de 2026 y deja la provisión corta (en "
+    "una prueba, de 7 500 a 500). El complemento de nómina no declara a qué ejercicio corresponde "
+    "la prestación que se paga, así que revisa los pagos de aguinaldo y prima de los primeros días "
+    "del ejercicio antes de registrar el asiento.",
     "El complemento de nómina no declara la fecha de baja, así que el devengo de todo empleado "
     "corre hasta la fecha de corte: la provisión de quien dejó la organización durante el "
-    "ejercicio sale de más. Concilia la plantilla contra recursos humanos antes de registrar el "
-    "asiento.",
+    "ejercicio sale de más. La columna «Último CFDI del ejercicio» dice por dónde empezar a "
+    "conciliar contra recursos humanos —quien dejó de recibir recibos antes que el resto—, y los "
+    "casos claros llevan bandera `POSIBLE_BAJA_EN_EL_EJERCICIO`.",
 )
 """Lo que se rotula en la hoja `Parámetros` del libro (B-08.R3). Va en `ResultadoInforme.notas`
 y no solo en este docstring porque quien recibe el Excel es quien tiene que verlo."""
@@ -286,6 +348,9 @@ _COLUMNAS: tuple[tuple[str, str, bool], ...] = (
     ("Nombre empleado", "texto", False),
     ("Núm. empleado", "texto", False),
     ("Fecha inicio relación laboral", "fecha", False),
+    # La mitigación concreta de la nota sobre las bajas, y no es una heurística: es el dato que
+    # ya viene en el universo. Convierte "concilia la plantilla" en "revisa estas tres filas".
+    ("Último CFDI del ejercicio", "fecha", False),
     ("Antigüedad al corte (años cumplidos)", "entero", False),
     ("Salario diario base", "monto", False),
     # B-08.R1: sin esta columna nadie puede saber si la cifra viene inflada por el SDI.
@@ -318,6 +383,50 @@ def _dec(valor: object) -> Decimal:
     return valor if isinstance(valor, Decimal) else Decimal(str(valor))
 
 
+@dataclass(frozen=True, slots=True)
+class _Vacaciones:
+    """Los días del art. 76 LFT que le tocan a cada antigüedad presente en la plantilla, y el
+    estado de la tabla para poder explicar un hueco sin mentir sobre su causa."""
+
+    dias_por_antiguedad: dict[int, int | None]
+    renglones: int
+    """Cuántos renglones tiene `tabla_vacaciones` en total. Distingue "la tabla está vacía" de
+    "la tabla existe y no tiene renglón aplicable", que son dos avisos distintos: el primero se
+    arregla con la semilla y el segundo con el renglón que falta."""
+
+    minimo_capturado: int | None
+
+
+async def _vacaciones_por_antiguedad(db: AsyncSession, antiguedades: set[int]) -> _Vacaciones:
+    """`tabla_vacaciones` en **una** consulta, resuelta en memoria para todas las antigüedades.
+
+    Antes se llamaba a `cfg.dias_de_vacaciones` una vez por antigüedad distinta. No era N+1 por
+    fila —el número de consultas lo acotaba la plantilla, no el volumen de nómina— pero era el
+    único bucle con entrada/salida del módulo, y la tabla completa son 14 renglones de dos
+    enteros: traerla entera cuesta una consulta y cero riesgo.
+
+    **La regla de resolución es la de `cfg.dias_de_vacaciones` y está duplicada a propósito**
+    (el renglón con el mayor `anios_antiguedad` que no exceda la antigüedad consultada, porque
+    a partir del sexto año la tabla crece de cinco en cinco y no hay renglón por año). La
+    duplicación de una regla legal es exactamente lo que este proyecto evita, así que va
+    **atada con una prueba**: `test_la_resolucion_local_de_vacaciones_coincide_con_el_servicio`
+    compara las dos implementaciones para 0..50 años y falla en cuanto se separen un carácter.
+    """
+    filas = (
+        await db.execute(select(TablaVacaciones.anios_antiguedad, TablaVacaciones.dias).order_by(TablaVacaciones.anios_antiguedad))
+    ).all()
+    tabla = [(int(anios), int(dias)) for anios, dias in filas]
+    dias_por_antiguedad: dict[int, int | None] = {}
+    for antiguedad in sorted(antiguedades):
+        # Menos de un año cumplido no sale de la tabla del art. 76: el art. 77 LFT da un derecho
+        # **proporcional**, y la base de ese prorrateo es el renglón del primer año — que es el
+        # que ese artículo prorratea, y que se lee de la tabla, no se escribe aquí (§2.12).
+        buscada = max(antiguedad, 1)
+        aplicables = [dias for anios, dias in tabla if anios <= buscada]
+        dias_por_antiguedad[antiguedad] = aplicables[-1] if aplicables else None
+    return _Vacaciones(dias_por_antiguedad, len(tabla), tabla[0][0] if tabla else None)
+
+
 def _anios_cumplidos(inicio: date, corte: date) -> int:
     """Antigüedad en años **cumplidos** al corte, por calendario y no dividiendo días entre
     365: quien entró un 29 de febrero cumple años igual, y el renglón de `tabla_vacaciones`
@@ -343,6 +452,22 @@ class _SalarioDiario:
     fuente: str
 
 
+@dataclass(frozen=True, slots=True)
+class _SalariosBase:
+    """El salario diario de cada empleado más **qué se descartó al calcularlo**.
+
+    Los tres diccionarios de descarte no son telemetría: cada uno es una bandera. Un promedio
+    armado sobre menos periodos de los previstos sigue siendo una cifra que alguien tiene que
+    mirar antes de firmarla, y sin este dato el informe la publicaba con la etiqueta de la vía
+    confiable y sin una sola advertencia.
+    """
+
+    por_rfc: dict[str, _SalarioDiario]
+    periodos_usados: dict[str, int]
+    sin_sueldo: dict[str, int]
+    sin_dias: dict[str, int]
+
+
 async def _salarios_diarios(
     db: AsyncSession,
     empresa_id: int,
@@ -351,7 +476,7 @@ async def _salarios_diarios(
     corte: date,
     incluir_cancelados: bool,
     sdi_por_rfc: dict[str, Decimal | None],
-) -> dict[str, _SalarioDiario]:
+) -> _SalariosBase:
     """B-08.R1 para **todos** los empleados a la vez: dos consultas, pase lo que pase.
 
     **Cero N+1 (regla 11), y aquí no era trivial.** "Los últimos 3 periodos ordinarios de cada
@@ -359,6 +484,28 @@ async def _salarios_diarios(
     `ROW_NUMBER() OVER (PARTITION BY rfc_receptor ORDER BY fecha_pago DESC)` en una subconsulta
     y un filtro `rn <= N` afuera, que MySQL 8 evalúa de una pasada. La segunda consulta suma
     las percepciones tipo `001` de los comprobantes que sobrevivieron al filtro.
+
+    **El numerador y el denominador se arman del MISMO conjunto de comprobantes, y esto fue un
+    defecto Critical de la primera versión** (ronda de corrección 1). Aquella sumaba al
+    denominador los días de **todo** comprobante que pasaba el `rn <= 3` y al numerador solo las
+    percepciones `001` de esos comprobantes, que no es el mismo conjunto: cuando uno de los
+    periodos elegidos aportaba a uno y no al otro, `importe / dias` **no era el salario diario de
+    nadie**, y la fila seguía declarando «CFDI · últimos 3 periodos ordinarios», que es la
+    etiqueta que le dice al contador "este número es de la vía confiable". Falla en los dos
+    sentidos y los dos se midieron con un salario real de 500.00/día:
+
+    - **Subestimaba** cuando un periodo aportaba días sin importe `001`: 15 días al denominador y
+      cero pesos al numerador daban **333.33** (−33%). Ocurre con una incapacidad que cubre el
+      periodo completo (pagada por tipo `014`), con un pago timbrado como asimilado (`029`/`046`)
+      o con un aguinaldo timbrado por error como nómina ordinaria.
+    - **Sobrestimaba** cuando `num_dias_pagados` venía nulo —es `nullable=True` en el modelo, así
+      que basta un ETL parcial—: `_dec(None) → 0` en el denominador mientras el importe sí entraba
+      al numerador, y salían **750.00** (+50%) con una provisión total de 31 875 contra 21 250.
+
+    Ahora un periodo elegido **entra en los dos lados o en ninguno**, y quedarse fuera **deja
+    bandera** (`PERIODO_SIN_SUELDO_EN_EL_PROMEDIO`, `PERIODO_SIN_DIAS_EN_EL_PROMEDIO`): descartar
+    en silencio sería honesto en la aritmética y mudo en el libro, y un promedio sobre menos
+    periodos de los previstos sigue siendo una cifra que alguien tiene que mirar.
 
     **El universo de esta regla no es el del informe**, a propósito: se buscan los últimos
     periodos ordinarios anteriores al corte **sin acotar al ejercicio**. Con una fecha de corte
@@ -371,8 +518,11 @@ async def _salarios_diarios(
     del universo y volver a consultarlo sería una tercera consulta para nada.
     """
     salarios: dict[str, _SalarioDiario] = {}
+    periodos_usados: dict[str, int] = {}
+    sin_sueldo: dict[str, int] = {}
+    sin_dias: dict[str, int] = {}
     if not rfcs:
-        return salarios
+        return _SalariosBase(salarios, periodos_usados, sin_sueldo, sin_dias)
 
     recientes = (
         select(
@@ -400,15 +550,16 @@ async def _salarios_diarios(
         recientes = recientes.where(Comprobante.estatus != EstatusCfdi.CANCELADO)
     sub = recientes.subquery()
 
-    dias_por_rfc: dict[str, Decimal] = {}
+    # Los días **por comprobante**, no ya sumados por empleado: el filtrado que empareja los dos
+    # lados del promedio necesita decidir comprobante por comprobante. `dias` puede venir nulo.
+    dias_por_cid: dict[int, Decimal | None] = {}
     cid_a_rfc: dict[int, str] = {}
     elegidos = await db.execute(select(sub.c.rfc, sub.c.cid, sub.c.dias).where(sub.c.rn <= ULTIMOS_PERIODOS))
     for rfc_bruto, cid, dias in elegidos.all():
-        rfc_reciente = str(rfc_bruto)
-        cid_a_rfc[int(cid)] = rfc_reciente
-        dias_por_rfc[rfc_reciente] = dias_por_rfc.get(rfc_reciente, _CERO) + _dec(dias)
+        cid_a_rfc[int(cid)] = str(rfc_bruto)
+        dias_por_cid[int(cid)] = None if dias is None else _dec(dias)
 
-    importe_por_rfc: dict[str, Decimal] = {}
+    importe_por_cid: dict[int, Decimal] = {}
     if cid_a_rfc:
         sumas = await db.execute(
             select(
@@ -422,25 +573,42 @@ async def _salarios_diarios(
             .group_by(NominaPercepcion.comprobante_id)
         )
         for cid, importe in sumas.all():
-            rfc = cid_a_rfc[int(cid)]
-            importe_por_rfc[rfc] = importe_por_rfc.get(rfc, _CERO) + _dec(importe)
+            importe_por_cid[int(cid)] = _dec(importe)
+
+    # Un periodo elegido entra en los DOS lados del promedio o en NINGUNO, y si queda fuera se
+    # anota para que salga bandera. Ver el docstring: aquí vivía el defecto Critical.
+    numerador: dict[str, Decimal] = {}
+    denominador: dict[str, Decimal] = {}
+    for cid in sorted(cid_a_rfc):
+        rfc_periodo = cid_a_rfc[cid]
+        importe = importe_por_cid.get(cid, _CERO)
+        dias_cfdi = dias_por_cid.get(cid)
+        if importe <= _CERO:
+            sin_sueldo[rfc_periodo] = sin_sueldo.get(rfc_periodo, 0) + 1
+            continue
+        if dias_cfdi is None or dias_cfdi <= _CERO:
+            sin_dias[rfc_periodo] = sin_dias.get(rfc_periodo, 0) + 1
+            continue
+        numerador[rfc_periodo] = numerador.get(rfc_periodo, _CERO) + importe
+        denominador[rfc_periodo] = denominador.get(rfc_periodo, _CERO) + dias_cfdi
+        periodos_usados[rfc_periodo] = periodos_usados.get(rfc_periodo, 0) + 1
 
     for rfc in sorted(rfcs):
-        dias = dias_por_rfc.get(rfc, _CERO)
-        importe = importe_por_rfc.get(rfc, _CERO)
-        if dias > _CERO and importe > _CERO:
-            salarios[rfc] = _SalarioDiario(importe / dias, FUENTE_CFDI)
+        if periodos_usados.get(rfc, 0) > 0:
+            # Por construcción el denominador es la suma de los días de los MISMOS comprobantes
+            # cuyo importe está en el numerador, y los dos son estrictamente positivos.
+            salarios[rfc] = _SalarioDiario(numerador[rfc] / denominador[rfc], FUENTE_CFDI)
             continue
         # Vía 2, el último recurso. Se llega aquí cuando el empleado no tiene ningún periodo
-        # ordinario antes del corte o cuando esos periodos no traen percepciones tipo 001
-        # (todo su pago vino bajo otros tipos): sin numerador no hay promedio que calcular, y
-        # un cero ahí no sería "gana cero", sería "no lo sé".
+        # ordinario antes del corte, o cuando ninguno de los elegidos aportó importe `001` y días
+        # a la vez: sin un par (importe, días) coherente no hay promedio que calcular, y un cero
+        # ahí no sería "gana cero", sería "no lo sé".
         sdi = sdi_por_rfc.get(rfc)
         if sdi is not None and sdi > _CERO:
             salarios[rfc] = _SalarioDiario(sdi, FUENTE_SDI)
         else:
             salarios[rfc] = _SalarioDiario(None, FUENTE_AUSENTE)
-    return salarios
+    return _SalariosBase(salarios, periodos_usados, sin_sueldo, sin_dias)
 
 
 # --------------------------------------------------------------------------------------
@@ -606,10 +774,15 @@ class _Recuento:
     NSS — la hoja `Banderas` no se enmascara."""
 
     empleados: int = 0
+    periodos: int = 0
+    """Cuántos periodos de nómina están detrás del conteo, cuando la causa se cuenta por periodo
+    y no solo por empleado (los dos descartes del promedio de B-08.R1). Cero significa "esta
+    causa no se cuenta por periodo" y entonces no se menciona en el mensaje."""
     rfcs: list[str] = field(default_factory=list)
 
-    def sumar(self, rfc: str) -> None:
+    def sumar(self, rfc: str, periodos: int = 0) -> None:
         self.empleados += 1
+        self.periodos += periodos
         if len(self.rfcs) < MUESTRA_RFC:
             self.rfcs.append(rfc)
 
@@ -644,6 +817,31 @@ _MENSAJES_DE_CAUSA: dict[str, str] = {
         "ser cierto de alguien a quien ya se le timbró nómina. Se les devengó cero días, así que su "
         "provisión sale en cero; revisa la captura de esa fecha en el sistema de nómina."
     ),
+    "PERIODO_SIN_SUELDO_EN_EL_PROMEDIO": (
+        "Alguno de sus últimos periodos ordinarios no trae ninguna percepción tipo 001, así que se "
+        "DESCARTÓ del promedio del salario diario base (B-08.R1) en vez de aportar sus días al "
+        "denominador con cero pesos al numerador: eso habría subestimado el salario —hasta un −33% en "
+        "la prueba que fija esta regla— y con él toda la provisión. Su salario salió del promedio de "
+        "los periodos restantes, que son MENOS de los previstos. Ocurre con una incapacidad que cubre "
+        "el periodo completo (pagada por tipo 014), con un pago timbrado como asimilado (029/046) o "
+        "con un aguinaldo timbrado por error como nómina ordinaria: vale la pena mirar esas filas "
+        "antes de usar la cifra."
+    ),
+    "PERIODO_SIN_DIAS_EN_EL_PROMEDIO": (
+        "Alguno de sus últimos periodos ordinarios trae percepciones tipo 001 pero no trae "
+        "`num_dias_pagados` (es opcional en el complemento y un ETL parcial lo deja nulo), así que se "
+        "DESCARTÓ del promedio del salario diario base (B-08.R1): sumar su importe al numerador sin "
+        "sumar sus días al denominador habría inflado el salario —hasta un +50% en la prueba que fija "
+        "esta regla— y con él toda la provisión. Su salario salió del promedio de los periodos "
+        "restantes; revisa la normalización de esos CFDI."
+    ),
+    "POSIBLE_BAJA_EN_EL_EJERCICIO": (
+        "Dejaron de recibir CFDI de nómina mucho antes que el resto de la plantilla (ver la columna "
+        "«Último CFDI del ejercicio»). El complemento de nómina no declara la fecha de baja, así que "
+        "el devengo de estas filas corrió hasta la fecha de corte y su provisión puede estar DE MÁS. "
+        "No es una conclusión, es la lista corta con la que conciliar contra recursos humanos: "
+        "también lo produce una licencia sin goce de sueldo o una descarga incompleta de ese empleado."
+    ),
 }
 
 
@@ -652,6 +850,9 @@ def _banderas_por_causa(recuentos: dict[str, _Recuento]) -> list[Bandera]:
     banderas: list[Bandera] = []
     for causa in sorted(recuentos):
         recuento = recuentos[causa]
+        # Las dos causas de descarte del promedio se cuentan también por periodo: "3 empleados"
+        # no dice si fue un periodo de cada uno o los tres de uno, y el daño no es el mismo.
+        periodos = f" Periodos descartados del promedio: {recuento.periodos}." if recuento.periodos else ""
         banderas.append(
             Bandera(
                 clave=causa,
@@ -659,7 +860,7 @@ def _banderas_por_causa(recuentos: dict[str, _Recuento]) -> list[Bandera]:
                 ambito="informe",
                 mensaje=(
                     f"{_MENSAJES_DE_CAUSA[causa]} Empleados afectados: {recuento.empleados} "
-                    f"(muestra de RFC: {recuento.muestra})."
+                    f"(muestra de RFC: {recuento.muestra}).{periodos}"
                 ),
             )
         )
@@ -682,6 +883,7 @@ class _Empleado:
     nombre: str | None = None
     num_empleado: str | None = None
     fecha_inicio: date | None = None
+    ultimo_pago: date | None = None
     sdi: Decimal | None = None
 
 
@@ -769,7 +971,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # Identidad e insumos por empleado. `universo()` ordena por `fecha_pago` ascendente, así
     # que sobrescribir en el orden de iteración deja la fotografía más reciente (B-05).
     empleados: dict[str, _Empleado] = {}
-    for comprobante, _nomina, receptor, _totales, detalle in filas_universo:
+    for comprobante, nomina, receptor, _totales, detalle in filas_universo:
         rfc = str(comprobante.rfc_receptor)
         registro = empleados.setdefault(rfc, _Empleado())
         if receptor is not None:
@@ -781,8 +983,18 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 registro.fecha_inicio = receptor.fecha_inicio_rel_laboral
         if detalle is not None:
             registro.nombre = detalle.nombre_receptor
+        if nomina.fecha_pago is not None and (registro.ultimo_pago is None or nomina.fecha_pago > registro.ultimo_pago):
+            registro.ultimo_pago = nomina.fecha_pago
 
-    categorias = await cfg.categorias_de_provision(db, empresa_id)
+    # Las categorías salen de `observados`, que ya las trae resueltas por concepto: llamar otra
+    # vez a `cfg.categorias_de_provision` leía `map_concepto_provision` **dos veces** por corrida
+    # (`observados_de_empresa` la lee por dentro). `observados` no filtra por fecha ni estatus, así
+    # que es un superconjunto de los conceptos del universo y la búsqueda nunca se queda corta.
+    categorias = {
+        (concepto.naturaleza, concepto.tipo, concepto.clave): concepto.categoria
+        for concepto in observados.conceptos
+        if concepto.clave is not None and concepto.categoria is not None
+    }
     pagos = await _pagos_por_categoria(db, ids, categorias)
     salarios = await _salarios_diarios(
         db,
@@ -813,50 +1025,96 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     dias_ejercicio = Decimal((fin_ejercicio - inicio_ejercicio).days + 1)
 
-    # `tabla_vacaciones` resuelta una vez por antigüedad **distinta** (regla 11): son un puñado
-    # de valores para toda la plantilla, no uno por empleado.
+    # `COBERTURA_INCOMPLETA_AL_CORTE`: el devengo corre hasta el corte con independencia de lo que
+    # se haya descargado, así que sin esto el informe publicaba una proyección anual sobre un
+    # histórico parcial y el libro no lo decía en ninguna parte (ver `MARGEN_COBERTURA_DIAS`).
+    pagos_observados = [r.ultimo_pago for r in empleados.values() if r.ultimo_pago is not None]
+    ultimo_observado = max(pagos_observados) if pagos_observados else None
+    if ultimo_observado is not None and (corte - ultimo_observado).days > MARGEN_COBERTURA_DIAS:
+        dias_sin_datos = (corte - ultimo_observado).days
+        banderas.append(
+            Bandera(
+                clave="COBERTURA_INCOMPLETA_AL_CORTE",
+                severidad="alta",
+                ambito="informe",
+                mensaje=(
+                    f"El último CFDI de nómina observado del ejercicio se pagó el {ultimo_observado} y el "
+                    f"devengo de este informe corre hasta el {corte}: hay {dias_sin_datos} días sin datos "
+                    "observados. Las cifras devengadas de ese tramo son una PROYECCIÓN sobre el salario y la "
+                    "antigüedad conocidos, no un devengo observado, y lo pagado de ese tramo no se pudo "
+                    "restar porque todavía no está descargado. No es un error de cálculo —el devengo legal "
+                    "del art. 87 LFT corre igual—, pero no uses esta cifra para un cierre sin descargar el "
+                    "ejercicio completo o sin mover la fecha de corte al último periodo timbrado."
+                ),
+            )
+        )
+
     antiguedades: set[int] = set()
     for registro in empleados.values():
         if registro.fecha_inicio is not None:
             antiguedades.add(max(_anios_cumplidos(registro.fecha_inicio, corte), 0))
-    dias_vacaciones: dict[int, int | None] = {}
-    for antiguedad in sorted(antiguedades):
-        # Con menos de un año cumplido el resolutor devuelve `None` a propósito: el art. 77 LFT
-        # da un derecho **proporcional** que no sale de la tabla del art. 76. La base de ese
-        # prorrateo es el renglón del primer año, que es el que ese artículo prorratea — se lee
-        # de la tabla, no se escribe aquí (§2.12).
-        dias_vacaciones[antiguedad] = await cfg.dias_de_vacaciones(db, max(antiguedad, 1))
+    vacaciones = await _vacaciones_por_antiguedad(db, antiguedades)
+    dias_vacaciones = vacaciones.dias_por_antiguedad
 
-    if any(valor is None for valor in dias_vacaciones.values()):
+    sin_resolver = sorted(a for a, dias in dias_vacaciones.items() if dias is None)
+    if sin_resolver:
+        # Dos huecos distintos con dos arreglos distintos, y la primera versión afirmaba el
+        # primero también cuando era el segundo: decirle a alguien que su tabla está vacía cuando
+        # tiene 14 renglones lo manda a revisar donde no está el problema.
+        if vacaciones.renglones == 0:
+            causa = (
+                "No hay ningún renglón en `tabla_vacaciones` (art. 76 LFT). Cárgala con la semilla "
+                "`config/fiscal/tabla_vacaciones.yaml`."
+            )
+        else:
+            causa = (
+                f"`tabla_vacaciones` tiene {vacaciones.renglones} renglón(es) pero ninguno aplicable a "
+                f"{_enumerar([str(a) for a in sin_resolver])} año(s) de antigüedad: el renglón más bajo "
+                f"capturado es el de {vacaciones.minimo_capturado} año(s) y el art. 76 LFT arranca en 1. "
+                "Falta ese renglón en la tabla, no la tabla entera."
+            )
         banderas.append(
             Bandera(
                 clave="FALTA_TABLA_VACACIONES",
                 severidad="alta",
                 ambito="informe",
                 mensaje=(
-                    "No hay renglones en `tabla_vacaciones` (art. 76 LFT), así que no se pudo determinar a "
-                    "cuántos días de vacaciones tiene derecho la plantilla: las columnas de vacaciones y de "
-                    "prima vacacional salieron vacías y la provisión total con ellas. Cárgala con la semilla "
-                    "`config/fiscal/tabla_vacaciones.yaml`."
+                    f"{causa} Sin días de vacaciones no se pudo calcular a cuánto tiene derecho la "
+                    "plantilla afectada: sus columnas de vacaciones y de prima vacacional salieron vacías, "
+                    "y la provisión total con ellas."
                 ),
             )
         )
 
     recuentos: dict[str, _Recuento] = {}
 
-    def _anotar(causa: str, rfc: str) -> None:
-        recuentos.setdefault(causa, _Recuento()).sumar(rfc)
+    def _anotar(causa: str, rfc: str, periodos: int = 0) -> None:
+        recuentos.setdefault(causa, _Recuento()).sumar(rfc, periodos)
 
     filas: list[list[Any]] = []
+    no_calculables = 0
     for rfc in sorted(empleados):
         registro = empleados[rfc]
-        salario = salarios.get(rfc, _SalarioDiario(None, FUENTE_AUSENTE))
+        salario = salarios.por_rfc.get(rfc, _SalarioDiario(None, FUENTE_AUSENTE))
         pagado = pagos.por_rfc.get(rfc, _Pagado())
 
         if salario.fuente == FUENTE_SDI:
             _anotar("SALARIO_DE_ULTIMO_RECURSO", rfc)
         elif salario.valor is None:
             _anotar("SIN_SALARIO_DIARIO_BASE", rfc)
+        if salarios.sin_sueldo.get(rfc):
+            _anotar("PERIODO_SIN_SUELDO_EN_EL_PROMEDIO", rfc, salarios.sin_sueldo[rfc])
+        if salarios.sin_dias.get(rfc):
+            _anotar("PERIODO_SIN_DIAS_EN_EL_PROMEDIO", rfc, salarios.sin_dias[rfc])
+        # La lista corta de la nota sobre bajas: dejó de recibir recibos mucho antes que el resto.
+        # Con un solo empleado en el informe nunca dispara, y así debe ser: no hay "el resto" con
+        # quien comparar, y el hueco global ya lo cubre `COBERTURA_INCOMPLETA_AL_CORTE`.
+        if (
+            ultimo_observado is not None
+            and registro.ultimo_pago is not None
+            and (ultimo_observado - registro.ultimo_pago).days > MARGEN_COBERTURA_DIAS
+        ):
+            _anotar("POSIBLE_BAJA_EN_EL_EJERCICIO", rfc)
 
         anios: int | None = None
         proporcion: Decimal | None = None
@@ -898,6 +1156,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         provision_total: Decimal | None = None
         if agu_provision is not None and vac_provision is not None and prima_provision is not None:
             provision_total = agu_provision + vac_provision + prima_provision
+        else:
+            no_calculables += 1
 
         filas.append(
             [
@@ -907,6 +1167,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 registro.nombre,
                 registro.num_empleado,
                 registro.fecha_inicio,
+                registro.ultimo_pago,
                 anios,
                 base,
                 salario.fuente,
@@ -926,4 +1187,17 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         )
 
     banderas.extend(_banderas_por_causa(recuentos))
-    return ResultadoInforme(columnas=columnas, filas=filas, banderas=banderas, notas=list(_NOTAS))
+
+    notas = list(_NOTAS)
+    if no_calculables:
+        # **Una celda vacía suma cero al totalizar en Excel**, así que una fila sin provisión se ve
+        # igual que una fila en cero para quien arrastra la columna. Dejarlas vacías es lo correcto
+        # —un cero afirmaría que no se le debe nada a esa persona— pero entonces el libro tiene que
+        # decir cuántas son, o la decisión correcta produce un total corto con apariencia completa.
+        notas.append(
+            f"ATENCIÓN AL TOTALIZAR: {no_calculables} de las {len(filas)} filas tienen «Provisión total» "
+            "vacía porque faltó un insumo (la hoja Banderas dice cuál para cada causa). Una celda vacía "
+            "suma CERO en Excel, así que el total de esa columna EXCLUYE a esos empleados y el pasivo real "
+            "es mayor que la suma que devuelve la hoja de cálculo."
+        )
+    return ResultadoInforme(columnas=columnas, filas=filas, banderas=banderas, notas=notas)
