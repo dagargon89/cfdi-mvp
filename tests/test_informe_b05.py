@@ -361,6 +361,98 @@ async def test_marcas_sin_confirmar_degradan_igual_y_la_bandera_dice_que_hay_pro
     assert "FALTA_MARCA" not in [b.clave for b in resultado.banderas]
 
 
+async def test_un_tipo_con_gravado_cero_no_bloquea_la_columna(db: AsyncSession, tmp_path: Path) -> None:
+    """**La configuración real de este cliente hoy**, y el defecto que encontró la auditoría de la
+    ronda 2: la puerta todo-o-nada exigía marca confirmada para tipos que **no pueden mover la
+    suma ni un centavo**.
+
+    De las 44 marcas solo dos le aplican a esta empresa: `001` Sueldos (108,757.80 de gravado, sin
+    duda declarada, confirmable de inmediato) y `005` Fondo de Ahorro (0.00 de gravado, todo
+    exento, **con** duda declarada sobre si integra el SBC, así que se queda en la cola hasta que
+    alguien haga esa revisión fiscal). O sea: la única marca que va a quedar sin confirmar es
+    justamente la que tiene gravado cero, y la columna 11 —la base del cálculo anual del ISR del
+    art. 97 y de la constancia de percepciones— salía vacía **para toda la plantilla** por ella.
+
+    Es el cuarto caso del mismo patrón en esta fase: condicionar algo a que un valor esté
+    confirmado sin preguntarse si ese algo *usa* el valor (ver la regla general en el docstring de
+    `b03_gravado_exento`). `Σ importe_gravado` de un tipo cuyo gravado es cero es cero, valga lo
+    que valga su `es_ingreso_ordinario`.
+    """
+    eid = await _empresa(db)
+    # `001` confirmado; `005` cargado después y **sin** confirmar (el orden importa: el helper
+    # confirma todo lo que hay en la tabla en el momento de la llamada).
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await _sembrar_marcas(db, tmp_path, [("005", True)], confirmadas=False)
+    await insertar_nomina(db, empresa_id=eid, uuid="c4000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("005", "005", "Fondo de ahorro", "0.00", "1200.00")],
+                          total_percepciones="9200.00", total="9200.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    # La columna calcula: el único tipo que aporta gravado tiene su marca confirmada.
+    assert _fila(resultado, "Gravado ordinario") == Decimal("8000.00")
+    assert _fila(resultado, "Total gravado") == Decimal("8000.00")
+    assert _fila(resultado, "Total exento") == Decimal("1200.00")
+    # Y no se avisa de nada: no hay ningún hueco que impida calcular.
+    assert not [b for b in resultado.banderas if b.clave in ("FALTA_MARCA", "MARCA_SIN_CONFIRMAR")], [
+        b.mensaje for b in resultado.banderas
+    ]
+
+
+async def test_el_mismo_tipo_con_gravado_distinto_de_cero_si_bloquea_la_columna(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """**La gemela exacta de la anterior:** mismo fixture, mismas marcas, mismo estado de
+    confirmación. Lo único que cambia es que el `005` sin confirmar ahora **sí** trae gravado, y
+    entonces la columna se vacía.
+
+    Esa es la pareja que prueba que el acotamiento es por "no puede mover la suma" y no un
+    "ignora los tipos sin confirmar". Sin ella, quitar la puerta todo-o-nada del todo pasaría la
+    prueba de arriba igual de verde — y una base de ISR corta con apariencia de completa es
+    exactamente el error que la puerta existe para evitar.
+    """
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await _sembrar_marcas(db, tmp_path, [("005", True)], confirmadas=False)
+    await insertar_nomina(db, empresa_id=eid, uuid="c5000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("005", "005", "Fondo de ahorro", "1200.00", "0.00")],
+                          total_percepciones="9200.00", total="9200.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") is None
+    sin_confirmar = [b for b in resultado.banderas if b.clave == "MARCA_SIN_CONFIRMAR"]
+    assert len(sin_confirmar) == 1, [b.clave for b in resultado.banderas]
+    assert "005" in sin_confirmar[0].mensaje
+
+
+async def test_un_tipo_con_gravado_cero_en_un_cfdi_y_no_en_otro_si_cuenta(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """El borde entre las dos anteriores: el acotamiento mira el **agregado del ejercicio**, no
+    cada comprobante por separado.
+
+    El `005` va con gravado 0.00 en junio y 1200 en julio. Si el filtro se aplicara por
+    comprobante, la fila de junio calcularía con un tipo sin clasificar y la base saldría corta
+    justo en el caso que la puerta protege. Un tipo que aporta gravado **en algún** periodo del
+    ejercicio necesita su marca confirmada."""
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await _sembrar_marcas(db, tmp_path, [("005", True)], confirmadas=False)
+    for sufijo, fecha, gravado_005 in (("1", date(2026, 6, 30), "0.00"), ("2", date(2026, 7, 15), "1200.00")):
+        await insertar_nomina(db, empresa_id=eid, uuid=f"c600000{sufijo}-0000-0000-0000-00000000000{sufijo}",
+                              fecha_pago=fecha, fecha_final_pago=fecha,
+                              percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                            ("005", "005", "Fondo de ahorro", gravado_005, "0.00")],
+                              total_percepciones="9200.00", total="9200.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    assert _fila(resultado, "Gravado ordinario") is None
+    assert [b.clave for b in resultado.banderas if b.clave == "MARCA_SIN_CONFIRMAR"] == ["MARCA_SIN_CONFIRMAR"]
+
+
 async def test_un_solo_tipo_sin_marca_deja_la_columna_vacia_en_vez_de_sumar_lo_conocido(
     db: AsyncSession, tmp_path: Path
 ) -> None:

@@ -123,20 +123,37 @@ viaja a la constancia de percepciones y de ahí a la declaración del trabajador
 que consume el mismo catálogo por `marcas_de_percepcion` (solo confirmadas).
 
 **Cómo degrada, y por qué nunca sale cero.** La columna vale `None` en **todas** las filas
-mientras no haya marca confirmada para **todos** los tipos de percepción presentes en el
-acumulado, con **una** bandera por causa y ámbito `informe` (no una por fila: es la lección del
-colapso de banderas de la fase 2):
+mientras no haya marca confirmada para todos los tipos de percepción que **aportan importe
+gravado** en el ejercicio, con **una** bandera por causa y ámbito `informe` (no una por fila: es
+la lección del colapso de banderas de la fase 2):
 
-- **Confirmado para todos los tipos** → calcula.
+- **Confirmado para todos los tipos que aportan gravado** → calcula.
 - **Propuesto sin confirmar** → `MARCA_SIN_CONFIRMAR`, citando los tipos y lo que dice cada
   propuesta: el arreglo es un clic.
 - **Ausente** → `FALTA_MARCA`, diciendo qué capturar.
 
 Un cero ahí diría "este empleado no tuvo ingreso ordinario", que es una afirmación fiscal falsa
-sobre alguien que cobró todo el año. Y se exige el catálogo **completo** para los tipos presentes
-—no se suma "lo que se pueda"— porque una suma parcial no se distingue de una completa al mirar
-la celda: sería una base de ISR corta con apariencia de correcta, el error espejo del que R4
-existe para evitar.
+sobre alguien que cobró todo el año. Y se exige el catálogo **completo** para esos tipos —no se
+suma "lo que se pueda"— porque una suma parcial no se distingue de una completa al mirar la
+celda: sería una base de ISR corta con apariencia de correcta, el error espejo del que R4 existe
+para evitar.
+
+**Y la puerta solo cubre los tipos que pueden mover la suma** (corrección de la ronda 2, y era un
+defecto vivo contra los datos reales de este cliente). `Σ importe_gravado` de un tipo cuyo gravado
+es cero es cero, valga lo que valga su `es_ingreso_ordinario`, así que exigir su marca condiciona
+el cálculo a un valor que el cálculo **no usa**. Es la regla general que el docstring de
+`b03_gravado_exento` dejó escrita después de tres defectos del mismo tipo —*antes de condicionar
+algo a que un valor esté confirmado, pregúntate si ese algo usa el valor*—, y este fue el cuarto.
+
+El caso concreto no era hipotético: de las 44 marcas solo dos le aplican a esta empresa, `001`
+Sueldos (todo el gravado, sin duda declarada, confirmable ya) y `005` Fondo de Ahorro (gravado
+0.00, todo exento, **con** duda declarada sobre si integra el SBC y por tanto en la cola hasta que
+alguien haga esa revisión fiscal). La única marca destinada a quedarse sin confirmar era
+justamente la que no puede cambiar el resultado, y vaciaba la base del cálculo anual del ISR para
+toda la plantilla. El acotamiento **es exacto, no una heurística**: los importes del CFDI son no
+negativos, así que un agregado de cero significa que todos los renglones son cero. Se mide sobre
+el **ejercicio completo**, no por comprobante: un tipo que aporta gravado en julio necesita su
+marca aunque en junio venga en cero.
 
 **Las dos claves son las de B-03, no unas propias.** La primera versión de esta tarea emitía
 `MARCAS_SIN_CONFIRMAR`/`FALTA_CATALOGO_DE_MARCAS` (en plural), que describen mejor la degradación
@@ -508,11 +525,33 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
     de una vez, y las propuestas solo cuando hace falta explicar un hueco.
 
     **Solo marcas confirmadas** (`marcas_de_percepcion`), y **todas o ninguna** para los tipos
-    presentes: ver el bloque de B-05.R4 en el docstring del módulo para las dos decisiones y su
-    argumento. Un tipo sin clasificar no se puede "dejar fuera": si es ordinario y se omite, la
-    base del ISR anual sale corta con apariencia de completa.
+    que aportan gravado: ver el bloque de B-05.R4 en el docstring del módulo para las tres
+    decisiones y su argumento. Un tipo sin clasificar **que aporta gravado** no se puede "dejar
+    fuera": si es ordinario y se omite, la base del ISR anual sale corta con apariencia de
+    completa.
     """
-    tipos_presentes = {tipo for por_tipo in gravado_por_tipo.values() for tipo in por_tipo}
+    # **Solo los tipos que pueden mover la suma**, y no todos los que aparecen en el `GROUP BY`.
+    # `Σ importe_gravado` de un tipo cuyo gravado es cero es cero, valga lo que valga su
+    # `es_ingreso_ordinario`: exigir su marca condicionaría el cálculo a un valor que el cálculo
+    # no usa. Es la regla general que el docstring de `b03_gravado_exento` dejó escrita tras tres
+    # defectos del mismo tipo, y esta fue el cuarto.
+    #
+    # **Es exacto, no una heurística.** Los importes del CFDI son no negativos (`t_Importe` del
+    # esquema del SAT), así que un agregado de cero significa que **todos** los renglones de ese
+    # tipo son cero. Aquí se comprueba directamente esa forma —que ningún renglón agregado por
+    # comprobante sea distinto de cero— para no depender del supuesto: si un negativo se colara
+    # por un ETL roto, el tipo seguiría exigiendo su marca en vez de desaparecer por
+    # compensación.
+    #
+    # El criterio es del **ejercicio completo**, no de cada comprobante: un tipo que aporta
+    # gravado en julio necesita su marca confirmada aunque en junio venga en cero, o la fila de
+    # junio calcularía con un tipo sin clasificar.
+    tipos_presentes = {
+        tipo
+        for por_tipo in gravado_por_tipo.values()
+        for tipo, gravado in por_tipo.items()
+        if gravado != _CERO
+    }
     marcas = await cfg.marcas_de_percepcion(db)
     faltantes = sorted(tipos_presentes - set(marcas))
 
@@ -533,8 +572,10 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
                     ambito="informe",
                     mensaje=(
                         "La columna «Gravado ordinario» salió vacía en todas las filas: hay marcas capturadas "
-                        f"para {len(sin_confirmar)} de los tipos de percepción del ejercicio pero nadie las ha "
-                        f"confirmado, y un valor sin confirmar no calcula. La propuesta dice: {detalle}. "
+                        f"para {len(sin_confirmar)} de los tipos de percepción **con importe gravado** en el "
+                        f"ejercicio pero nadie las ha confirmado, y un valor sin confirmar no calcula. Los tipos "
+                        f"que solo traen importe exento no hacen falta: no pueden mover esta suma. La propuesta "
+                        f"dice: {detalle}. "
                         "Revísalas y confírmalas en Configuración › Fiscal › Marcas de percepción; es un clic."
                     ),
                 )
@@ -548,6 +589,7 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
                     mensaje=(
                         "La columna «Gravado ordinario» salió vacía en todas las filas: no hay marca de "
                         f"`es_ingreso_ordinario` capturada para el/los tipo(s) de percepción {', '.join(ausentes)}, "
+                        "que sí aportan importe gravado en el ejercicio (los que solo traen exento no hacen falta), "
                         "así que no se puede distinguir el ingreso que acumula al cálculo anual del ISR (art. 97 "
                         "LISR) del que tiene régimen propio (separación, art. 95; jubilación, art. 96). No se suma "
                         "solo lo conocido a propósito: daría una base anual corta con apariencia de completa. "
