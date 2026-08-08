@@ -18,6 +18,22 @@ excluye del acumulado cualquier comprobante cuyo propio UUID caiga en ese conjun
 importar su estatus. Si el sustituido no está en la base (nunca se descargó, o quedó fuera
 del ejercicio), no hay nada que excluir y el acumulado ya es correcto.
 
+**El mecanismo vive en `universo_nomina.uuids_sustituidos`, no aquí.** Nació en este módulo como
+`_sustituidos`, y B-03 —que hace el mismo acumulado anual por `(rfc, tipo, ejercicio)`— resultó no
+tenerlo: contaba dos veces un aguinaldo corregido por sustitución y emitía una `EXENCION_EXCEDIDA`
+de severidad alta acusando al patrón de un exceso inexistente. Cualquier informe que sume importes
+de varios CFDI del mismo empleado tiene el mismo problema, así que la resolución es de
+`universo_nomina` y este módulo la consume. La clave de la bandera también es compartida
+(`universo_nomina.CLAVE_CFDI_SUSTITUIDO`): es la columna por la que se filtra la hoja `Banderas`,
+y dos ortografías la volverían inútil. El **mensaje** sí lo redacta cada informe, porque la
+consecuencia de excluir no es la misma: aquí es un ingreso anual duplicado que viaja a la
+constancia de percepciones.
+
+**El alcance que se le pasa tiene que ser el de la suma que protege**, y aquí lo es: se le dan los
+ids del **ejercicio completo** (`ids_universo`, antes de filtrar sustituidos y cancelados), que es
+exactamente el alcance sobre el que acumula este informe. Pasarle solo un subconjunto dejaría una
+sustitución de enero duplicando el acumulado sin ninguna fila que lo delate.
+
 Esta exclusión se aplica **siempre**, independientemente de `incluir_cancelados`. La razón es
 que la regla protege exactamente el caso en el que el estatus por sí solo NO basta: un
 sustituido cuyo `estatus` local todavía no se ha re-verificado contra el SAT (sigue
@@ -198,7 +214,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.informes import universo_nomina
 from app.informes.base import Bandera, Columna, ResultadoInforme
 from app.informes.identidades_b00 import CLAVE_TIPO_DEDUCCION_ISR
-from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
+from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.empresa import Empresa
 from app.models.enums import EstatusCfdi
@@ -240,11 +256,6 @@ _CLAVE_OTRO_PAGO_SUBSIDIO = "002"
 """Clave del catálogo `c_TipoOtroPago` de "Subsidio para el empleo efectivamente entregado al
 trabajador" (columnas 15–16). Mismo valor que `b01_catalogo_sat._CLAVE_OTRO_PAGO_SUBSIDIO`,
 declarado aparte a propósito: es una clave de catálogo, no lógica compartida entre módulos."""
-
-_TIPO_RELACION_SUSTITUCION = "04"
-"""`tipo_relacion` del nodo `CfdiRelacionado` que declara "Este CFDI sustituye a otro
-anterior" (catálogo `c_TipoRelacion` del SAT). Es la única señal de la que B-05.R1 depende."""
-
 
 class Parametros(BaseModel):
     ejercicio: int = Field(description="Año fiscal sobre `YEAR(nomina.fecha_pago)`. El grano del informe es (empleado, ejercicio).")
@@ -386,27 +397,6 @@ class _Acumulador:
     fecha_ultimo_pago: date | None = None
     fecha_inicio_rel_laboral: date | None = None
     rfc_emisores: set[str] = field(default_factory=set)
-
-
-async def _sustituidos(db: AsyncSession, ids_universo: list[int]) -> set[str]:
-    """B-05.R1: los `uuid_relacionado` que los comprobantes del universo declaran con
-    `tipo_relacion='04'` — el conjunto de UUID que deben excluirse del acumulado porque un
-    sustituto (dentro del mismo universo) ya los reemplazó.
-
-    Se consulta sobre `CfdiRelacionado.comprobante_id IN ids_universo`, es decir, la relación
-    la declara el **sustituto**; `uuid_relacionado` es el UUID del **sustituido**, que puede o
-    no tener su propia fila en `comprobantes` (si nunca se descargó, no hay nada que excluir y
-    el acumulado ya es correcto — no es un error, es la ausencia de dato que se documenta en
-    el módulo)."""
-    if not ids_universo:
-        return set()
-    filas = await db.execute(
-        select(CfdiRelacionado.uuid_relacionado).where(
-            CfdiRelacionado.comprobante_id.in_(ids_universo),
-            CfdiRelacionado.tipo_relacion == _TIPO_RELACION_SUSTITUCION,
-        )
-    )
-    return {str(uuid_relacionado) for uuid_relacionado in filas.scalars().all()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -660,7 +650,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # B-05.R1: se resuelve ANTES de acumular nada, y se aplica siempre — no depende de
     # `incluir_cancelados` (ver docstring del módulo: protege justo el caso en el que el
     # estatus del sustituido todavía no refleja la cancelación).
-    sustituidos = await _sustituidos(db, ids_universo)
+    sustituidos = await universo_nomina.uuids_sustituidos(db, ids_universo)
 
     banderas: list[Bandera] = list(banderas_fuera)
     filas_resueltas: list[Any] = []
@@ -669,7 +659,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         if comprobante.uuid in sustituidos:
             banderas.append(
                 Bandera(
-                    clave="CFDI_SUSTITUIDO",
+                    clave=universo_nomina.CLAVE_CFDI_SUSTITUIDO,
                     severidad="baja",
                     ambito=f"uuid:{comprobante.uuid}",
                     mensaje=(

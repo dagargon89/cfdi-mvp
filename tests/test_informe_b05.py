@@ -125,6 +125,40 @@ async def test_sustituido_no_verificado_cuenta_una_vez(db: AsyncSession) -> None
     assert _fila(resultado, "Núm. de CFDI") == 1
 
 
+async def test_el_cfdi_sustituido_se_reporta_con_la_clave_compartida(db: AsyncSession) -> None:
+    """La bandera de exclusión por sustitución usa `universo_nomina.CLAVE_CFDI_SUSTITUIDO`, no un
+    literal propio.
+
+    **Ninguna prueba de B-05 miraba esa clave** —solo las de B-03—, así que la línea que la emite
+    se podía cambiar sin que la suite se enterara, y con ella la trazabilidad de las exclusiones:
+    la clave es la columna por la que se filtra la hoja `Banderas`, y dos ortografías entre
+    informes la vuelven inútil. Se asevera contra la **constante** a propósito: eso fija que este
+    informe la consume en vez de escribirla a mano. Que la constante valga `"CFDI_SUSTITUIDO"` lo
+    fijan las pruebas de B-03, que sí aseveran el texto.
+    """
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="3a000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          estatus=EstatusCfdi.NO_VERIFICADO,
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00")],
+                          total_percepciones="8000.00", total="8000.00")
+    cid_bueno = await insertar_nomina(db, empresa_id=eid, uuid="3a000002-0000-0000-0000-000000000002",
+                                      fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                                      percepciones=[("001", "001", "Sueldo", "8500.00", "0.00")],
+                                      total_percepciones="8500.00", total="8500.00")
+    db.add(CfdiRelacionado(comprobante_id=cid_bueno, tipo_relacion="04",
+                           uuid_relacionado="3a000001-0000-0000-0000-000000000001"))
+    await db.commit()
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+    avisos = [b for b in resultado.banderas if b.clave == universo_nomina.CLAVE_CFDI_SUSTITUIDO]
+    assert len(avisos) == 1, [b.clave for b in resultado.banderas]
+    # Ámbito por UUID del **sustituido** (el excluido), no del sustituto: es el que hay que poder
+    # localizar. Y severidad baja: no es un defecto del patrón, es una sustitución bien hecha.
+    assert avisos[0].ambito == "uuid:3a000001-0000-0000-0000-000000000001"
+    assert avisos[0].severidad == "baja"
+
+
 async def test_cancelado_sustituido_cuenta_una_vez(db: AsyncSession) -> None:
     """La segunda defensa, para no perder cobertura: un sustituido que sí llegó a marcarse
     `CANCELADO` también debe contar una vez. Aquí ambos filtros del módulo lo excluirían
