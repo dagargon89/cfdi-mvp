@@ -99,6 +99,23 @@ def test_hoja_banderas_y_diccionario() -> None:
     assert fila[6] == "Sueldos"  # descripciones alternas, unidas por '; '
 
 
+def test_el_importe_del_diccionario_lleva_formato_de_importe() -> None:
+    """**Hallazgo de la ronda 2 al auditar los nueve libros reales.** «Importe del periodo» es la
+    única celda numérica del libro fuera de `Datos` que lleva un importe, y salía sin
+    `number_format`: el valor iba cuantizado a dos decimales pero la celda lo mostraba en `General`
+    —`108757.8` en vez de `108,757.80`—, así que la misma cifra se veía distinta en `Datos` y en
+    `Diccionario` del mismo libro."""
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(_resultado_demo(), _contexto())))
+    celda = wb["Diccionario"]["I2"]
+
+    assert wb["Diccionario"]["I1"].value == "Importe del periodo"
+    assert celda.number_format == "#,##0.00"
+    assert Decimal(str(celda.value)) == Decimal("70077.6")
+    # `Núm. comprobantes` sí se queda en `General` a propósito: es un `int` y se muestra exacto,
+    # así que no hay divergencia entre lo guardado y lo mostrado que arreglar.
+    assert wb["Diccionario"]["H2"].value == 8
+
+
 def test_informe_vacio_produce_libro_con_aviso_no_una_excepcion() -> None:
     """spec §9: sin filas no es un error."""
     vacio = ResultadoInforme(columnas=[Columna(titulo="UUID", tipo="texto")], filas=[], aviso="Sin comprobantes en el rango solicitado.")
@@ -157,9 +174,119 @@ def test_columna_sensible_se_enmascara_cuando_la_clave_no_viene_en_los_parametro
     assert wb["Datos"][2][0].value == "****XX01"
 
 
-def test_columna_decimal_no_se_redondea_a_dos_decimales() -> None:
-    """Solo `monto` se redondea a 2 decimales (R-T4); `decimal` conserva su precisión."""
+def test_columna_decimal_se_redondea_a_tres_decimales_no_a_dos() -> None:
+    """Una columna `decimal` **no** es un `monto`: se redondea a los 3 decimales que su formato
+    muestra, no a los 2 de un importe. Esa distinción es la que protegía la versión anterior de
+    esta prueba y sigue en pie.
+
+    **Lo que cambió, y por qué la prueba anterior estaba equivocada** (ronda de corrección 2 de la
+    tarea 10): aquella afirmaba que un `decimal` "conserva su precisión", es decir que la celda se
+    quedaba con `12.345678` mientras su formato mostraba `12.346`. Eso no era el cumplimiento de
+    R-T4 sino su incumplimiento: la regla dice que el redondeo ocurre una sola vez **en este
+    módulo**, no que este módulo no redondee, y un valor guardado distinto del mostrado es
+    precisamente la discrepancia que aparece al exportar a CSV o al sumar la columna en otra
+    herramienta. La prueba fue la única de los nueve informes que falló al derivar la escala del
+    formato, y su fallo fue el hallazgo, no un ajuste."""
     resultado = ResultadoInforme(columnas=[Columna(titulo="Tasa", tipo="decimal")], filas=[[Decimal("12.345678")]])
     wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
-    valor = wb["Datos"][2][0].value
-    assert round(float(valor), 6) == 12.345678
+    celda = wb["Datos"][2][0]
+    assert Decimal(str(celda.value)) == Decimal("12.346")
+    assert Decimal(str(celda.value)) != Decimal("12.35"), "un `decimal` no se redondea como un importe"
+    assert celda.number_format == "#,##0.000"
+
+
+def _decimales_declarados(formato: str) -> int:
+    """Cuántos decimales muestra un formato de Excel, contados **desde el formato de la celda
+    leída del archivo**, no desde una constante del código: si el motor y su prueba leyeran la
+    misma constante, la prueba no comprobaría que el formato y el valor concuerdan."""
+    _entero, _punto, decimales = formato.partition(".")
+    return len(decimales)
+
+
+def _sin_precision_oculta(hoja: object) -> list[str]:
+    """Las celdas numéricas cuyo valor **guardado** lleva más decimales de los que su formato
+    **muestra**. Una lista vacía es el invariante que este módulo tiene que cumplir."""
+    problemas: list[str] = []
+    for fila in hoja.iter_rows(min_row=2):  # type: ignore[attr-defined]
+        for celda in fila:
+            if celda.value is None or isinstance(celda.value, (str, bool)):
+                continue
+            if not isinstance(celda.value, (int, float, Decimal)):
+                continue  # fechas y horas
+            guardado = Decimal(str(celda.value))
+            declarados = _decimales_declarados(celda.number_format)
+            if -guardado.as_tuple().exponent > declarados:  # type: ignore[operator]
+                problemas.append(f"{celda.coordinate}: guarda {guardado} y muestra {declarados} decimales")
+    return problemas
+
+
+def test_lo_guardado_en_la_celda_coincide_con_lo_que_el_formato_muestra() -> None:
+    """**El invariante del redondeo, comprobado sobre el resultado y no sobre el mecanismo.**
+
+    Se recorre el libro **ya escrito** y se compara, celda por celda, el valor guardado contra los
+    decimales que declara su propio `number_format`. No se compara contra `_ESCALA_POR_TIPO` a
+    propósito: mirar la misma constante que usa el motor probaría que el motor se llama a sí mismo,
+    no que lo guardado y lo mostrado concuerdan. Es la misma lección que la fuga de datos
+    personales de B-10, donde probar el mecanismo dejó pasar el resultado.
+
+    Los valores de entrada son divisiones no terminantes, que es de donde salen en la realidad
+    (`importe / dias`, `parte * 100 / total`)."""
+    tercios = Decimal(1) / Decimal(3)
+    resultado = ResultadoInforme(
+        columnas=[
+            Columna(titulo="Importe", tipo="monto"),
+            Columna(titulo="Días", tipo="decimal"),
+            Columna(titulo="% del total", tipo="decimal"),
+            Columna(titulo="Núm. de CFDI", tipo="entero"),
+            Columna(titulo="Fecha", tipo="fecha"),
+            Columna(titulo="Texto", tipo="texto"),
+        ],
+        filas=[
+            [Decimal("8759.7") * tercios, Decimal("15") * tercios, Decimal(100) * tercios, 8, datetime(2026, 6, 30).date(), "x"],
+            [Decimal("12.885"), Decimal("12.8885"), Decimal("0.0005"), 0, datetime(2026, 7, 15).date(), "y"],
+        ],
+    )
+
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
+    assert _sin_precision_oculta(wb["Datos"]) == []
+    # Y el diccionario, que también escribe un importe por esta misma vía.
+    assert _sin_precision_oculta(wb["Diccionario"]) == []
+
+    fila = [c.value for c in wb["Datos"][2]]
+    assert Decimal(str(fila[0])) == Decimal("2919.90")
+    assert Decimal(str(fila[1])) == Decimal("5.000")
+    assert Decimal(str(fila[2])) == Decimal("33.333")
+    assert fila[3] == 8
+    # Las columnas no numéricas siguen intactas: no se cuantiza lo que no es un número.
+    assert fila[4] == datetime(2026, 6, 30)
+    assert fila[5] == "x"
+
+
+def test_el_redondeo_es_medio_arriba_en_los_tres_tipos_numericos() -> None:
+    """`ROUND_HALF_UP` en todos, no solo en `monto`: el default de Python es `ROUND_HALF_EVEN`,
+    que con `12.885` daría `12.88` en vez de `12.89`. Cada valor está justo en el medio del
+    dígito que se pierde, que es el único sitio donde los dos modos difieren."""
+    resultado = ResultadoInforme(
+        columnas=[
+            Columna(titulo="Importe", tipo="monto"),
+            Columna(titulo="Días", tipo="decimal"),
+            Columna(titulo="Conteo", tipo="entero"),
+        ],
+        filas=[[Decimal("12.885"), Decimal("12.8885"), Decimal("12.5")]],
+    )
+
+    wb = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
+    fila = [Decimal(str(c.value)) for c in wb["Datos"][2]]
+    assert fila == [Decimal("12.89"), Decimal("12.889"), Decimal("13")]
+
+
+def test_la_escala_de_redondeo_se_deriva_del_formato_de_presentacion() -> None:
+    """La escala no se escribe dos veces: sale de `_FORMATO`. Si alguien cambia el formato de un
+    tipo para mostrar más decimales, la celda guarda más decimales **sola**, y no hay forma de
+    que los dos números se separen."""
+    for tipo, escala in excel._ESCALA_POR_TIPO.items():
+        declarados = _decimales_declarados(excel._FORMATO[tipo])
+        assert -escala.as_tuple().exponent == declarados, f"{tipo}: escala {escala} contra formato declarado"  # type: ignore[operator]
+    assert excel._ESCALA_POR_TIPO == {"monto": Decimal("0.01"), "decimal": Decimal("0.001"), "entero": Decimal("1")}
+    # Y las columnas no numéricas no tienen escala: nada que cuantizar.
+    assert set(excel._ESCALA_POR_TIPO) == {"monto", "decimal", "entero"}

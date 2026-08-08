@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -1122,6 +1122,53 @@ async def test_la_hoja_parametros_lleva_el_rotulo_de_estimacion(db: AsyncSession
     assert "artículo 78" in texto, "las vacaciones no arrastran ejercicios anteriores"
     assert "aguinaldo de 2025 pagado en enero de 2026" in texto, "lo pagado se identifica por fecha de pago"
     assert "Último CFDI del ejercicio" in texto, "la nota de bajas tiene que decir por dónde empezar"
+
+
+async def test_la_celda_de_dias_pendientes_no_guarda_precision_oculta(db: AsyncSession) -> None:
+    """**Menor 6 de la ronda 1, cerrado en la ronda 2.** «Días de vacaciones pendientes» sale de
+    una división no terminante (`dias_del_año × dias_trabajados / dias_ejercicio`), y hasta la
+    ronda 2 el motor solo cuantizaba el tipo `monto`: la celda guardaba `12.88767123287671`
+    mientras su formato mostraba tres decimales. Nadie ve la diferencia en Excel y cualquiera la ve
+    al exportar a CSV.
+
+    Se comprueba sobre el libro **escrito**, comparando el valor guardado contra los decimales que
+    declara el `number_format` de la propia celda — no contra una constante del motor, que probaría
+    que el motor se llama a sí mismo."""
+    eid = await _empresa(db)
+    await _vacaciones(db)
+    await _config(db, eid)
+    await _clasificar(db, eid, ("P", "001", "001", CategoriaProvision.NO_APLICA))
+    await _tres_quincenas(db, eid, pagos=(date(2026, 4, 30), date(2026, 5, 31), date(2026, 6, 30)))
+
+    # Corte a media año: 181 de 365 días, así que 22 × 181/365 no termina en decimal.
+    resultado = await b08.consultar(db, eid, b08.Parametros(ejercicio=_EJERCICIO, fecha_corte=date(2026, 6, 30)))
+    crudo = _valor(resultado, "Días de vacaciones pendientes (estimados)")
+    assert -crudo.as_tuple().exponent > 3, "el fixture debe producir una división no terminante"
+
+    ctx = ContextoInforme(
+        clave=b08.CLAVE,
+        nombre=b08.NOMBRE,
+        usuario="dgarcia@planjuarez.org",
+        generado_en=datetime(2026, 8, 7, 9, 0, 0),
+        parametros={"ejercicio": _EJERCICIO, "fecha_corte": "2026-06-30", "enmascarar_datos_personales": True},
+        etl_version=1,
+    )
+    hoja = load_workbook(io.BytesIO(excel.escribir_libro(resultado, ctx)))["Datos"]
+
+    problemas: list[str] = []
+    for fila in hoja.iter_rows(min_row=2):
+        for celda in fila:
+            if not isinstance(celda.value, (int, float, Decimal)) or isinstance(celda.value, bool):
+                continue
+            _e, _p, decimales = celda.number_format.partition(".")
+            if -Decimal(str(celda.value)).as_tuple().exponent > len(decimales):
+                problemas.append(f"{celda.coordinate} guarda {celda.value} y muestra {len(decimales)} decimales")
+    assert problemas == [], f"precisión oculta en el libro de B-08: {problemas}"
+
+    columna = _columna(resultado, "Días de vacaciones pendientes (estimados)") + 1
+    celda_dias = hoja.cell(row=2, column=columna)
+    assert Decimal(str(celda_dias.value)) == crudo.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+    assert celda_dias.number_format == "#,##0.000"
 
 
 async def test_las_filas_sin_provision_calculable_se_cuentan_en_parametros(db: AsyncSession) -> None:
