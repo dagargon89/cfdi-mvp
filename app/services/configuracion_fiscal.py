@@ -916,6 +916,7 @@ class MarcasQueSeConfirman:
     integra_sbc: bool
     es_provisionable: bool
     sujeto_a_tope_conjunto: bool
+    multiplicador_no_derivable: bool
 
     @classmethod
     def de_fila(cls, fila: CatalogoPercepcionMarca) -> MarcasQueSeConfirman:
@@ -926,6 +927,7 @@ class MarcasQueSeConfirman:
             integra_sbc=fila.integra_sbc,
             es_provisionable=fila.es_provisionable,
             sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
+            multiplicador_no_derivable=fila.multiplicador_no_derivable,
         )
 
 
@@ -973,6 +975,10 @@ def marcas_difieren(fila: CatalogoPercepcionMarca, marcas: MarcasQueSeConfirman)
         # Sin este renglón, confirmar una marca de previsión social con un cuerpo que no
         # menciona el tope pasaría y activaría una bandera que nadie miró.
         or fila.sujeto_a_tope_conjunto != marcas.sujeto_a_tope_conjunto
+        # Y esta **sí calcula**, así que entra sin discusión: apagarla en un tipo cuyo
+        # multiplicador el CFDI no trae hace que B-03 publique un tope calculado suponiendo un
+        # multiplicador de 1, que es un exceso del patrón inventado.
+        or fila.multiplicador_no_derivable != marcas.multiplicador_no_derivable
     )
 
 
@@ -1025,6 +1031,7 @@ def detalle_de_marcas(marcas: MarcasQueSeConfirman) -> dict[str, Any]:
         "integra_sbc": marcas.integra_sbc,
         "es_provisionable": marcas.es_provisionable,
         "sujeto_a_tope_conjunto": marcas.sujeto_a_tope_conjunto,
+        "multiplicador_no_derivable": marcas.multiplicador_no_derivable,
     }
 
 
@@ -1218,6 +1225,7 @@ class _FilaMarca:
     integra_sbc: bool
     es_provisionable: bool
     sujeto_a_tope_conjunto: bool
+    multiplicador_no_derivable: bool
     nota_revision: str | None
 
 
@@ -1499,6 +1507,18 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
             "el tope conjunto del art. 93 de la LISR limita una exención, y aquí no hay ninguna que "
             "limitar. O el tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
         )
+    # Opcional y por omisión falso: es el caso de 35 de los 44 tipos. Ver la columna en el modelo.
+    multiplicador_bruto = fila.get("multiplicador_no_derivable")
+    multiplicador = (
+        False if multiplicador_bruto is None else _booleano(multiplicador_bruto, "multiplicador_no_derivable", ctx)
+    )
+    if multiplicador and base is BaseExencion.NINGUNA:
+        raise ErrorDeConfiguracion(
+            f"{ctx}: `multiplicador_no_derivable: true` no tiene sentido con `base_exencion: NINGUNA` — "
+            "lo que la bandera dice es que al `factor_exencion` le falta el multiplicador que el CFDI "
+            "no trae, y aquí no hay factor ninguno. O el tipo sí tiene exención y falta capturarla, o "
+            "la bandera sobra."
+        )
     # La duda declarada del renglón, si la trae. Es opcional: 5 de los 44 tipos no tienen
     # ninguna. Va como campo y no como comentario porque los comentarios no se cargan, y la
     # pantalla de confirmación necesita enseñarla al lado del botón (ver el modelo).
@@ -1515,6 +1535,7 @@ def _leer_marca(fila: Mapping[str, object], ctx: str) -> _FilaMarca:
         integra_sbc=_booleano(_requerido(fila, "integra_sbc", ctx), "integra_sbc", ctx),
         es_provisionable=_booleano(_requerido(fila, "es_provisionable", ctx), "es_provisionable", ctx),
         sujeto_a_tope_conjunto=tope,
+        multiplicador_no_derivable=multiplicador,
         nota_revision=nota,
     )
 
@@ -1660,6 +1681,7 @@ async def cargar_desde_yaml_detallado(
                             integra_sbc=marca.integra_sbc,
                             es_provisionable=marca.es_provisionable,
                             sujeto_a_tope_conjunto=marca.sujeto_a_tope_conjunto,
+                            multiplicador_no_derivable=marca.multiplicador_no_derivable,
                             nota_revision=marca.nota_revision,
                         )
                     )
@@ -1674,6 +1696,7 @@ async def cargar_desde_yaml_detallado(
                         or destino.integra_sbc != marca.integra_sbc
                         or destino.es_provisionable != marca.es_provisionable
                         or destino.sujeto_a_tope_conjunto != marca.sujeto_a_tope_conjunto
+                        or destino.multiplicador_no_derivable != marca.multiplicador_no_derivable
                         # Una duda **nueva o distinta** también devuelve la marca a la cola, y
                         # de forma asimétrica: que la nota desaparezca no limpia nada. Ver
                         # `_duda_nueva` en `app/api/v1/configuracion.py` para el argumento
@@ -1691,6 +1714,7 @@ async def cargar_desde_yaml_detallado(
                     destino.integra_sbc = marca.integra_sbc
                     destino.es_provisionable = marca.es_provisionable
                     destino.sujeto_a_tope_conjunto = marca.sujeto_a_tope_conjunto
+                    destino.multiplicador_no_derivable = marca.multiplicador_no_derivable
                     destino.nota_revision = marca.nota_revision
                 resumen["catalogo_percepcion_marca"] += 1
 

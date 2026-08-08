@@ -135,7 +135,9 @@ def _param(
     )
 
 
-def _marca(tipo: str, *, nota: str | None = None, tope: bool = False) -> CatalogoPercepcionMarca:
+def _marca(
+    tipo: str, *, nota: str | None = None, tope: bool = False, sin_multiplicador: bool = False
+) -> CatalogoPercepcionMarca:
     return CatalogoPercepcionMarca(
         tipo_percepcion=tipo,
         es_ingreso_ordinario=False,
@@ -144,6 +146,7 @@ def _marca(tipo: str, *, nota: str | None = None, tope: bool = False) -> Catalog
         integra_sbc=False,
         es_provisionable=False,
         sujeto_a_tope_conjunto=tope,
+        multiplicador_no_derivable=sin_multiplicador,
         nota_revision=nota,
     )
 
@@ -1459,6 +1462,8 @@ async def test_las_seis_entran_en_la_huella_incluidas_las_dos_huerfanas(db: Asyn
         "integra_sbc",
         "es_provisionable",
         "sujeto_a_tope_conjunto",
+        # La séptima (tarea 7b), y es el caso fácil de la regla: esta **sí** calcula.
+        "multiplicador_no_derivable",
     ):
         distinta = replace(base, **{campo: not getattr(base, campo)})
         assert cfg.huella_de_marcas(base) != cfg.huella_de_marcas(distinta), (
@@ -1776,3 +1781,130 @@ async def test_la_colacion_de_las_dos_columnas_es_la_que_esta_asumida(db: AsyncS
         )
     ).scalar_one()
     assert pad == "PAD SPACE", "si dejara de ser PAD SPACE, el espacio final ya no colisionaría"
+
+# --------------------------------------------------------------------------------------
+# 16. `multiplicador_no_derivable` (tarea 7b)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("campo", ["multiplicador_no_derivable"])
+async def test_la_puerta_del_servicio_rechaza_si_cambio_el_multiplicador(
+    db: AsyncSession, campo: str
+) -> None:
+    """**Llamando a la puerta directamente**, no por el camino del comando, que es la lección de
+    la ronda anterior: la comparación de `--marcas` taparía `marcas_difieren` y la mutación que
+    la borra sobreviviría.
+
+    Este campo es el caso fácil de la regla de la ronda 3 —*entra en la comparación porque **sí**
+    calcula*—: apagarlo en uno de los nueve tipos hace que B-03 publique un tope calculado
+    suponiendo un multiplicador de 1, que es un exceso del patrón inventado.
+    """
+    await _admin(db)
+    fila = _marca("010", nota=None, sin_multiplicador=True)
+    db.add(fila)
+    await db.commit()
+
+    revisadas = replace(cfg.MarcasQueSeConfirman.de_fila(fila), **{campo: False})
+
+    with pytest.raises(cfg.MarcasCambiaron):
+        await cfg.confirmar_marca_percepcion(
+            db, tipo="010", marcas=revisadas, nota_revision_hash=None, actor=ACTOR
+        )
+
+    await db.rollback()
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+async def test_el_estado_muestra_el_multiplicador_entre_las_que_calculan(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Va en el grupo de "las que hoy calculan", no en las informativas: B-03 la lee. Y cuando
+    está puesta se explica, porque si no parece un campo más que se puede desmarcar."""
+    await _admin(db)
+    db.add(_marca("010", nota=None, sin_multiplicador=True))
+    await db.commit()
+
+    assert await _correr(db, "estado", "--percepciones") == 0
+
+    salida = capsys.readouterr().out
+    calculan, informativas = salida.split("Informativas", 1)
+    assert "multiplicador no derivable     sí" in calculan, (
+        "esta marca SÍ calcula: ponerla entre las informativas invitaría a cambiarla sin coste"
+    )
+    assert "multiplicador" not in informativas, (
+        "y no puede aparecer también en el bloque informativo: diría dos cosas contrarias"
+    )
+    assert "deja el tope vacío en vez de suponer que el multiplicador es 1" in salida
+
+
+async def test_la_semilla_carga_la_bandera_y_rechaza_lo_incoherente(db: AsyncSession, tmp_path: Path) -> None:
+    """El cargador la lee, y **la rechaza con `base_exencion: NINGUNA`**: lo que la bandera dice
+    es que al factor le falta un multiplicador, y sin exención no hay factor. Misma regla que
+    `sujeto_a_tope_conjunto` y por el mismo motivo — una bandera que no puede ser cierta es un
+    error de captura, no una opción."""
+    bueno = tmp_path / "bueno.yaml"
+    bueno.write_text(
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '022'\n"
+        "    es_ingreso_ordinario: false\n"
+        "    base_exencion: UMA_DIAS\n"
+        "    factor_exencion: '90'\n"
+        "    integra_sbc: false\n"
+        "    es_provisionable: false\n"
+        "    multiplicador_no_derivable: true\n",
+        encoding="utf-8",
+    )
+    await cfg.cargar_desde_yaml(db, bueno)
+    db.expire_all()
+    fila = await db.get(CatalogoPercepcionMarca, "022")
+    assert fila is not None and fila.multiplicador_no_derivable is True
+
+    malo = tmp_path / "malo.yaml"
+    malo.write_text(
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '001'\n"
+        "    es_ingreso_ordinario: true\n"
+        "    base_exencion: NINGUNA\n"
+        "    integra_sbc: true\n"
+        "    es_provisionable: false\n"
+        "    multiplicador_no_derivable: true\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(cfg.ErrorDeConfiguracion, match="multiplicador_no_derivable"):
+        await cfg.cargar_desde_yaml(db, malo)
+
+
+async def test_recargar_la_semilla_con_la_bandera_distinta_limpia_la_confirmacion(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """La gemela del cargador: si al recargar cambia, la marca vuelve a la cola de revisión.
+    Sin esto, corregir la bandera de uno de los nueve la activaría sin que nadie la mirara — y es
+    justo el campo que decide si se publica un tope inventado."""
+    fila = _marca("022", nota=None, sin_multiplicador=False)
+    fila.base_exencion = BaseExencion.UMA_DIAS
+    fila.factor_exencion = Decimal("90.0000")
+    fila.confirmado_por = ACTOR
+    fila.confirmado_en = datetime(2026, 8, 1, 9, 0, 0)
+    db.add(fila)
+    await db.commit()
+
+    ruta = tmp_path / "recarga.yaml"
+    ruta.write_text(
+        "catalogo_percepcion_marca:\n"
+        "  - tipo_percepcion: '022'\n"
+        "    es_ingreso_ordinario: false\n"
+        "    base_exencion: UMA_DIAS\n"
+        "    factor_exencion: '90'\n"
+        "    integra_sbc: false\n"
+        "    es_provisionable: false\n"
+        "    multiplicador_no_derivable: true\n",
+        encoding="utf-8",
+    )
+    await cfg.cargar_desde_yaml(db, ruta)
+
+    db.expire_all()
+    recargada = await db.get(CatalogoPercepcionMarca, "022")
+    assert recargada is not None
+    assert recargada.multiplicador_no_derivable is True
+    assert recargada.confirmado_en is None, "cambió el campo que decide el cálculo: vuelve a revisión"

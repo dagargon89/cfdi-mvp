@@ -266,6 +266,14 @@ export interface MarcasPercepcion {
   integra_sbc: boolean;
   es_provisionable: boolean;
   sujeto_a_tope_conjunto: boolean;
+  /** Si al `factor_exencion` le falta un multiplicador que el CFDI **no trae** ("90 UMA por año de
+   * servicio", "15 UMA diarias", "1 UMA por domingo"): nueve tipos. Con esto en `true`, B-03 deja
+   * el tope vacío en vez de calcularlo suponiendo un multiplicador de 1.
+   *
+   * **Tampoco lleva default** (422 si se omite), y por un motivo más directo que el del tope: este
+   * campo *sí* calcula, así que omitirlo activaría el cálculo de un tope inventado sin que nadie lo
+   * hubiera mirado. */
+  multiplicador_no_derivable: boolean;
 }
 
 /** Cuerpo del `PUT`: las seis marcas **más la duda declarada**. `nota_revision` es obligatoria

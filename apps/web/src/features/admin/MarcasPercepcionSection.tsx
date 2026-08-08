@@ -372,14 +372,17 @@ const NOMBRE_CAMPO: Record<string, string> = {
   integra_sbc: 'Integra al salario base de cotización',
   es_provisionable: 'Es provisionable',
   sujeto_a_tope_conjunto: 'Sujeto al tope conjunto de previsión social',
+  multiplicador_no_derivable: 'El multiplicador que el CFDI no trae',
   nota_revision: 'La duda declarada',
 };
 
-/** Por qué estos dos campos no llevan valor por omisión. Un "Field required" a secas no lo dice, y
+/** Por qué estos campos no llevan valor por omisión. Un "Field required" a secas no lo dice, y
  * es justo lo que hay que entender para no volver a omitirlos. */
 const POR_QUE_OBLIGATORIO: Record<string, string> = {
   sujeto_a_tope_conjunto:
     'no tiene valor por omisión a propósito: es el mismo dato con el que se confirma, y darlo por «no» en silencio activaría una exención de previsión social sin su tope y B-03 exentaría de más.',
+  multiplicador_no_derivable:
+    'no tiene valor por omisión a propósito: es el mismo dato con el que se confirma, y darlo por «no» en silencio haría que B-03 calculara el tope de uno de los nueve tipos suponiendo un multiplicador de 1 — un tope muy por debajo del legal, publicado como un exceso del patrón que no existe.',
   nota_revision:
     'no tiene valor por omisión a propósito: si lo tuviera, guardar una corrección borraría en silencio una duda que alguien derivó contra la ley. Para decir que ya no hay duda, hay que dejarla vacía a mano.',
 };
@@ -575,6 +578,12 @@ function TarjetaMarca({
             >
               <SiNo valor={marca.sujeto_a_tope_conjunto} />
             </Marca>
+            <Marca
+              nombre="Multiplicador que el CFDI no trae"
+              ayuda="Nueve tipos capturan el número de la ley pero no el multiplicador, porque el comprobante no lo incluye: «90 UMA por AÑO DE SERVICIO», «15 UMA DIARIAS», «1 UMA por DOMINGO laborado». Con esto marcado, B-03 deja el tope vacío en vez de calcularlo suponiendo que el multiplicador es 1 (lo que daría un tope muy por debajo del legal y lo presentaría como un exceso del patrón inexistente)."
+            >
+              <SiNo valor={marca.multiplicador_no_derivable} />
+            </Marca>
           </div>
 
           {marca.confirmado ? (
@@ -635,6 +644,7 @@ function cuerpoDeConfirmacion(m: MarcaPercepcion): MarcaPercepcionConfirmarIn {
     integra_sbc: m.integra_sbc,
     es_provisionable: m.es_provisionable,
     sujeto_a_tope_conjunto: m.sujeto_a_tope_conjunto,
+    multiplicador_no_derivable: m.multiplicador_no_derivable,
     nota_revision_hash: m.nota_revision_hash,
   };
 }
@@ -686,6 +696,7 @@ function ModalMarca({
   const [sbc, setSbc] = useState(marca?.integra_sbc ?? false);
   const [provisionable, setProvisionable] = useState(marca?.es_provisionable ?? false);
   const [tope, setTope] = useState(marca?.sujeto_a_tope_conjunto ?? false);
+  const [sinMultiplicador, setSinMultiplicador] = useState(marca?.multiplicador_no_derivable ?? false);
   const [nota, setNota] = useState(marca?.nota_revision ?? '');
   const [error, setError] = useState<string | null>(null);
 
@@ -701,7 +712,9 @@ function ModalMarca({
       factorNormalizado(marca.factor_exencion) !== (base === 'NINGUNA' ? null : factorNormalizado(factor)) ||
       marca.integra_sbc !== sbc ||
       marca.es_provisionable !== provisionable ||
-      marca.sujeto_a_tope_conjunto !== tope);
+      marca.sujeto_a_tope_conjunto !== tope ||
+      // Esta **sí** calcula, así que cambiarla invalida la confirmación igual que el factor.
+      marca.multiplicador_no_derivable !== sinMultiplicador);
   const dudaNueva = marca !== null && notaLimpia !== null && notaLimpia !== marca.nota_revision;
   const perderaConfirmacion = Boolean(marca?.confirmado) && (cambiaronMarcas || dudaNueva);
 
@@ -718,6 +731,8 @@ function ModalMarca({
         // Los dos campos que **no llevan default** en el servidor: se mandan siempre, incluso
         // cuando no cambian. Omitirlos da 422, y es la respuesta correcta.
         sujeto_a_tope_conjunto: base === 'NINGUNA' ? false : tope,
+        // Sin exención no hay factor al que le falte un multiplicador: el servidor lo rechaza.
+        multiplicador_no_derivable: base === 'NINGUNA' ? false : sinMultiplicador,
         nota_revision: notaLimpia,
       }),
     onSuccess: (fila) => onGuardado(fila, Boolean(marca?.confirmado)),
@@ -883,6 +898,19 @@ function ModalMarca({
           }
           checked={tope}
           onChange={setTope}
+          disabled={base === 'NINGUNA'}
+        />
+
+        <CampoSwitch
+          id="marca-multiplicador"
+          etiqueta="Al factor le falta un multiplicador que el CFDI no trae"
+          ayuda={
+            base === 'NINGUNA'
+              ? 'No aplica sin exención: lo que dice la casilla es que al factor le falta un multiplicador, y aquí no hay factor (el servidor lo rechaza).'
+              : 'Nueve tipos capturan el número que dice la ley pero NO el multiplicador, porque el comprobante no lo incluye: «90 UMA por AÑO DE SERVICIO» (022, 023, 025, 039, 053), «15 UMA DIARIAS» (044, 051, 052) y «1 UMA por DOMINGO laborado» (020). Marcado, B-03 deja el tope de exención vacío y lo explica; sin marcar, lo calcularía suponiendo que el multiplicador es 1, que da un tope muy por debajo del legal y lo presenta como un exceso del patrón que no existe. No es una duda que se pueda resolver configurando: el dato no viene en el CFDI.'
+          }
+          checked={sinMultiplicador}
+          onChange={setSinMultiplicador}
           disabled={base === 'NINGUNA'}
         />
 

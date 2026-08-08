@@ -335,6 +335,7 @@ async def leer_marca(db: AsyncSession, tipo: str) -> _MarcaLeida | None:
                 CatalogoPercepcionMarca.integra_sbc,
                 CatalogoPercepcionMarca.es_provisionable,
                 CatalogoPercepcionMarca.sujeto_a_tope_conjunto,
+                CatalogoPercepcionMarca.multiplicador_no_derivable,
                 CatalogoPercepcionMarca.nota_revision,
                 CatalogoPercepcionMarca.confirmado_por,
                 CatalogoPercepcionMarca.confirmado_en,
@@ -351,6 +352,7 @@ async def leer_marca(db: AsyncSession, tipo: str) -> _MarcaLeida | None:
             integra_sbc=fila.integra_sbc,
             es_provisionable=fila.es_provisionable,
             sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
+            multiplicador_no_derivable=fila.multiplicador_no_derivable,
         ),
         nota_revision=fila.nota_revision,
         huella=cfg.huella_de_nota(fila.nota_revision),
@@ -462,6 +464,10 @@ def _imprimir_marcas(marcas: cfg.MarcasQueSeConfirman, *, sangria: str) -> None:
     print(f"{sangria}  ingreso ordinario (B-05)       {_si_no(marcas.es_ingreso_ordinario)}")
     print(f"{sangria}  exención (B-03)                base {marcas.base_exencion.value}, factor {factor}")
     print(f"{sangria}  tope conjunto art. 93 (B-03)   {_si_no(marcas.sujeto_a_tope_conjunto)}")
+    print(f"{sangria}  multiplicador no derivable     {_si_no(marcas.multiplicador_no_derivable)}   (B-03)")
+    if marcas.multiplicador_no_derivable:
+        print(f"{sangria}    al factor le falta un multiplicador que el CFDI no trae, así que B-03\n"
+              f"{sangria}    deja el tope vacío en vez de suponer que el multiplicador es 1")
     print(f"{sangria}Informativas — ningún informe las lee todavía, así que cambiarlas no altera")
     print(f"{sangria}ningún resultado, pero sí obliga a volver a confirmar la marca:")
     print(f"{sangria}  integra SBC (art. 27 LSS)      {_si_no(marcas.integra_sbc)}")

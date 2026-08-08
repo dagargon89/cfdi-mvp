@@ -142,6 +142,7 @@ def _marca_a_salida(fila: CatalogoPercepcionMarca) -> MarcaPercepcionOut:
         integra_sbc=fila.integra_sbc,
         es_provisionable=fila.es_provisionable,
         sujeto_a_tope_conjunto=fila.sujeto_a_tope_conjunto,
+        multiplicador_no_derivable=fila.multiplicador_no_derivable,
         nota_revision=fila.nota_revision,
         confirmado=fila.confirmado_en is not None,
         confirmado_por=fila.confirmado_por,
@@ -160,6 +161,7 @@ def _marca_a_detalle(fila: CatalogoPercepcionMarca) -> dict[str, Any]:
         "integra_sbc": fila.integra_sbc,
         "es_provisionable": fila.es_provisionable,
         "sujeto_a_tope_conjunto": fila.sujeto_a_tope_conjunto,
+        "multiplicador_no_derivable": fila.multiplicador_no_derivable,
         "nota_revision": fila.nota_revision,
         "confirmado": fila.confirmado_en is not None,
     }
@@ -176,6 +178,7 @@ def _marcas_de(body: MarcasPercepcion) -> cfg.MarcasQueSeConfirman:
         integra_sbc=body.integra_sbc,
         es_provisionable=body.es_provisionable,
         sujeto_a_tope_conjunto=body.sujeto_a_tope_conjunto,
+        multiplicador_no_derivable=body.multiplicador_no_derivable,
     )
 
 
@@ -413,6 +416,7 @@ async def guardar_percepcion(
             integra_sbc=body.integra_sbc,
             es_provisionable=body.es_provisionable,
             sujeto_a_tope_conjunto=body.sujeto_a_tope_conjunto,
+            multiplicador_no_derivable=body.multiplicador_no_derivable,
             nota_revision=body.nota_revision,
         )
         db.add(fila)
@@ -426,6 +430,7 @@ async def guardar_percepcion(
         fila.integra_sbc = body.integra_sbc
         fila.es_provisionable = body.es_provisionable
         fila.sujeto_a_tope_conjunto = body.sujeto_a_tope_conjunto
+        fila.multiplicador_no_derivable = body.multiplicador_no_derivable
         fila.nota_revision = body.nota_revision
     await db.flush()
     await db.refresh(fila)  # escala real de `Numeric(9,4)`; ver el mismo comentario en `guardar_fiscal`

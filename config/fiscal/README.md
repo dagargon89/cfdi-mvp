@@ -357,7 +357,44 @@ visible es mejor que un default plausible.
 
 ---
 
-## 7 bis. Deuda de esquema conocida: las variantes ortográficas de `departamento_texto`
+## 7 bis. `multiplicador_no_derivable` — los nueve topes que un CFDI no puede calcular
+
+Nueve tipos capturan el número que dice la ley pero **no el multiplicador**, porque el
+multiplicador no viene en el comprobante:
+
+| tipos | el factor dice | lo que falta y el CFDI no trae |
+|---|---|---|
+| 022, 023, 025 | 90 UMA **por año de servicio** | los años de servicio del trabajador |
+| 039, 053 | 90 UMA **por año** de servicio o contribución | los años de contribución |
+| 044, 051, 052 | 15 UMA **diarias** | los días del periodo de pago (el tope es diario) |
+| 020 | 1 UMA **por domingo laborado** | el número de domingos trabajados del periodo |
+
+Con `multiplicador_no_derivable: true`, **B-03 deja el tope de exención vacío** y emite
+`MULTIPLICADOR_NO_DERIVABLE`. Sin la bandera lo calcularía como `factor × UMA`, es decir suponiendo
+un multiplicador de 1, y publicaría un tope muy por debajo del legal — que el informe presentaría
+como un **exceso del patrón que no existe**.
+
+**Cada renglón del YAML dice, en su comentario, qué multiplicador le falta**, y eso no es adorno:
+la diferencia entre "no derivable" y "falta el número de domingos del periodo" es la diferencia
+entre una limitación que alguien puede resolver algún día —si el complemento de Nómina llegara a
+traer el dato, o si se capturara por otra vía— y una que se queda ahí para siempre sin que nadie
+sepa qué le falta.
+
+**Es una columna y no una lista en el programa** (§2.12), y es la tercera vez en la misma fase que
+hizo falta, tras `sujeto_a_tope_conjunto` y `nota_revision`. La regla general que sale de ahí:
+*si el cálculo lo necesita, o si quien confirma tiene que verlo, tiene que ser una columna.* Un
+comentario del YAML no se carga.
+
+**No es lo mismo que `nota_revision`, y por eso son dos campos.** Hasta la tarea 7b, B-03 usaba la
+nota como aproximación —una marca con duda abierta no calculaba tope—, con dos defectos: era **más
+conservadora de la cuenta** (39 de las 44 marcas traen nota y solo estas nueve por este motivo, así
+que tipos calculables salían vacíos) y **se desactivaba sin querer** si alguien resolvía la nota sin
+corregir el modelo. Los nueve traen las dos cosas, y esa coincidencia es la que hacía pasar por
+buena la aproximación.
+
+No cabe con `base_exencion: NINGUNA`: no hay factor al que le falte nada, y el cargador lo rechaza.
+
+## 7 ter. Deuda de esquema conocida: las variantes ortográficas de `departamento_texto`
 
 **Esto no se arregla desde ningún archivo de este directorio: exige una migración.** Queda escrito
 aquí para que no se descubra en vivo.

@@ -57,16 +57,23 @@ Ignorarlos hace que el informe **exente de más**.
    `factor × UMA` ahí supone un multiplicador de 1 y produce un tope muy por debajo del
    legal, que el informe presentaría como un exceso del patrón que no existe.
 
-   **Cómo se resuelve hoy, y su límite.** Los nueve declaran esa advertencia en
-   `catalogo_percepcion_marca.nota_revision`, que sí es un campo de la base y cuyo
-   significado documentado es exactamente "el valor podría estar mal" (ver el modelo). Así
-   que la regla de este informe es **una marca con duda declarada abierta no calcula su tope
-   por tipo**: columna vacía y `MARCA_CON_DUDA_DECLARADA`, la misma forma de degradar que con
-   la UMA, y **citando la nota** en vez de suponer cuál es la duda (39 de las 44 la traen y
-   solo nueve por este motivo). Es deliberadamente conservadora, pero nunca publica un tope
-   calculado con un multiplicador supuesto y no codifica ninguna lista fiscal. Los cinco tipos
-   sin duda (`001`, `002`, `003`, `021`, `028`) son justamente los de la nómina cotidiana, así
-   que el informe sí calcula donde se usa a diario.
+   **Cómo se resuelve: la columna `catalogo_percepcion_marca.multiplicador_no_derivable`.**
+   La regla es **una marca cuyo multiplicador no viene en el CFDI no calcula su tope por
+   tipo**: celda vacía y `MULTIPLICADOR_NO_DERIVABLE`, la misma forma de degradar que con la
+   UMA. Cuáles son esos nueve **lo dice el dato**, igual que el tope conjunto del punto 1 y por
+   la misma razón: una lista de tipos escrita aquí sería la lista fiscal codificada que prohíbe
+   el §2.12, y dejaría de valer en cuanto una reforma moviera un tipo de lado.
+
+   **Lo que había antes, y por qué se cambió (tarea 7b).** Esta rama se disparaba con
+   `nota_revision`, que era una aproximación: fallaba del lado seguro, pero era **más
+   conservadora de la cuenta** —39 de las 44 marcas traen nota y solo nueve por este motivo, así
+   que tipos perfectamente calculables salían vacíos— y **se desactivaba sin querer** si alguien
+   resolvía la nota sin corregir el modelo. El caso concreto que lo hizo urgente: la nómina real
+   de este cliente solo usa `001` y `005`, y la nota del `005` es sobre si integra el salario
+   base de cotización, **no sobre un multiplicador incalculable**, así que su tope salía vacío
+   por la aproximación y no porque fuera incalculable; con la columna se calcula en cuanto se
+   confirme la marca. La nota se **sigue citando** en el mensaje de la bandera, porque en estos
+   nueve es donde está escrito qué multiplicador falta, pero ya no decide nada.
 
    **Lo que la duda NO puede apagar, y costó dos defectos:** solo bloquea lo que depende del
    factor. No bloquea el tope de un `NINGUNA` —que no tiene factor: su cero es un hecho—, ni
@@ -75,13 +82,15 @@ Ignorarlos hace que el informe **exente de más**.
    calcular dejaba **inerte** esa comprobación para los seis tipos afectados, porque los seis
    traen nota en la semilla real: el 100% del catálogo de producción, y sin bandera que lo
    dijera. Ver `_banderas_de_tope_conjunto` y el orden de comprobaciones de `_tope_de_fila`.
+   Con la columna de la tarea 7b el solapamiento desaparece —ninguno de los seis del tope
+   conjunto es de los nueve del multiplicador— pero la separación se conserva: son dos límites
+   distintos, y confundirlos fue el defecto original.
 
-   **Su residuo, declarado:** si alguien resuelve la duda de un tipo del grupo C y le borra
-   la nota sin corregir el modelo, el tope por tipo volvería a calcularse con el multiplicador
-   supuesto. El arreglo preciso es una columna propia —`multiplicador_no_derivable`, el
-   mismo remedio que ya se aplicó dos veces en esta fase con `sujeto_a_tope_conjunto` y
-   `nota_revision`—, que exige migración, semilla y pantalla de confirmación, y por eso no
-   cabe en esta tarea: es la tarea 7b.
+   **El residuo que esto tenía ya no existe:** borrar la nota de uno de los nueve no vuelve a
+   encender el cálculo, porque la condición es la columna. Lo que queda —y es del comprobante,
+   no del Hub— es que estos nueve topes **no se pueden calcular con un CFDI**: hacen falta datos
+   que el complemento de Nómina no incluye. La bandera lo dice explícitamente, para que nadie
+   los vaya a buscar a Configuración › Fiscal.
 
 3. **Las vacaciones no tienen tipo propio** en `c_TipoPercepcion`: se pagan dentro del `001`.
    Ninguna marca de este catálogo las identifica, así que B-03 **no intenta distinguirlas**;
@@ -164,7 +173,7 @@ la lee necesita por dónde empezar— y no son todos: el mensaje dice cuántos h
 Mismo criterio que `universo_nomina.MUESTRA_UUID_COLAPSO`."""
 
 _MAX_NOTA_EN_BANDERA = 240
-"""Cuánto de `nota_revision` se cita en `MARCA_CON_DUDA_DECLARADA`. Las notas de la semilla
+"""Cuánto de `nota_revision` se cita en `MULTIPLICADOR_NO_DERIVABLE`. Las notas de la semilla
 llegan a pasar de 780 caracteres y son párrafos con subpuntos: entero, el mensaje deja de ser
 legible en una celda. Se cita la **primera línea** recortada a esto, que es donde la semilla
 pone el enunciado de la duda, y el texto completo sigue estando en la pantalla de marcas."""
@@ -386,8 +395,8 @@ def _tope_de_fila(
     if base is BaseExencion.NINGUNA:
         return _Tope(_CERO, None)
 
-    if marca.nota_revision:
-        return _Tope(None, "MARCA_CON_DUDA_DECLARADA")
+    if marca.multiplicador_no_derivable:
+        return _Tope(None, "MULTIPLICADOR_NO_DERIVABLE")
 
     factor = marca.factor_exencion
     if factor is None:
@@ -616,7 +625,7 @@ def _banderas_de_configuracion(
 
 
 def _bandera_de_tipo(causa: str, tipo: str, recuento: _Recuento, config: _Configuracion) -> Bandera:
-    """`MARCA_SIN_CONFIRMAR`, `FALTA_MARCA` y `MARCA_CON_DUDA_DECLARADA`: una por tipo de
+    """`MARCA_SIN_CONFIRMAR`, `FALTA_MARCA` y `MULTIPLICADOR_NO_DERIVABLE`: una por tipo de
     percepción, con lo que hace falta para actuar sin abrir la base."""
     descripcion = catalogos.descripcion("P", tipo)
     nombre = f"{tipo} ({descripcion})" if descripcion else tipo
@@ -658,26 +667,33 @@ def _bandera_de_tipo(causa: str, tipo: str, recuento: _Recuento, config: _Config
                 f"en Configuración › Fiscal.{comun}"
             ),
         )
-    # `MARCA_CON_DUDA_DECLARADA`. **Se cita la nota, no se supone cuál es la duda.** 39 de las
-    # 44 marcas traen nota y solo nueve la traen por el multiplicador que no viene en el CFDI:
-    # la del `029` es sobre el SBC y la del `005` sobre los requisitos de deducibilidad.
-    # Afirmar "es el factor por año de servicio" mandaría a resolver la duda equivocada.
+    # `MULTIPLICADOR_NO_DERIVABLE`. **Lo dice el dato, no la prosa.** Hasta la tarea 7b esta
+    # rama se disparaba con `nota_revision`, que era una aproximación con dos defectos que su
+    # autor declaró: más conservadora de la cuenta (39 de las 44 marcas traen nota y solo nueve
+    # por este motivo, así que tipos calculables salían vacíos — el `005` de la nómina real
+    # entre ellos, cuya nota es sobre el SBC) y **se desactivaba sin querer** si alguien resolvía
+    # la nota sin corregir el modelo. Ahora la condición es la columna, que solo cambia si cambia
+    # el hecho fiscal.
+    #
+    # Se sigue citando la nota **si la hay**, porque en estos nueve es donde está escrito qué
+    # multiplicador falta; pero la nota ya no decide nada.
     marca = config.marcas.get(tipo)
     nota = (marca.nota_revision or "").strip() if marca is not None else ""
     primera_linea = nota.splitlines()[0] if nota else ""
     if len(primera_linea) > _MAX_NOTA_EN_BANDERA:
         primera_linea = primera_linea[:_MAX_NOTA_EN_BANDERA].rstrip() + "…"
-    cita = f' La duda dice: "{primera_linea}".' if primera_linea else ""
+    cita = f' La semilla lo explica así: "{primera_linea}".' if primera_linea else ""
     return Bandera(
         clave=causa,
         severidad="alta",
         ambito=f"tipo:{tipo}",
         mensaje=(
-            f"La marca del tipo {nombre} está confirmada pero conserva una duda declarada, así que no se calcula "
-            f"su tope de exención: publicar un número derivado de un factor que la propia semilla marca como "
-            f"dudoso sería peor que dejar la celda vacía.{cita} Resuélvela en Configuración › Fiscal › Marcas de "
-            f"percepción —y bórrala solo cuando el factor capturado sea el correcto— antes de confiar en el "
-            f"tope.{comun}"
+            f"La marca del tipo {nombre} está confirmada, pero su factor de exención lleva un multiplicador que "
+            f"el CFDI de nómina NO trae (los años de servicio, los días del periodo o los domingos laborados), "
+            f"así que no se calcula su tope: hacerlo supondría un multiplicador de 1 y publicaría un tope muy "
+            f"por debajo del legal, que este informe presentaría como un exceso del patrón que no existe.{cita} "
+            f"Es una limitación del comprobante, no un dato que falte configurar: no se resuelve desde "
+            f"Configuración › Fiscal.{comun}"
         ),
     )
 
@@ -1183,7 +1199,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 fecha_pago is not None,
                 total,
             )
-            if tope.causa in ("MARCA_SIN_CONFIRMAR", "FALTA_MARCA", "MARCA_CON_DUDA_DECLARADA"):
+            if tope.causa in ("MARCA_SIN_CONFIRMAR", "FALTA_MARCA", "MULTIPLICADOR_NO_DERIVABLE"):
                 por_tipo[(tope.causa, nodo.tipo_percepcion)].sumar(str(comprobante.uuid))
             elif tope.causa is not None:
                 por_causa[tope.causa].sumar(str(comprobante.uuid))

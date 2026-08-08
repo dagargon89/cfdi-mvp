@@ -73,6 +73,8 @@ def _yaml_marcas(marcas: list[dict[str, Any]]) -> str:
         renglones.append(f"    es_provisionable: {str(marca.get('provisionable', False)).lower()}")
         if marca.get("tope_conjunto"):
             renglones.append("    sujeto_a_tope_conjunto: true")
+        if marca.get("sin_multiplicador"):
+            renglones.append("    multiplicador_no_derivable: true")
         if marca.get("nota"):
             renglones.append(f"    nota_revision: '{marca['nota']}'")
     return "\n".join(renglones) + "\n"
@@ -393,18 +395,24 @@ async def test_un_tipo_sin_marca_alguna_emite_falta_marca(db: AsyncSession, tmp_
 # --------------------------------------------------------------------------------------
 
 
-async def test_una_marca_con_duda_declarada_no_calcula_el_tope(db: AsyncSession, tmp_path: Path) -> None:
+async def test_un_multiplicador_no_derivable_no_calcula_el_tope(db: AsyncSession, tmp_path: Path) -> None:
     """Los nueve tipos cuyo multiplicador no viene en el CFDI (`90 UMA por año de servicio`,
-    `15 UMA diarias`, `1 UMA por domingo`) llevan esa advertencia en `nota_revision`, que es
-    un campo de la base. Calcular el tope con el factor tal cual supondría un multiplicador
-    de 1: la exención de un trabajador con antigüedad larga saldría muy por debajo y el
-    informe lo acusaría de un exceso inexistente."""
+    `15 UMA diarias`, `1 UMA por domingo`) lo declaran en la **columna**
+    `catalogo_percepcion_marca.multiplicador_no_derivable` (tarea 7b). Calcular el tope con el
+    factor tal cual supondría un multiplicador de 1: la exención de un trabajador con
+    antigüedad larga saldría muy por debajo y el informe lo acusaría de un exceso inexistente.
+
+    Hasta la 7b esto se disparaba con `nota_revision`, que era una aproximación con dos
+    defectos: más conservadora de la cuenta (39 de 44 marcas traen nota y solo nueve por este
+    motivo) y **se desactivaba sin querer** al resolver la nota. Ahora la nota **no** interviene
+    —esta prueba la pone y comprueba que lo que decide es la columna—."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
     await _sembrar_marcas(
         db,
         tmp_path,
-        [{"tipo": "022", "base": "UMA_DIAS", "factor": "90", "ordinario": False, "nota": "el factor 90 es POR CADA ANIO DE SERVICIO"}],
+        [{"tipo": "022", "base": "UMA_DIAS", "factor": "90", "ordinario": False, "sin_multiplicador": True,
+          "nota": "el factor 90 es POR CADA ANIO DE SERVICIO"}],
     )
     await insertar_nomina(
         db,
@@ -420,18 +428,21 @@ async def test_una_marca_con_duda_declarada_no_calcula_el_tope(db: AsyncSession,
     assert _valor(resultado, 0, "Base de exención") == "UMA_DIAS"
     assert _valor(resultado, 0, "Tope de exención") is None
     assert _valor(resultado, 0, "Exceso sobre el tope") is None
-    dudas = _de_clave(resultado, "MARCA_CON_DUDA_DECLARADA")
-    assert len(dudas) == 1
-    assert "022" in dudas[0].ambito
+    avisos = _de_clave(resultado, "MULTIPLICADOR_NO_DERIVABLE")
+    assert len(avisos) == 1
+    assert "022" in avisos[0].ambito
     assert "EXENCION_EXCEDIDA" not in _claves(resultado)
 
 
-async def test_la_bandera_de_duda_declarada_cita_la_nota_en_vez_de_suponerla(
+async def test_una_nota_que_no_es_del_multiplicador_ya_no_vacia_el_tope(
     db: AsyncSession, tmp_path: Path
 ) -> None:
-    """39 de las 44 marcas traen nota y solo nueve la traen por el multiplicador. Afirmar que
-    la duda es la del multiplicador manda a resolver la duda equivocada: la del `029` es sobre
-    el SBC, la del `005` sobre los requisitos de deducibilidad. La bandera cita el texto."""
+    """**El sobrealcance que la tarea 7b quita, y es el caso real de este cliente.** La nómina
+    de la empresa 11 solo usa `001` y `005`; la nota del `005` es sobre si integra el salario
+    base de cotización —no sobre un multiplicador incalculable—, así que con la aproximación
+    anterior su tope salía vacío **por la aproximación y no porque fuera incalculable**.
+
+    Con la columna, la nota sigue ahí y el tope **se calcula**."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
     await _sembrar_marcas(
@@ -449,17 +460,50 @@ async def test_la_bandera_de_duda_declarada_cita_la_nota_en_vez_de_suponerla(
 
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
-    dudas = _de_clave(resultado, "MARCA_CON_DUDA_DECLARADA")
-    assert len(dudas) == 1
-    assert "requisitos de deducibilidad del art. 27-XI" in dudas[0].mensaje
-    assert "año de servicio" not in dudas[0].mensaje, "no se supone cuál es la duda"
+    assert "MULTIPLICADOR_NO_DERIVABLE" not in _claves(resultado), (
+        "una duda que no es del multiplicador no puede seguir vaciando el tope: era el defecto"
+    )
+    # PORCENTAJE 100 sobre el importe total del concepto.
+    assert _valor(resultado, 0, "Tope de exención") == Decimal("2000.00")
 
 
-async def test_base_ninguna_con_duda_declarada_sigue_dando_tope_cero(db: AsyncSession, tmp_path: Path) -> None:
-    """La duda solo puede bloquear lo que depende del factor, y `NINGUNA` no tiene factor
-    (`factor_exencion` es `NULL` y el cargador lo exige así). Vaciar ahí las columnas de tope
-    y exceso deja huecos donde no hay nada que capturar — 14 de los 16 tipos `NINGUNA` de la
-    semilla traen nota."""
+async def test_la_bandera_del_multiplicador_cita_la_nota_cuando_la_hay(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """La nota ya no decide, pero se sigue citando: en estos nueve es donde está escrito **qué**
+    multiplicador falta, y esa es la diferencia entre "no derivable" y "falta el número de
+    domingos del periodo"."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(
+        db,
+        tmp_path,
+        [{"tipo": "020", "base": "UMA_DIAS", "factor": "1", "sin_multiplicador": True,
+          "nota": "el factor 1 es POR DOMINGO LABORADO y los domingos no vienen en el CFDI"}],
+    )
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="c5c5c5c5-c5c5-c5c5-c5c5-c5c5c5c5c5c5",
+        percepciones=[("020", "020", "Prima dominical", "0.00", "500.00")],
+        total_percepciones="500.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    avisos = _de_clave(resultado, "MULTIPLICADOR_NO_DERIVABLE")
+    assert len(avisos) == 1
+    assert "POR DOMINGO LABORADO" in avisos[0].mensaje
+    # Y dice que no se arregla configurando, porque el dato no está en el comprobante.
+    assert "no se resuelve desde" in avisos[0].mensaje
+
+
+async def test_base_ninguna_sigue_dando_tope_cero(db: AsyncSession, tmp_path: Path) -> None:
+    """El límite del multiplicador solo puede bloquear lo que depende del factor, y `NINGUNA` no
+    tiene factor (`factor_exencion` es `NULL` y el cargador lo exige así) — de hecho el cargador
+    **rechaza** `multiplicador_no_derivable: true` con `NINGUNA`, porque no hay factor al que le
+    falte nada. Vaciar ahí las columnas de tope y exceso dejaría huecos donde no hay nada que
+    capturar."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
     await _sembrar_marcas(
@@ -480,12 +524,14 @@ async def test_base_ninguna_con_duda_declarada_sigue_dando_tope_cero(db: AsyncSe
     assert _valor(resultado, 0, "Base de exención") == "NINGUNA"
     assert _valor(resultado, 0, "Tope de exención") == Decimal("0")
     assert _valor(resultado, 0, "Exceso sobre el tope") == Decimal("1000.00")
-    assert "MARCA_CON_DUDA_DECLARADA" not in _claves(resultado)
+    assert "MULTIPLICADOR_NO_DERIVABLE" not in _claves(resultado)
     assert len(_de_clave(resultado, "EXENCION_INDEBIDA")) == 1
 
 
-async def test_una_marca_sin_duda_declarada_si_calcula_el_tope(db: AsyncSession, tmp_path: Path) -> None:
-    """Gemela negativa de la anterior: la regla no puede bloquear todos los topes."""
+async def test_una_marca_sin_la_bandera_si_calcula_el_tope(db: AsyncSession, tmp_path: Path) -> None:
+    """Gemela negativa: la regla no puede bloquear todos los topes. Es el **mismo tipo 022** que
+    la prueba de arriba, con la única diferencia de la columna — así lo que se prueba es la
+    columna y no otra cosa del renglón."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
     await _sembrar_marcas(db, tmp_path, [{"tipo": "022", "base": "UMA_DIAS", "factor": "90", "ordinario": False}])
@@ -500,7 +546,7 @@ async def test_una_marca_sin_duda_declarada_si_calcula_el_tope(db: AsyncSession,
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
     assert _valor(resultado, 0, "Tope de exención") == Decimal("90") * Decimal(_UMA_DIARIA)
-    assert "MARCA_CON_DUDA_DECLARADA" not in _claves(resultado)
+    assert "MULTIPLICADOR_NO_DERIVABLE" not in _claves(resultado)
 
 
 # --------------------------------------------------------------------------------------
@@ -958,18 +1004,20 @@ async def test_el_tope_conjunto_de_prevision_social_se_evalua_sobre_la_suma_anua
     assert "EXENCION_EXCEDIDA" not in _claves(resultado)
 
 
-async def test_el_tope_conjunto_se_evalua_aunque_las_marcas_traigan_duda_declarada(
+async def test_el_tope_conjunto_se_evalua_aunque_el_tope_por_tipo_no_se_pueda_calcular(
     db: AsyncSession, tmp_path: Path
 ) -> None:
-    """**Los seis tipos sujetos al tope conjunto traen los seis `nota_revision` en la semilla
-    real**, así que esta es la única configuración que existe en producción — y era la que
-    ninguna prueba cubría.
+    """El tope conjunto **no necesita** el `factor_exencion`: suma `importe_exento` y lo compara
+    contra 1 UMA anual. Que el tope *por tipo* no se pueda calcular no puede apagar también
+    esta comprobación, que es la única protección contra el "exentar de más" de esos seis tipos.
 
-    El tope conjunto **no necesita** el `factor_exencion` dudoso: suma `importe_exento` y lo
-    compara contra 1 UMA anual. Hacer que la duda sobre el factor apague también esta
-    comprobación dejaba inerte la única protección contra el "exentar de más" de esos seis
-    tipos, y encima en silencio: la bandera que sí salía hablaba de su tope por tipo, que con
-    `PORCENTAJE 100` es inexcedible por construcción.
+    Cuando la condición era `nota_revision` esto sí pasaba, y en silencio: **los seis tipos del
+    tope conjunto traen nota en la semilla real**, o sea el 100% del catálogo de producción, y la
+    bandera que salía hablaba del tope por tipo —que con `PORCENTAJE 100` es inexcedible por
+    construcción—. Con la columna de la tarea 7b el solapamiento desaparece (ninguno de los seis
+    es de los nueve), pero la separación se conserva y esta prueba la mantiene viva: se marca
+    `multiplicador_no_derivable` a propósito, aunque en la semilla real esos tipos no lo lleven,
+    para que lo que se pruebe siga siendo la independencia de las dos comprobaciones.
     """
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
@@ -983,6 +1031,7 @@ async def test_el_tope_conjunto_se_evalua_aunque_las_marcas_traigan_duda_declara
                 "base": "PORCENTAJE",
                 "factor": "100",
                 "tope_conjunto": True,
+                "sin_multiplicador": True,
                 "nota": "la exclusion del SBC es parcial (40% del salario minimo diario)",
             },
             {
@@ -990,6 +1039,7 @@ async def test_el_tope_conjunto_se_evalua_aunque_las_marcas_traigan_duda_declara
                 "base": "PORCENTAJE",
                 "factor": "100",
                 "tope_conjunto": True,
+                "sin_multiplicador": True,
                 "nota": "la analogia con beca es mia, no del texto",
             },
         ],
@@ -1007,9 +1057,9 @@ async def test_el_tope_conjunto_se_evalua_aunque_las_marcas_traigan_duda_declara
 
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
-    # La duda sí apaga el tope **por tipo**, que es lo que depende del factor.
+    # La bandera del multiplicador sí apaga el tope **por tipo**, que depende del factor.
     assert _valor(resultado, 0, "Tope de exención") is None
-    assert len(_de_clave(resultado, "MARCA_CON_DUDA_DECLARADA")) == 2
+    assert len(_de_clave(resultado, "MULTIPLICADOR_NO_DERIVABLE")) == 2
     # Pero no el tope conjunto, que no depende del factor.
     conjuntas = _de_clave(resultado, "TOPE_CONJUNTO_EXCEDIDO")
     assert len(conjuntas) == 1

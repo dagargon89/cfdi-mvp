@@ -238,7 +238,7 @@ pintó y que se hizo clic, y confirmar a ciegas es lo que el invariante existe p
 hay tramo con esa `vigencia_desde`. Bitácora.
 
 ### GET·PUT /v1/configuracion/percepciones[/{tipo}] — Marcas del §3.1 *(admin)*
-`GET` → `{ "marcas": [ {tipo_percepcion, descripcion_sat, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, nota_revision, nota_revision_hash, confirmado, confirmado_por, confirmado_en} ], "claves_sin_marcas": ["002", …] }`.
+`GET` → `{ "marcas": [ {tipo_percepcion, descripcion_sat, es_ingreso_ordinario, base_exencion, factor_exencion, integra_sbc, es_provisionable, sujeto_a_tope_conjunto, multiplicador_no_derivable, nota_revision, nota_revision_hash, confirmado, confirmado_por, confirmado_en} ], "claves_sin_marcas": ["002", …] }`.
 
 `claves_sin_marcas` son las claves de `c_TipoPercepcion` que **todavía no tienen ninguna marca
 capturada**, y espeja `claves_sin_valor` de `/fiscal`. Existe para que el **denominador sea
@@ -249,9 +249,10 @@ de un tipo que no tiene fila. Con este campo la copia del cliente sobra y desapa
 entera de deriva: al subir la versión de `satcfdi` la lista del servidor crece y la del cliente no.
 Si el catálogo embebido no se puede leer llega **vacía** (misma lectura que `descripcion_sat`,
 falla abierto); la señal autoritativa de esa avería es la alerta `CATALOGO_ILEGIBLE` de `/fiscal`.
-`PUT /{tipo}` body: los **seis** campos de marca **más `nota_revision`**, todos obligatorios (la nota
-admite `null`). `base_exencion: NINGUNA` exige `factor_exencion: null` y prohíbe
-`sujeto_a_tope_conjunto: true`; cualquier otra base exige el factor presente y positivo (**422** si no).
+`PUT /{tipo}` body: los **siete** campos de marca **más `nota_revision`**, todos obligatorios (la nota
+admite `null`). `base_exencion: NINGUNA` exige `factor_exencion: null` y prohíbe tanto
+`sujeto_a_tope_conjunto: true` como `multiplicador_no_derivable: true`; cualquier otra base exige el
+factor presente y positivo (**422** si no).
 Igual que los importes: **capturar no confirma**, y cambiar una marca limpia la confirmación.
 
 `nota_revision` es **la duda declarada** de ese tipo: qué la genera y qué habría que verificar antes de
@@ -269,6 +270,26 @@ valor, esta nota dice que el valor podría estar mal.
 `sujeto_a_tope_conjunto` **no lleva default**: es el mismo cuerpo con el que se confirma, y un default
 dejaría que un cliente que ni lo menciona activara —o creara— una marca de previsión social sin el tope
 del art. 93 a la vista, que es la condición que la migración `c7a1e0b4d92f` declaró inaceptable.
+
+`multiplicador_no_derivable` (añadido 2026-08-07, migración `a1d93f27e5b8`) dice que al
+`factor_exencion` le falta un multiplicador que **el CFDI no trae**: son nueve tipos cuyo número de la
+ley viene "por" algo que el comprobante no incluye — "90 UMA por **año de servicio**" (022, 023, 025,
+039, 053), "15 UMA **diarias**" (044, 051, 052) y "1 UMA por **domingo laborado**" (020). Con la bandera
+en `true`, B-03 deja el tope de exención **vacío** y emite `MULTIPLICADOR_NO_DERIVABLE`; sin ella lo
+calcularía suponiendo un multiplicador de 1, publicando un tope muy por debajo del legal que el informe
+presentaría como un exceso del patrón que no existe.
+
+Es una columna y no una lista en el programa por el §2.12, y es **la tercera vez** en la misma fase que
+hizo falta —después de `sujeto_a_tope_conjunto` y `nota_revision`—, de donde sale la regla general: *si
+el cálculo lo necesita, o si quien confirma tiene que verlo, tiene que ser una columna.* Reemplaza a la
+aproximación anterior de B-03 (usar `nota_revision`), que era más conservadora de la cuenta —39 de las 44
+marcas traen nota y solo nueve por este motivo— y **se desactivaba sin querer** al resolver una nota.
+
+**Tampoco lleva default**, y por un motivo más directo que el del tope conjunto: este campo *sí* calcula,
+así que omitirlo activaría el cálculo de un tope inventado sin que nadie lo hubiera mirado. Con
+`base_exencion: NINGUNA` tiene que ir en `false`: no hay factor al que le falte un multiplicador.
+Entra en la comparación que devuelve `409 MARCAS_CAMBIARON` y en la huella de `--marcas` de la
+herramienta de línea de comandos.
 
 `descripcion_sat` es la descripción de `c_TipoPercepcion` ("Becas para trabajadores y/o hijos"), resuelta
 del **mismo** `satcfdi` que valida la escritura. Quien confirma necesita ver la clave y la descripción, y
@@ -430,12 +451,14 @@ export interface ParametroFiscalIn { valor: string; vigencia_desde: string; vige
                                      fuente: string; ejercicio?: number | null }
 // Marcas de exención del art. 93 (§8bis). `factor_exencion` es CADENA o nula, como todos los
 // importes, y su unidad la decide `base_exencion`; con `PORCENTAJE` está en **escala 0-100, no como
-// fracción** ("100" = el cien por ciento). `sujeto_a_tope_conjunto` y `nota_revision` NO llevan
+// fracción** ("100" = el cien por ciento). `sujeto_a_tope_conjunto`, `multiplicador_no_derivable` y
+// `nota_revision` NO llevan
 // default: omitirlos es 422 (§8bis explica por qué cada uno).
 export type BaseExencion = 'UMA_DIAS' | 'SM_DIAS' | 'PORCENTAJE' | 'NINGUNA';
 export interface MarcasPercepcion { es_ingreso_ordinario: boolean; base_exencion: BaseExencion;
                                     factor_exencion: string | null; integra_sbc: boolean;
-                                    es_provisionable: boolean; sujeto_a_tope_conjunto: boolean }
+                                    es_provisionable: boolean; sujeto_a_tope_conjunto: boolean;
+                                    multiplicador_no_derivable: boolean }
 export interface MarcaPercepcionIn extends MarcasPercepcion { nota_revision: string | null }
 // Cuerpo del confirmar: las seis marcas MÁS la huella de la duda que se tenía delante. Opaca —
 // se copia de `MarcaPercepcion.nota_revision_hash` y se devuelve tal cual, nunca se calcula ni

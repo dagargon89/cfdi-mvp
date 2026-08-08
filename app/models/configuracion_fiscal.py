@@ -142,8 +142,41 @@ class CatalogoPercepcionMarca(Base):
     sujeto_a_tope_conjunto: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    # Si el `factor_exencion` de este tipo lleva un multiplicador que **el CFDI no trae**, de
+    # modo que `factor × UMA` no es su tope: son los nueve tipos cuyo número de la ley viene
+    # "por" algo que el comprobante no dice —"90 UMA **por año de servicio**" (022, 023, 025,
+    # 039, 053), "15 UMA **diarias**" (044, 051, 052) y "1 UMA **por domingo laborado**" (020)—.
+    # Calcular ahí supone un multiplicador de 1 y publica un tope muy por debajo del legal, que
+    # el informe presentaría como un exceso del patrón que no existe.
+    #
+    # **Tercera vez que hace falta esta columna en la misma fase**, después de
+    # `sujeto_a_tope_conjunto` y `nota_revision`, y la lección general ya está escrita: *si el
+    # cálculo lo necesita, o si quien confirma tiene que verlo, tiene que ser una columna.* Un
+    # comentario del YAML no se carga y una lista de tipos en el programa viola el §2.12.
+    #
+    # **Qué reemplaza.** B-03 usaba `nota_revision` como aproximación —una marca con duda
+    # abierta no calcula tope—, que falla del lado seguro pero tiene dos defectos: es más
+    # conservadora de la cuenta (39 de 44 marcas traen nota y solo estas nueve por este motivo,
+    # así que tipos perfectamente calculables salían vacíos) y **se desactiva sin querer** si
+    # alguien resuelve la nota sin corregir el modelo. Con esta columna, lo que apaga el tope es
+    # el hecho fiscal y no un texto que alguien puede borrar.
+    #
+    # `default=False`: es el caso de 35 de los 44 tipos, y así el renglón del YAML solo lo
+    # declara donde aplica. Una marca sin exención (`NINGUNA`) no puede llevarlo: no hay factor
+    # cuyo multiplicador falte, así que el cargador y el endpoint lo rechazan — igual que con
+    # `sujeto_a_tope_conjunto` y por el mismo motivo (una bandera que no puede ser cierta es un
+    # error de captura, no una opción).
+    multiplicador_no_derivable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     # La duda declarada de este renglón: qué la genera y qué habría que verificar antes de
     # confirmarlo. 39 de los 44 tipos traen una.
+    #
+    # **No es lo mismo que `multiplicador_no_derivable` y por eso son dos columnas.** La nota es
+    # prosa para una persona ("verifica esto antes de confirmar") y puede resolverse borrándola;
+    # la bandera es un hecho fiscal que el cálculo consulta y que solo cambia si cambia la ley.
+    # Nueve renglones traen las dos, y esa coincidencia es justo la que hacía pasar por buena la
+    # aproximación de B-03.
     #
     # Es una columna por la misma razón que `sujeto_a_tope_conjunto`, y el defecto que la
     # motiva es idéntico: estas 39 dudas vivían en comentarios `# REVISAR` del YAML de la

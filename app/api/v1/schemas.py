@@ -462,6 +462,16 @@ class MarcasPercepcion(BaseModel):
     # derivable de `factor_exencion`: son los seis tipos 015/029/030/034/035/037 contra otros
     # diez con la misma `base_exencion: PORCENTAJE` pero exceptuados del tope.
     sujeto_a_tope_conjunto: bool
+    # Si al `factor_exencion` le falta un multiplicador que el CFDI no trae ("90 UMA por año de
+    # servicio", "15 UMA diarias", "1 UMA por domingo"): son nueve tipos, y con la bandera puesta
+    # B-03 deja el tope vacío en vez de calcularlo suponiendo un multiplicador de 1.
+    #
+    # **Sin default, igual que `sujeto_a_tope_conjunto` y por el mismo argumento**, que aquí es si
+    # cabe más directo porque este campo *sí* calcula: este es el cuerpo que también confirma, y
+    # con un default de `false` un cliente que ni menciona el campo activaría el cálculo de un
+    # tope sobre uno de los nueve tipos **sin haberlo mirado** — exactamente el número inventado
+    # que la columna existe para no publicar. Un 422 por un campo que falta es barato.
+    multiplicador_no_derivable: bool
 
     @model_validator(mode="after")
     def _coherencia_de_exencion(self) -> MarcasPercepcion:
@@ -475,6 +485,11 @@ class MarcasPercepcion(BaseModel):
             raise ValueError(
                 "`sujeto_a_tope_conjunto: true` no tiene sentido con `base_exencion: NINGUNA` — o el "
                 "tipo sí tiene exención y falta capturarla, o la marca del tope sobra."
+            )
+        if self.multiplicador_no_derivable and self.base_exencion is BaseExencion.NINGUNA:
+            raise ValueError(
+                "`multiplicador_no_derivable: true` no tiene sentido con `base_exencion: NINGUNA` — lo "
+                "que la bandera dice es que al factor le falta un multiplicador, y aquí no hay factor."
             )
         return self
 
@@ -551,6 +566,10 @@ class MarcaPercepcionOut(BaseModel):
     integra_sbc: bool
     es_provisionable: bool
     sujeto_a_tope_conjunto: bool
+    # Viaja en la respuesta y no solo en el cuerpo de entrada, y eso es el punto: un campo que
+    # afecta el cálculo pero que la respuesta no devuelve permite **confirmar sin verlo**, que es
+    # el defecto que esta fase ya pagó una ronda con `sujeto_a_tope_conjunto`.
+    multiplicador_no_derivable: bool
     # La duda declarada, para que la pantalla la enseñe al lado del botón de confirmar. 39 de
     # los 44 tipos sembrados traen una; sin ella en la respuesta, confirmar sería a ciegas.
     nota_revision: str | None

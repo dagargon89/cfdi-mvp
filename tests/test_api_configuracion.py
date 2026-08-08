@@ -434,6 +434,7 @@ async def test_percepciones_capturar_no_confirma_y_confirmar_las_activa(client, 
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": False,
+            "multiplicador_no_derivable": False,
             "nota_revision": None,
         },
         headers=ADMIN,
@@ -456,6 +457,7 @@ async def test_percepciones_capturar_no_confirma_y_confirmar_las_activa(client, 
                 "integra_sbc": True,
                 "es_provisionable": True,
                 "sujeto_a_tope_conjunto": False,
+                "multiplicador_no_derivable": False,
             }
         ),
         headers=ADMIN,
@@ -493,6 +495,7 @@ async def test_confirmar_una_marca_que_cambio_da_409(client, db: AsyncSession) -
                 "integra_sbc": False,
                 "es_provisionable": False,
                 "sujeto_a_tope_conjunto": False,
+                "multiplicador_no_derivable": False,
             }
         ),
         headers=ADMIN,
@@ -529,6 +532,7 @@ async def test_corregir_una_marca_confirmada_la_devuelve_a_la_cola(client, db: A
             "integra_sbc": False,
             "es_provisionable": False,
             "sujeto_a_tope_conjunto": False,
+            "multiplicador_no_derivable": False,
             "nota_revision": None,
         },
         headers=ADMIN,
@@ -560,6 +564,7 @@ async def test_percepcion_con_base_ninguna_y_factor_da_422(client, db: AsyncSess
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": False,
+            "multiplicador_no_derivable": False,
             "nota_revision": None,
         },
         headers=ADMIN,
@@ -930,6 +935,7 @@ async def test_put_de_un_tipo_que_no_existe_en_el_catalogo_del_sat_da_422(client
         "integra_sbc": True,
         "es_provisionable": False,
         "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": False,
         "nota_revision": None,
     }
 
@@ -962,6 +968,7 @@ async def test_confirmar_un_tipo_inventado_tambien_se_rechaza(client, db: AsyncS
                 "integra_sbc": True,
                 "es_provisionable": False,
                 "sujeto_a_tope_conjunto": False,
+                "multiplicador_no_derivable": False,
             }
         ),
         headers=ADMIN,
@@ -988,6 +995,7 @@ def _marca_015(**cambios: object) -> dict[str, object]:
         "integra_sbc": False,
         "es_provisionable": False,
         "sujeto_a_tope_conjunto": True,
+        "multiplicador_no_derivable": False,
     }
     cuerpo.update(cambios)
     return cuerpo
@@ -1081,6 +1089,7 @@ async def test_el_tope_no_tiene_sentido_sin_exencion(client, db: AsyncSession) -
             "integra_sbc": True,
             "es_provisionable": True,
             "sujeto_a_tope_conjunto": True,
+            "multiplicador_no_derivable": False,
             "nota_revision": None,
         },
         headers=ADMIN,
@@ -1371,6 +1380,7 @@ async def test_la_nota_de_revision_viaja_en_la_respuesta(client, db: AsyncSessio
             "integra_sbc": True,
             "es_provisionable": False,
             "sujeto_a_tope_conjunto": False,
+            "multiplicador_no_derivable": False,
             "nota_revision": _DUDA,
         },
         headers=ADMIN,
@@ -1399,6 +1409,7 @@ async def test_el_put_que_omite_la_nota_no_la_borra_en_silencio(client, db: Asyn
         "integra_sbc": True,
         "es_provisionable": False,
         "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": False,
     }
     r = await client.put("/v1/configuracion/percepciones/010", json={**base, "nota_revision": _DUDA}, headers=ADMIN)
     assert r.status_code == 200, r.text
@@ -1423,6 +1434,7 @@ _MARCAS_010 = {
     "integra_sbc": True,
     "es_provisionable": False,
     "sujeto_a_tope_conjunto": False,
+    "multiplicador_no_derivable": False,
 }
 
 
@@ -1580,6 +1592,7 @@ async def test_el_503_del_catalogo_ilegible_no_se_queda_pegado(  # type: ignore[
         "integra_sbc": True,
         "es_provisionable": False,
         "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": False,
         "nota_revision": None,
     }
 
@@ -1908,3 +1921,142 @@ async def test_claves_sin_marcas_llega_vacia_si_el_catalogo_no_se_puede_leer(  #
     assert r.json()["claves_sin_marcas"] == []
 
     catalogos._tipos_de_cache.cache_clear()
+
+
+# --------------------------------------------------------------------------------------
+# `multiplicador_no_derivable` (tarea 7b): sin default, y viaja en la respuesta
+# --------------------------------------------------------------------------------------
+
+
+async def test_multiplicador_no_derivable_viaja_en_la_respuesta(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """**Un campo que afecta el cálculo pero que la respuesta no devuelve permite confirmar sin
+    verlo**, que es el defecto que esta fase ya pagó una ronda con `sujeto_a_tope_conjunto`. Así
+    que se comprueba en las dos superficies del recurso: el `PUT` que lo escribe y el `GET` que
+    lo lista."""
+    await _admin(db)
+    cuerpo = {
+        "es_ingreso_ordinario": False,
+        "base_exencion": "UMA_DIAS",
+        "factor_exencion": "90.0000",
+        "integra_sbc": False,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": True,
+        "nota_revision": None,
+    }
+
+    r = await client.put("/v1/configuracion/percepciones/022", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 200, r.text
+    assert r.json()["multiplicador_no_derivable"] is True
+
+    r = await client.get("/v1/configuracion/percepciones", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    marca = next(m for m in r.json()["marcas"] if m["tipo_percepcion"] == "022")
+    assert marca["multiplicador_no_derivable"] is True
+
+
+async def test_multiplicador_no_derivable_no_lleva_default(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """Omitirlo es 422, igual que `sujeto_a_tope_conjunto`, y aquí el argumento es más directo
+    porque este campo **sí calcula**: con un default de `false`, un cliente que ni lo menciona
+    activaría el cálculo del tope de uno de los nueve tipos **sin haberlo mirado** — el número
+    inventado que la columna existe para no publicar."""
+    await _admin(db)
+    sin_el_campo = {
+        "es_ingreso_ordinario": False,
+        "base_exencion": "UMA_DIAS",
+        "factor_exencion": "90.0000",
+        "integra_sbc": False,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+        "nota_revision": None,
+    }
+
+    r = await client.put("/v1/configuracion/percepciones/022", json=sin_el_campo, headers=ADMIN)
+
+    assert r.status_code == 422, r.text
+    assert "multiplicador_no_derivable" in r.text
+    assert (await db.scalar(select(func.count()).select_from(CatalogoPercepcionMarca))) == 0
+
+
+async def test_confirmar_sin_ver_el_multiplicador_da_409(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La marca almacenada dice que el multiplicador no viene en el CFDI; el revisor manda un
+    cuerpo que dice que sí. Aunque los otros seis campos coincidan, lo que se revisó no es lo que
+    hay — y la diferencia decide si B-03 publica un tope o deja la celda vacía."""
+    await _admin(db)
+    cuerpo = {
+        "es_ingreso_ordinario": False,
+        "base_exencion": "UMA_DIAS",
+        "factor_exencion": "90.0000",
+        "integra_sbc": False,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": True,
+        "nota_revision": None,
+    }
+    r = await client.put("/v1/configuracion/percepciones/022", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 200, r.text
+
+    marcas_sin_la_bandera = {k: v for k, v in cuerpo.items() if k != "nota_revision"}
+    marcas_sin_la_bandera["multiplicador_no_derivable"] = False
+    r = await client.post(
+        "/v1/configuracion/percepciones/022/confirmar",
+        json=_confirmar(marcas_sin_la_bandera),
+        headers=ADMIN,
+    )
+
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["codigo"] == "MARCAS_CAMBIARON"
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+async def test_confirmar_viendo_el_multiplicador_pasa(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """La gemela: mandar el valor que hay confirma sin fricción."""
+    await _admin(db)
+    cuerpo = {
+        "es_ingreso_ordinario": False,
+        "base_exencion": "UMA_DIAS",
+        "factor_exencion": "90.0000",
+        "integra_sbc": False,
+        "es_provisionable": False,
+        "sujeto_a_tope_conjunto": False,
+        "multiplicador_no_derivable": True,
+        "nota_revision": None,
+    }
+    r = await client.put("/v1/configuracion/percepciones/022", json=cuerpo, headers=ADMIN)
+    assert r.status_code == 200, r.text
+
+    r = await client.post(
+        "/v1/configuracion/percepciones/022/confirmar",
+        json=_confirmar({k: v for k, v in cuerpo.items() if k != "nota_revision"}),
+        headers=ADMIN,
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado"] is True
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"022"}
+
+
+async def test_con_base_ninguna_la_bandera_del_multiplicador_se_rechaza(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """No hay factor al que le falte un multiplicador. Misma regla que `sujeto_a_tope_conjunto`:
+    una bandera que no puede ser cierta es un error de captura, no una opción."""
+    await _admin(db)
+
+    r = await client.put(
+        "/v1/configuracion/percepciones/001",
+        json={
+            "es_ingreso_ordinario": True,
+            "base_exencion": "NINGUNA",
+            "factor_exencion": None,
+            "integra_sbc": True,
+            "es_provisionable": False,
+            "sujeto_a_tope_conjunto": False,
+            "multiplicador_no_derivable": True,
+            "nota_revision": None,
+        },
+        headers=ADMIN,
+    )
+
+    assert r.status_code == 422, r.text
+    assert (await db.scalar(select(func.count()).select_from(CatalogoPercepcionMarca))) == 0

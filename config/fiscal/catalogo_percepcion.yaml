@@ -60,6 +60,18 @@
 #                     esas exclusiones son PARCIALES (hasta un tope; el excedente sí
 #                     integra). Este campo es booleano y no puede expresar un tope: donde la
 #                     exclusión es parcial se capturó el caso típico y se marcó la duda.
+#   multiplicador_no_derivable
+#                     OPCIONAL, por omisión false. Nueve tipos (020, 022, 023, 025, 039, 044,
+#                     051, 052, 053) capturan el número de la ley pero NO el multiplicador,
+#                     porque el CFDI no lo trae: "90 UMA por AÑO DE SERVICIO", "15 UMA
+#                     DIARIAS", "1 UMA por DOMINGO laborado". Con la bandera puesta, B-03 deja
+#                     el tope vacío en vez de calcularlo suponiendo un multiplicador de 1 (que
+#                     daría un tope muy por debajo del legal y lo presentaría como un exceso
+#                     del patrón inexistente). Cada renglón dice EN SU COMENTARIO qué
+#                     multiplicador le falta: la diferencia entre "no derivable" y "falta el
+#                     número de domingos del periodo" es la diferencia entre una duda que
+#                     alguien puede resolver algún día y una que se queda para siempre.
+#                     No cabe con `base_exencion: NINGUNA`: no hay factor al que le falte nada.
 #   es_provisionable  Si el concepto es de los que se devengan. INFORMATIVA: el pasivo
 #                     laboral lo calcula B-08 con `map_concepto_provision` de cada empresa,
 #                     no con esta marca; hoy no la lee ningún informe. Cambiarla no altera
@@ -319,6 +331,11 @@ catalogo_percepcion_marca:
     factor_exencion: '1'
     integra_sbc: true
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # el número de DOMINGOS LABORADOS del periodo. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       el factor '1' es POR DOMINGO LABORADO, no un tope del periodo. El número de domingos trabajados no viene en el CFDI de nómina; sin ese dato el cálculo exentaría una sola UMA por periodo, que es menos de lo que la ley permite.
 
@@ -357,6 +374,11 @@ catalogo_percepcion_marca:
     factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los AÑOS DE SERVICIO del trabajador. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       el factor '90' es POR CADA AÑO DE SERVICIO, no un tope absoluto. Los años de antigüedad no vienen en el nodo de percepciones del CFDI; si se aplica '90' como tope plano, la exención de un trabajador con antigüedad larga sale muy por debajo.
 
@@ -368,6 +390,11 @@ catalogo_percepcion_marca:
     factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los AÑOS DE SERVICIO del trabajador. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       mismo problema del factor "por año de servicio" que el 022.
 
@@ -391,6 +418,11 @@ catalogo_percepcion_marca:
     factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los AÑOS DE SERVICIO del trabajador. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       mismo problema del factor "por año de servicio" que el 022.
 
@@ -563,6 +595,11 @@ catalogo_percepcion_marca:
     factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los AÑOS DE CONTRIBUCIÓN del trabajador. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       dos dudas. (a) Que este tipo signifique "en una sola exhibición" se deduce de que el 044 sea "en parcialidades"; el catálogo del SAT no lo dice. Si en realidad se usa para pagos periódicos, aplica el art. 93, fracción IV con 15 UMA DIARIAS, no 90.
       (b) El factor '90' es por año de contribución, no un tope absoluto.
@@ -577,6 +614,11 @@ catalogo_percepcion_marca:
     factor_exencion: '15'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los DÍAS del periodo de pago (el tope es diario). Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       el factor '15' es un tope DIARIO, no del periodo de pago. En una nómina quincenal el tope real son 15 UMA x 15 días; si se aplica '15' contra el importe del periodo, la exención sale un orden de magnitud por debajo. Además el art. 93, fracción V obliga a considerar TODAS las pensiones del trabajador, las pague quien las pague, y eso el Hub no lo puede saber con los CFDI de un solo patrón.
 
@@ -671,6 +713,11 @@ catalogo_percepcion_marca:
     factor_exencion: '15'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los DÍAS del periodo de pago (el tope es diario). Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       queda la misma duda del 044, que es de modelo y no de régimen: el factor '15' es un tope DIARIO, no del periodo de pago, y el art. 93, fracción V obliga a considerar todas las pensiones del trabajador las pague quien las pague.
 
@@ -686,6 +733,11 @@ catalogo_percepcion_marca:
     factor_exencion: '15'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los DÍAS del periodo de pago (el tope es diario). Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       misma duda de modelo que el 051 y el 044 — el '15' es un tope diario.
 
@@ -700,5 +752,10 @@ catalogo_percepcion_marca:
     factor_exencion: '90'
     integra_sbc: false
     es_provisionable: false
+    # Al `factor_exencion` le falta un multiplicador que el CFDI de nómina NO trae:
+    # los AÑOS DE SERVICIO o de contribución del trabajador. Sin ese dato, `factor x UMA` supone un multiplicador
+    # de 1 y da un tope muy por debajo del legal, que el informe presentaría como un exceso
+    # del patrón que no existe. Por eso B-03 deja la celda vacía en vez de calcularlo.
+    multiplicador_no_derivable: true
     nota_revision: |-
       misma duda de modelo que el 039 — el factor '90' es POR AÑO de servicio o de contribución, no un tope absoluto, y los años no vienen en el CFDI.

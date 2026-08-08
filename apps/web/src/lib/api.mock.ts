@@ -76,7 +76,7 @@ interface DbParamFiscal {
 interface DbMarcaPercepcion {
   tipo_percepcion: string; es_ingreso_ordinario: boolean; base_exencion: BaseExencion;
   factor_exencion: string | null; integra_sbc: boolean; es_provisionable: boolean;
-  sujeto_a_tope_conjunto: boolean; nota_revision: string | null;
+  sujeto_a_tope_conjunto: boolean; multiplicador_no_derivable: boolean; nota_revision: string | null;
   confirmado_por: string | null; confirmado_en: string | null;
 }
 interface DbConfiguracionEmpresa { empresa_id: number; zona_salarial: ZonaSalarial | null; dias_aguinaldo: number | null; factor_prima_vacacional: string | null }
@@ -181,46 +181,48 @@ const db = {
   catalogo_percepcion_marca: [
     {
       tipo_percepcion: '001', es_ingreso_ordinario: true, base_exencion: 'NINGUNA', factor_exencion: null,
-      integra_sbc: true, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      integra_sbc: true, es_provisionable: false, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: false,
       nota_revision: null, confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '002', es_ingreso_ordinario: true, base_exencion: 'UMA_DIAS', factor_exencion: '30.0000',
-      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false,
+      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: false,
       nota_revision: null, confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '005', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
-      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: false,
       nota_revision: 'las dos marcas son condicionales y las condiciones no vienen en el CFDI (aportación pareja, tope del 13%, número de retiros al año). Si el fondo no cumple, el concepto es gravado Y integra al SBC: las dos marcas cambian a la vez.',
       confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '015', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
-      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true,
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true, multiplicador_no_derivable: false,
       nota_revision: 'está SUJETA AL TOPE CONJUNTO de previsión social del penúltimo párrafo del art. 93 (no está en la lista de exceptuados). `PORCENTAJE 100` es la exención en bruto; quien calcule tiene que aplicarle el tope de 1 UMA anual junto con los demás conceptos de previsión social del mismo trabajador, o exentará de más.',
       confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '019', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '50.0000',
-      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: false,
       nota_revision: 'el renglón captura SOLO el 50% del caso general y se pierden tres cosas que el modelo no puede expresar: (a) el 100% para quien gana el salario mínimo, (b) el tope de 5 UMA por semana, (c) que solo aplica dentro del límite de horas de la LFT. El `integra_sbc: false` supone que las horas extra están dentro de los márgenes legales.',
       confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '021', es_ingreso_ordinario: true, base_exencion: 'UMA_DIAS', factor_exencion: '15.0000',
-      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false,
+      integra_sbc: true, es_provisionable: true, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: false,
       nota_revision: null, confirmado_por: 'dgarcia@planjuarez.org', confirmado_en: '2026-08-05 09:20:00',
     },
     {
       tipo_percepcion: '025', es_ingreso_ordinario: false, base_exencion: 'UMA_DIAS', factor_exencion: '90.0000',
-      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false,
+      // Uno de los nueve: el mock lo trae en `true` a propósito, para que la pantalla se pueda
+      // desarrollar contra el caso que hace que B-03 deje el tope vacío.
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: false, multiplicador_no_derivable: true,
       nota_revision: 'el factor es "90 UMA por cada AÑO DE SERVICIO" (art. 93-XIII) y los años de servicio no vienen en el CFDI de nómina.',
       confirmado_por: null, confirmado_en: null,
     },
     {
       tipo_percepcion: '029', es_ingreso_ordinario: true, base_exencion: 'PORCENTAJE', factor_exencion: '100.0000',
-      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true,
+      integra_sbc: false, es_provisionable: false, sujeto_a_tope_conjunto: true, multiplicador_no_derivable: false,
       nota_revision: 'está SUJETA AL TOPE CONJUNTO de previsión social del penúltimo párrafo del art. 93. Además, el art. 27-VI de la LSS excluye los vales de despensa del SBC solo hasta el 40% de la UMA; el excedente sí integra, y este campo es booleano y no puede expresar un tope.',
       confirmado_por: null, confirmado_en: null,
     },
@@ -621,8 +623,9 @@ function exigeTipoPercepcionMock(tipo: string): void {
   }
 }
 
-/** Las validaciones del esquema `MarcasPercepcion` de Pydantic, incluidas **las dos que no llevan
- * default**: `sujeto_a_tope_conjunto` siempre, y `nota_revision` en el `PUT`. Un campo omitido no
+/** Las validaciones del esquema `MarcasPercepcion` de Pydantic, incluidas **las tres que no llevan
+ * default**: `sujeto_a_tope_conjunto` y `multiplicador_no_derivable` siempre, y `nota_revision` en
+ * el `PUT`. Un campo omitido no
  * es "el valor de por omisión", es un 422 — y el mensaje imita el que arma `aApiError` con el
  * `detail` de FastAPI para que la pantalla se pruebe contra el texto que va a recibir de verdad. */
 function exigeMarcasValidas(body: Partial<MarcasPercepcion>, conNota: boolean): void {
@@ -634,6 +637,9 @@ function exigeMarcasValidas(body: Partial<MarcasPercepcion>, conNota: boolean): 
   // Sin default a propósito (doc 05 §8bis): con uno, capturar una marca sujeta al tope conjunto la
   // crearía en `false` en silencio y B-03 exentaría de más.
   if (typeof body.sujeto_a_tope_conjunto !== 'boolean') faltantes.push('sujeto_a_tope_conjunto');
+  // Tampoco lleva default, y este SÍ calcula: con uno, capturar uno de los nueve tipos cuyo
+  // multiplicador el CFDI no trae lo dejaría en `false` y B-03 publicaría un tope supuesto.
+  if (typeof body.multiplicador_no_derivable !== 'boolean') faltantes.push('multiplicador_no_derivable');
   if (conNota && !('nota_revision' in body)) faltantes.push('nota_revision');
   if (faltantes.length > 0) {
     throw new ApiError(422, 'DATOS_INVALIDOS', faltantes.map((c) => `${c}: Field required`).join(' · '));
@@ -646,6 +652,9 @@ function exigeMarcasValidas(body: Partial<MarcasPercepcion>, conNota: boolean): 
   const factor = body.factor_exencion ?? null;
   if (base === 'NINGUNA') {
     if (factor !== null) throw new ApiError(422, 'DATOS_INVALIDOS', 'Value error, con `base_exencion: NINGUNA` no puede haber `factor_exencion`.');
+    if (body.multiplicador_no_derivable) {
+      throw new ApiError(422, 'DATOS_INVALIDOS', 'Value error, `multiplicador_no_derivable: true` no tiene sentido con `base_exencion: NINGUNA` — lo que la bandera dice es que al factor le falta un multiplicador, y aquí no hay factor.');
+    }
     if (body.sujeto_a_tope_conjunto) {
       throw new ApiError(422, 'DATOS_INVALIDOS', 'Value error, `sujeto_a_tope_conjunto: true` no tiene sentido con `base_exencion: NINGUNA` — o el tipo sí tiene exención y falta capturarla, o la marca del tope sobra.');
     }
@@ -675,7 +684,9 @@ function marcasDifieren(fila: DbMarcaPercepcion, body: MarcasPercepcion): boolea
     factorFila !== factorBody ||
     fila.integra_sbc !== body.integra_sbc ||
     fila.es_provisionable !== body.es_provisionable ||
-    fila.sujeto_a_tope_conjunto !== body.sujeto_a_tope_conjunto
+    fila.sujeto_a_tope_conjunto !== body.sujeto_a_tope_conjunto ||
+    // Esta sí calcula, así que entra sin discusión.
+    fila.multiplicador_no_derivable !== body.multiplicador_no_derivable
   );
 }
 
@@ -728,6 +739,7 @@ function marcaASalida(fila: DbMarcaPercepcion): MarcaPercepcion {
     integra_sbc: fila.integra_sbc,
     es_provisionable: fila.es_provisionable,
     sujeto_a_tope_conjunto: fila.sujeto_a_tope_conjunto,
+    multiplicador_no_derivable: fila.multiplicador_no_derivable,
     nota_revision: fila.nota_revision,
     confirmado: fila.confirmado_en !== null,
     confirmado_por: fila.confirmado_por,
@@ -1245,6 +1257,7 @@ export const apiMock: ApiClient = {
         tipo_percepcion: tipo, es_ingreso_ordinario: input.es_ingreso_ordinario,
         base_exencion: input.base_exencion, factor_exencion: factor, integra_sbc: input.integra_sbc,
         es_provisionable: input.es_provisionable, sujeto_a_tope_conjunto: input.sujeto_a_tope_conjunto,
+        multiplicador_no_derivable: input.multiplicador_no_derivable,
         nota_revision: nota, confirmado_por: null, confirmado_en: null,
       };
       db.catalogo_percepcion_marca.push(fila);
@@ -1261,6 +1274,7 @@ export const apiMock: ApiClient = {
       fila.integra_sbc = input.integra_sbc;
       fila.es_provisionable = input.es_provisionable;
       fila.sujeto_a_tope_conjunto = input.sujeto_a_tope_conjunto;
+      fila.multiplicador_no_derivable = input.multiplicador_no_derivable;
       fila.nota_revision = nota;
     }
     logBitacora(u.correo, 'capturar_marca_percepcion', `catalogo_percepcion_marca:${tipo}`, { tipo_percepcion: tipo });
