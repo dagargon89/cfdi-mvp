@@ -66,11 +66,13 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import yaml
-from sqlalchemy import func, or_, select
+from sqlalchemy import collate, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
@@ -149,6 +151,21 @@ class CatalogoDelSatIlegible(ErrorDeConfiguracion):
     Se distingue de un dato inválido porque no lo es: lo que falla es la herramienta con la
     que se iba a validar. Quien la atrape debe **negarse a escribir** (ver
     `exige_tipo_percepcion_conocido`), no dejar pasar el renglón.
+    """
+
+
+class ColisionDeMapeo(ErrorDeConfiguracion):
+    """Dos textos de departamento que MySQL considera **la misma clave** de `map_departamento`.
+
+    No se detecta reimplementando la colación en Python —`utf8mb4_unicode_ci` iguala mayúsculas,
+    espacios finales y acentos, y una segunda copia de esa regla se separaría de la primera— sino
+    **dejando que la base lo diga**: se intenta escribir, y el `1062` que devuelve MySQL se
+    traduce a esto con su propio valor duplicado dentro del mensaje. Así la regla vive en un solo
+    sitio y el mensaje nombra exactamente lo que chocó.
+
+    Existe para que ese caso no salga como `IntegrityError` crudo (un 500 opaco en la pantalla,
+    una traza en la terminal): enumerar las variantes sin explicar por qué solo una se puede
+    mapear sería peor que no enumerarlas.
     """
 
 
@@ -394,11 +411,45 @@ class ConceptoObservado:
     categoria: CategoriaProvision | None
 
 
+# Colación con la que se enumeran los departamentos observados, y la de la tabla que los mapea.
+#
+# `nomina_receptor.departamento` y `map_departamento.departamento_texto` viven las dos en
+# `utf8mb4_unicode_ci`, que es **PAD SPACE** y sin distinción de mayúsculas. Agrupar con la
+# colación de la columna hacía que `'EDIFICIOS'`, `'Edificios'` y `'Edificios '` colapsaran en
+# **un solo renglón** con la suma de sus CFDI, y de ahí salía una cadena de mentiras: la pantalla
+# nunca enumeraba las variantes, `sin_mapear` se calculaba sobre la lista colapsada y llegaba a
+# cero, la pantalla escribía "ya están todos agrupados", y B-06 emitía `DEPARTAMENTO_SIN_MAPEO`
+# nombrando textos que la pantalla no había enseñado nunca. Dos superficies contradiciéndose, y
+# el operador le cree a la primera.
+#
+# `utf8mb4_0900_bin` es la única de las tres que es **NO PAD** (verificado en MySQL 8.4 contra
+# `information_schema.COLLATIONS`): `utf8mb4_bin` distingue mayúsculas pero **no** el espacio
+# final, así que no sirve para esto. Con la NO PAD, cada secuencia de bytes distinta es su propio
+# renglón y la pantalla enumera lo que de verdad hay.
+_COLACION_EXACTA = "utf8mb4_0900_bin"
+_COLACION_DE_MAP_DEPARTAMENTO = "utf8mb4_unicode_ci"
+
+
 @dataclass(frozen=True)
 class DepartamentoObservado:
+    """Un texto de departamento tal como aparece en los CFDI, **byte a byte**.
+
+    `clave_en_la_base` es el texto que `map_departamento` usaría como clave para este renglón, y
+    **lo decide MySQL**, no este código: sale de una ventana particionada por la colación real de
+    esa tabla. Cuando `clave_en_la_base != departamento_texto` hay al menos otra variante que
+    comparte clave con esta, y entonces —hasta que la columna se migre— solo una de las dos puede
+    llevar centro de costo: el `INSERT` de la segunda da `1062`.
+
+    Se expone el hecho y **no se normaliza el texto**: decidir que `'Edificios '` y `'EDIFICIOS'`
+    son el mismo departamento sería decidir un hecho contable a partir de un parecido tipográfico,
+    que es exactamente lo que B-06 rechazó al elegir su llave de agrupamiento. Aquí solo se
+    reporta lo que la base ya decidió sobre sus propias claves.
+    """
+
     departamento_texto: str
     comprobantes: int
     centro_costo: str | None
+    clave_en_la_base: str
 
 
 @dataclass(frozen=True)
@@ -471,31 +522,54 @@ async def observados_de_empresa(db: AsyncSession, empresa: Empresa) -> Observado
                 )
             )
 
+    # Dos niveles: el de dentro agrupa por la variante exacta (NO PAD, distingue mayúsculas y
+    # espacio final) y el de fuera pregunta a MySQL qué clave usaría `map_departamento` para cada
+    # una, particionando por **su** colación. Las dos reglas se quedan dentro de la base: no hay
+    # una segunda copia de la colación de MySQL escrita en Python, que sería imposible de
+    # reproducir fielmente (`utf8mb4_unicode_ci` también iguala acentos).
+    # `departamento` es nullable y `collate` pide una columna no opcional para mypy; el
+    # `is_not(None)` del `WHERE` ya garantiza que no llega ninguno nulo.
+    columna_depto = cast("ColumnElement[str]", NominaReceptor.departamento)
+    variante = collate(columna_depto, _COLACION_EXACTA).label("variante")
+    por_variante = (
+        select(variante, func.count(func.distinct(Comprobante.comprobante_id)).label("cuenta"))
+        .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+        .where(
+            Comprobante.empresa_id == empresa.empresa_id,
+            Comprobante.rfc_emisor == empresa.rfc,
+            Comprobante.tipo_comprobante == "N",
+            # Un departamento nulo no se puede mapear (`departamento_texto` va en la PK de
+            # `map_departamento`), así que listarlo solo agregaría un renglón inaccionable.
+            # B-06 lo trata aparte con su propia bandera.
+            NominaReceptor.departamento.is_not(None),
+        )
+        .group_by(variante)
+        .subquery()
+    )
     filas_depto = (
         await db.execute(
             select(
-                NominaReceptor.departamento,
-                func.count(func.distinct(Comprobante.comprobante_id)),
-            )
-            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
-            .where(
-                Comprobante.empresa_id == empresa.empresa_id,
-                Comprobante.rfc_emisor == empresa.rfc,
-                Comprobante.tipo_comprobante == "N",
-                # Un departamento nulo no se puede mapear (`departamento_texto` va en la PK de
-                # `map_departamento`), así que listarlo solo agregaría un renglón inaccionable.
-                # B-06 lo trata aparte con su propia bandera.
-                NominaReceptor.departamento.is_not(None),
-            )
-            .group_by(NominaReceptor.departamento)
-            .order_by(NominaReceptor.departamento)
+                por_variante.c.variante,
+                por_variante.c.cuenta,
+                func.min(por_variante.c.variante)
+                .over(partition_by=collate(por_variante.c.variante, _COLACION_DE_MAP_DEPARTAMENTO))
+                .label("clave"),
+            ).order_by(por_variante.c.variante)
         )
     ).all()
     return Observados(
         conceptos=conceptos,
         departamentos=[
-            DepartamentoObservado(departamento_texto=texto, comprobantes=cuenta, centro_costo=centros.get(texto))
-            for texto, cuenta in filas_depto
+            DepartamentoObservado(
+                departamento_texto=texto,
+                comprobantes=cuenta,
+                # La búsqueda del centro es exacta (un `dict` de Python), igual que en B-06: una
+                # variante que no sea la que quedó almacenada sale sin mapeo, y eso es lo que B-06
+                # va a reportar. Que las dos superficies digan lo mismo es el punto.
+                centro_costo=centros.get(texto),
+                clave_en_la_base=clave,
+            )
+            for texto, cuenta, clave in filas_depto
         ],
     )
 
@@ -963,6 +1037,29 @@ def detalle_de_config_empresa(config: ConfiguracionEmpresa) -> dict[str, Any]:
             str(config.factor_prima_vacacional) if config.factor_prima_vacacional is not None else None
         ),
     }
+
+
+async def escribir_mapeos(db: AsyncSession) -> None:
+    """`flush` de `map_departamento` / `map_concepto_provision` traduciendo el choque de claves.
+
+    La puerta única de este par de tablas es débil comparada con `guardar_param_fiscal` —el
+    reemplazo total lo arma cada cliente—, pero el `1062` sí se traduce en un solo sitio, para
+    que la pantalla y la terminal expliquen lo mismo.
+    """
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # `orig` trae el mensaje de MySQL, que incluye el valor duplicado
+        # ("Duplicate entry '11-EDIFICIOS' for key 'PRIMARY'"). Se cita tal cual: es la única
+        # forma fiel de decir *qué* chocó sin reimplementar la colación.
+        raise ColisionDeMapeo(
+            "Dos de los renglones que mandaste son la misma clave para la base y solo cabe uno. "
+            "`map_departamento` y `map_concepto_provision` viven en `utf8mb4_unicode_ci`, que no "
+            "distingue mayúsculas ni espacios al final: 'EDIFICIOS', 'Edificios' y 'Edificios ' son "
+            "la misma clave. Deja uno solo; el que quede fuera seguirá cayendo al texto crudo en "
+            f"B-06, y arreglarlo de raíz exige migrar la columna (ver config/fiscal/README.md). "
+            f"MySQL dijo: {exc.orig}"
+        ) from exc
 
 
 async def snapshot_de_tramo(db: AsyncSession, clave: str, vigencia_desde: date) -> dict[str, Any] | None:

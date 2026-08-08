@@ -1344,6 +1344,19 @@ export const apiMock: ApiClient = {
     // de guardar el último en silencio.
     exigeSinDuplicados(input.departamentos.map((d) => d.departamento_texto), 'departamentos', '`departamento_texto`');
     exigeSinDuplicados(input.conceptos_provision.map((c) => `${c.naturaleza}/${c.tipo}/${c.clave}`), 'conceptos_provision', 'la terna (`naturaleza`, `tipo`, `clave`)');
+    // Y dos textos que la base considera la MISMA clave (`utf8mb4_unicode_ci`: ni mayúsculas ni
+    // espacios finales) también se rechazan: el backend lo hace traduciendo el 1062 de MySQL con
+    // `MAPEO_COLISION_DE_CLAVE`. Aquí se aproxima la colación, igual y por lo mismo que
+    // `clave_en_la_base` en `conceptosObservados`.
+    const vistas = new Map<string, string>();
+    for (const d of input.departamentos) {
+      const k = d.departamento_texto.trimEnd().toUpperCase();
+      const antes = vistas.get(k);
+      if (antes !== undefined) {
+        throw new ApiError(422, 'MAPEO_COLISION_DE_CLAVE', `Dos de los renglones que mandaste son la misma clave para la base y solo cabe uno: ${JSON.stringify(antes)} y ${JSON.stringify(d.departamento_texto)}. \`map_departamento\` vive en \`utf8mb4_unicode_ci\`, que no distingue mayúsculas ni espacios al final. Deja uno solo; el que quede fuera seguirá cayendo al texto crudo en B-06, y arreglarlo de raíz exige migrar la columna (ver config/fiscal/README.md).`);
+      }
+      vistas.set(k, d.departamento_texto);
+    }
 
     db.map_departamento = db.map_departamento.filter((m) => m.empresa_id !== empresaId);
     db.map_concepto_provision = db.map_concepto_provision.filter((m) => m.empresa_id !== empresaId);
@@ -1363,10 +1376,22 @@ export const apiMock: ApiClient = {
       categoria: mapeos.conceptos_provision.find((m) => m.naturaleza === n.naturaleza && m.tipo === n.tipo && m.clave === n.clave)?.categoria ?? null,
     }));
     const textos = [...new Set(observados.map((n) => n.departamento))].sort();
+    // `clave_en_la_base` la decide MySQL con la colación real de `map_departamento`
+    // (`utf8mb4_unicode_ci`: ni mayúsculas ni espacios finales ni acentos). Aquí es una
+    // **aproximación del mock** —recorte y mayúsculas— porque reproducir esa colación en
+    // TypeScript no se puede hacer fielmente y fingirlo sería peor. Sirve para que la pantalla se
+    // pueda desarrollar contra el caso; la verdad la da el backend.
+    const claveAproximada = (t: string) => t.trimEnd().toUpperCase();
+    const representante = new Map<string, string>();
+    for (const t of textos) {
+      const k = claveAproximada(t);
+      if (!representante.has(k) || t < representante.get(k)!) representante.set(k, t);
+    }
     const departamentos = textos.map((texto) => ({
       departamento_texto: texto,
       comprobantes: observados.filter((n) => n.departamento === texto).reduce((s, n) => s + n.comprobantes, 0),
       centro_costo: mapeos.departamentos.find((m) => m.departamento_texto === texto)?.centro_costo ?? null,
+      clave_en_la_base: representante.get(claveAproximada(texto)) ?? texto,
     }));
     return {
       conceptos,

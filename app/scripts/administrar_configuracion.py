@@ -605,8 +605,20 @@ async def cmd_observados(db: AsyncSession, args: argparse.Namespace) -> int:
             print(f"      categoría     {c.categoria.value if c.categoria else 'SIN CLASIFICAR'}")
 
     print(f"\nDEPARTAMENTOS OBSERVADOS — {len(observados.departamentos)}")
+    # Los corchetes no son decoración: hacen visible el espacio al final, que es la mitad de las
+    # variantes que colapsaban antes de enumerarlas con una colación NO PAD.
+    comparten = {
+        d.clave_en_la_base for d in observados.departamentos if d.clave_en_la_base != d.departamento_texto
+    }
     for d in observados.departamentos:
-        print(f"  {d.departamento_texto}  ({d.comprobantes} comprobante(s))  -> {d.centro_costo or 'SIN MAPEAR'}")
+        print(f"  [{d.departamento_texto}]  ({d.comprobantes} comprobante(s))  -> {d.centro_costo or 'SIN MAPEAR'}")
+        if d.clave_en_la_base in comparten:
+            print(
+                f"      OJO: comparte clave con las otras variantes de [{d.clave_en_la_base}] "
+                "(la base no distingue mayúsculas ni el espacio final). Solo UNA puede llevar centro "
+                "de costo; la que quede fuera seguirá cayendo al texto crudo en B-06. El arreglo de "
+                "fondo es de esquema: ver config/fiscal/README.md."
+            )
     print()
     _imprimir_pendientes_de_clasificar(observados)
     return 0
@@ -1080,8 +1092,18 @@ async def cmd_clasificar(db: AsyncSession, args: argparse.Namespace) -> int:
         conceptos[terna] = _categoria(cruda[1])
     departamentos: dict[str, str] = {}
     for cruda in args.departamento or []:
-        texto, centro = cruda[0].strip(), cruda[1].strip()
-        if not texto or len(texto) > 100 or not centro or len(centro) > 100:
+        # **El texto del departamento NO se recorta.** Tiene que casar byte a byte con lo que
+        # trae el CFDI —la búsqueda de B-06 es un `dict` de Python— así que recortarlo convertía
+        # `'Edificios '` en `'Edificios'` y producía un mapeo que no casa con nada: inútil y
+        # silencioso. Es además la variante que solo se puede expresar desde aquí, porque la
+        # pantalla la muestra pero un `<input>` invita a perder el espacio.
+        #
+        # No recortar no deja pasar basura: si el espacio se pegó por accidente, el texto no
+        # coincide con ningún departamento observado y la guarda de más abajo lo rechaza con su
+        # nombre. El centro de costo sí se recorta: es un valor que el usuario inventa, no una
+        # clave que tenga que casar con nada.
+        texto, centro = cruda[0], cruda[1].strip()
+        if not texto.strip() or len(texto) > 100 or not centro or len(centro) > 100:
             raise ErrorDeUso(
                 f"`--departamento {cruda[0]!r} {cruda[1]!r}`: los dos textos son obligatorios y no "
                 "pasan de 100 caracteres."
@@ -1169,7 +1191,12 @@ async def cmd_clasificar(db: AsyncSession, args: argparse.Namespace) -> int:
                     categoria=finales_conceptos[(naturaleza, tipo, clave)],
                 )
             )
-        await db.flush()
+        try:
+            await cfg.escribir_mapeos(db)
+        except cfg.ColisionDeMapeo as exc:
+            # Es corregible tecleando otra cosa, así que sale como error de uso (código 1 y
+            # mensaje, sin traza) y no como el `IntegrityError` crudo de la base.
+            raise ErrorDeUso(str(exc)) from None
         await bitacora_service.registrar(
             db,
             actor=actor,

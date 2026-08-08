@@ -357,6 +357,70 @@ visible es mejor que un default plausible.
 
 ---
 
+## 7 bis. Deuda de esquema conocida: las variantes ortográficas de `departamento_texto`
+
+**Esto no se arregla desde ningún archivo de este directorio: exige una migración.** Queda escrito
+aquí para que no se descubra en vivo.
+
+`nomina_receptor.departamento` y `map_departamento.departamento_texto` viven en
+`utf8mb4_unicode_ci`, que es **PAD SPACE** y no distingue mayúsculas (ni acentos). Consecuencia:
+para MySQL, `'EDIFICIOS'`, `'Edificios'` y `'Edificios '` son **la misma clave primaria**.
+
+Lo que ya está mitigado (y lo que no):
+
+| pieza | antes | ahora |
+|---|---|---|
+| enumerar los departamentos observados | agrupaba con la colación de la columna: las tres variantes colapsaban en un renglón con la suma de sus CFDI | agrupa con `utf8mb4_0900_bin` (la única **NO PAD** de las tres): cada variante es su propio renglón, en la pantalla y en `administrar_configuracion observados` |
+| el contador `sin_mapear` | se calculaba sobre la lista colapsada y llegaba a cero | cuenta las variantes de verdad, así que ya no dice "ya están todos agrupados" cuando B-06 va a quejarse |
+| capturar la segunda variante | `IntegrityError` 1062 → 500 opaco | `422 MAPEO_COLISION_DE_CLAVE`, con el valor duplicado que reporta MySQL y la explicación |
+| **poder mapear las dos** | imposible | **sigue siendo imposible** |
+
+Por qué sigue siendo imposible: la escritura usa las reglas de la base (una fila por clave, y las
+variantes comparten clave) mientras la lectura es un `dict` de Python (`cfg.centro_de_costo`), que
+sí las distingue. Así que se puede mapear **una** variante y la otra seguirá cayendo al texto crudo
+en B-06, sin forma de capturarla. Es el mismo residuo que declara el docstring de
+`app/informes/b06_centro_costo.py`.
+
+**Lo que NO se hizo, a propósito:** normalizar el texto (plegar mayúsculas, recortar espacios) para
+que las variantes se traten como un solo departamento. Eso haría que el sistema decidiera un hecho
+contable —"estos dos son el mismo centro de costo"— a partir de un parecido tipográfico, y es
+exactamente el criterio que B-06 rechazó al elegir su llave de agrupamiento. Unificar variantes es
+para lo que existe `map_departamento`; hacerlo por debajo esconde el problema que el mapeo resuelve.
+
+### El arreglo de fondo
+
+Dos opciones, y hay que elegir una antes de que haya muchos mapeos capturados:
+
+1. **Migrar la columna a colación binaria NO PAD** (`utf8mb4_0900_bin`) en
+   `map_departamento.departamento_texto` — y, por coherencia, en `nomina_receptor.departamento`.
+   Cada variante pasa a ser mapeable por separado y el operador decide qué hacer con cada una.
+   Es la opción coherente con "el texto del departamento es un dato opaco del patrón".
+2. **Añadir una columna normalizada con su índice único** y dejar la original como se recibió. Más
+   invasiva y obliga a definir la normalización en el esquema (que es donde tendría que estar si se
+   eligiera este camino, no en Python).
+
+**Qué hacer con lo ya capturado.** Con la opción 1 la migración es compatible hacia atrás: las
+filas existentes siguen siendo válidas y su clave no cambia; lo único que aparece es la
+**posibilidad** de insertar variantes que antes se rechazaban. No hay que reescribir nada ni
+reprocesar informes. Antes de correrla conviene listar los grupos con variantes para revisarlos a
+mano, porque después van a ser mapeables por separado y alguien tiene que decidir si de verdad son
+departamentos distintos:
+
+```sql
+SELECT c.empresa_id,
+       MIN(r.departamento) AS clave_actual,
+       COUNT(DISTINCT r.departamento COLLATE utf8mb4_0900_bin) AS variantes,
+       GROUP_CONCAT(DISTINCT CONCAT('[', r.departamento COLLATE utf8mb4_0900_bin, ']')) AS formas
+  FROM nomina_receptor r
+  JOIN comprobantes c ON c.comprobante_id = r.comprobante_id
+ WHERE r.departamento IS NOT NULL AND c.tipo_comprobante = 'N'
+ GROUP BY c.empresa_id, r.departamento
+HAVING variantes > 1;
+```
+
+Al 2026-08-07 esa consulta no devuelve nada en la base real: los dos únicos textos son `EDIFICIOS`
+y `SOCIAL`, sin variantes. Es blindaje, no incidente — pero se activa en cuanto aparezca la primera.
+
 ## 8. Qué verifican las pruebas y qué no
 
 `tests/test_semillas_fiscales.py` (7 pruebas) **no valida la corrección fiscal** —eso es

@@ -383,10 +383,20 @@ export interface ConceptoObservado {
   categoria: CategoriaProvision | null;
 }
 
+/** Un texto de departamento tal como viene en los CFDI, **byte a byte**: `'EDIFICIOS'` y
+ * `'Edificios '` son dos renglones. Antes colapsaban en uno (el agrupamiento iba con la colación
+ * de la columna, que no distingue mayúsculas ni espacios finales) y la pantalla no podía enseñar
+ * lo que B-06 luego nombraba en `DEPARTAMENTO_SIN_MAPEO`.
+ *
+ * `clave_en_la_base` es la clave que `map_departamento` usaría, y **la decide MySQL**. Cuando no
+ * coincide con `departamento_texto`, otra variante comparte clave con esta y **solo una de las dos
+ * puede llevar centro de costo** hasta que se migre la columna: hay que avisarlo antes de que
+ * alguien gaste el intento, porque el segundo guardado se rechaza con `MAPEO_COLISION_DE_CLAVE`. */
 export interface DepartamentoObservado {
   departamento_texto: string;
   comprobantes: number;
   centro_costo: string | null;
+  clave_en_la_base: string;
 }
 
 /** `sin_clasificar` es el marcador que la pantalla necesita para decir "te faltan N": mientras

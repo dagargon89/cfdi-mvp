@@ -688,7 +688,17 @@ async def guardar_mapeos(
                 categoria=concepto.categoria,
             )
         )
-    await db.flush()
+    try:
+        # `_exige_sin_duplicados` atrapa las claves repetidas **exactas**; lo que no puede atrapar
+        # es que dos textos distintos sean la misma clave para la colación de la tabla, porque eso
+        # exigiría reimplementar `utf8mb4_unicode_ci` en Python. Lo dice la base y aquí se traduce.
+        await cfg.escribir_mapeos(db)
+    except cfg.ColisionDeMapeo as exc:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"codigo": "MAPEO_COLISION_DE_CLAVE", "mensaje": str(exc)},
+        ) from exc
 
     salida = await _leer_mapeos(db, empresa_id)
     await bitacora_service.registrar(
@@ -768,7 +778,10 @@ async def conceptos_observados(
     ]
     departamentos = [
         DepartamentoObservadoOut(
-            departamento_texto=d.departamento_texto, comprobantes=d.comprobantes, centro_costo=d.centro_costo
+            departamento_texto=d.departamento_texto,
+            comprobantes=d.comprobantes,
+            centro_costo=d.centro_costo,
+            clave_en_la_base=d.clave_en_la_base,
         )
         for d in observados.departamentos
     ]

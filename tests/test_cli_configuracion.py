@@ -35,10 +35,35 @@ quedan anotadas aquí porque se van a volver a pisar:
    el `if` de `guardar_param_fiscal` en vez del de `confirmar_param_fiscal`: la mutación
    "sobrevivía" por un motivo falso. Los anclajes tienen que incluir la línea siguiente.
 
-Y un hallazgo que salió de esas mutaciones y que conviene recordar al escribir pruebas nuevas:
-una comprobación **fuera** de la transacción (el vistazo previo que imprime el plan) tapa la
-guarda de dentro, así que las pruebas que pasan por el camino feliz no prueban la guarda que
-de verdad decide. Ver `test_la_guarda_que_decide_esta_dentro_de_la_transaccion`.
+Y la quinta, que es de la misma familia y **ya costó tres veces en esta fase**:
+
+5. **Una prueba que ejercita el camino del cliente NO prueba la puerta.** Toda comprobación que
+   el comando hace *antes* de llamar al servicio —el vistazo previo del plan, la comparación de
+   `--marcas`, la regla del `isatty`— **tapa** la guarda de dentro, así que la mutación que borra
+   la guarda sobrevive y la evidencia dice que está protegida cuando no lo está. Pasó con M1
+   (ronda 2, el vistazo previo tapando la comparación del importe), con el `isatty` (ronda 3, que
+   además no protegía nada) y con M25 (ronda 4, `--marcas` tapando `marcas_difieren`). **Hay que
+   llamar a la puerta directamente**, como hacen
+   `test_la_guarda_que_decide_esta_dentro_de_la_transaccion` y
+   `test_la_puerta_del_servicio_rechaza_aunque_la_marca_no_calcule_nada`.
+
+Y una sexta, de la misma familia pero al revés en el tiempo, que apareció al corregir B-08
+(`tests/test_informe_b08.py`, ronda 1):
+
+6. **Arreglar un defecto puede desactivar en silencio la protección de una prueba en otro sitio,
+   y la evidencia vieja sigue pareciendo válida.** *Defensa en profundidad buena, prueba muerta
+   mala.* En B-08 el arreglo de un Critical hizo que el promedio del salario diario **descartara**
+   los periodos sin sueldo; a partir de ahí, la mutación que quitaba el filtro de nóminas
+   ordinarias ya no cambiaba el resultado del escenario de su prueba —la nómina extraordinaria del
+   fixture era justamente un periodo sin sueldo—, así que esa prueba dejó de proteger el filtro que
+   dice proteger **sin que nadie la tocara**. Solo se vio porque la ronda de corrección volvió a
+   correr las mutaciones **viejas**, no únicamente las nuevas.
+
+   La lección práctica: **al arreglar un defecto, reverifica las mutaciones anteriores del mismo
+   módulo.** Una mutación que muere hoy puede sobrevivir mañana por un arreglo correcto hecho en
+   otra parte, y ninguna suite verde lo delata. Si una mutación vieja empieza a sobrevivir, el
+   fixture es lo que hay que reforzar (en B-08: darle a la nómina extraordinaria una percepción de
+   sueldo, para que incluirla vuelva a cambiar la cifra), no la mutación lo que hay que retirar.
 """
 
 from __future__ import annotations
@@ -54,7 +79,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.bitacora import Bitacora
@@ -1553,3 +1578,201 @@ async def test_la_primera_carga_escribe_lo_que_el_archivo_trae(db: AsyncSession,
     assert config.zona_salarial is ZonaSalarial.ZLFN
     assert config.dias_aguinaldo == 30
     assert config.factor_prima_vacacional == Decimal("0.2500")
+
+
+# --------------------------------------------------------------------------------------
+# 15. La cadena de la colación: variantes ortográficas de `departamento_texto`
+# --------------------------------------------------------------------------------------
+#
+# Estas pruebas corren contra **MySQL de verdad** (el contenedor efímero del conftest) y no
+# contra una simulación en Python, porque el defecto vive en cómo agrupa la base: una versión en
+# memoria compararía con `==` de Python y no reproduciría ni el PAD SPACE ni la insensibilidad a
+# mayúsculas de `utf8mb4_unicode_ci`, que es justo lo que se está probando.
+
+
+async def _nomina_con_departamento(db: AsyncSession, empresa_id: int, uuid: str, departamento: str) -> None:
+    comprobante = await factories.crear_comprobante(
+        db, empresa_id=empresa_id, uuid=uuid, rfc_emisor=RFC_EMPRESA, tipo_comprobante="N",
+        estatus=EstatusCfdi.VIGENTE,
+    )
+    db.add(NominaReceptor(comprobante_id=comprobante.comprobante_id, departamento=departamento))
+    await db.commit()
+
+
+async def test_las_variantes_ortograficas_se_enumeran_una_por_una(db: AsyncSession) -> None:
+    """La cadena que esto corta, eslabón por eslabón: el agrupamiento iba con la colación de la
+    columna (`utf8mb4_unicode_ci`, **PAD SPACE** y sin distinguir mayúsculas), así que las tres
+    variantes colapsaban en un renglón con `COUNT = 3`; la pantalla nunca las enumeraba;
+    `sin_mapear` se calculaba sobre la lista colapsada y llegaba a cero; la pantalla escribía "ya
+    están todos agrupados"; y B-06 emitía `DEPARTAMENTO_SIN_MAPEO` nombrando textos que la
+    pantalla no había enseñado jamás. **Dos superficies contradiciéndose.**
+
+    `utf8mb4_bin` no habría servido: distingue mayúsculas pero sigue siendo PAD SPACE, así que
+    `'Edificios '` y `'Edificios'` seguirían colapsando (verificado contra
+    `information_schema.COLLATIONS` en MySQL 8.4).
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    for i, texto in enumerate(("EDIFICIOS", "Edificios", "Edificios ")):
+        await _nomina_con_departamento(db, empresa_id, f"99999999-9999-9999-9999-99999999000{i}", texto)
+
+    observados = await cfg.observados_de_empresa(db, empresa)
+
+    textos = sorted(d.departamento_texto for d in observados.departamentos)
+    assert textos == ["EDIFICIOS", "Edificios", "Edificios "], (
+        "cada secuencia de bytes distinta es su propio renglón, incluido el espacio final"
+    )
+    assert all(d.comprobantes == 1 for d in observados.departamentos), "y cada una con SU cuenta, no la suma"
+
+
+async def test_dos_departamentos_de_verdad_distintos_siguen_siendo_dos(db: AsyncSession) -> None:
+    """La gemela: enumerar byte a byte no puede partir lo que no está partido. Sin ella, un
+    agrupamiento roto de otra forma —por comprobante, digamos— pasaría igual de verde."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    await _nomina_con_departamento(db, empresa_id, "99999999-9999-9999-9999-999999990010", "EDIFICIOS")
+    await _nomina_con_departamento(db, empresa_id, "99999999-9999-9999-9999-999999990011", "EDIFICIOS")
+    await _nomina_con_departamento(db, empresa_id, "99999999-9999-9999-9999-999999990012", "SOCIAL")
+
+    observados = await cfg.observados_de_empresa(db, empresa)
+
+    por_texto = {d.departamento_texto: d for d in observados.departamentos}
+    assert set(por_texto) == {"EDIFICIOS", "SOCIAL"}
+    assert por_texto["EDIFICIOS"].comprobantes == 2, "el mismo texto exacto sí agrupa"
+    assert por_texto["SOCIAL"].comprobantes == 1
+
+
+async def test_la_clave_de_la_base_la_decide_mysql_y_delata_las_variantes(db: AsyncSession) -> None:
+    """Enumerar sin más dejaría al operador intentando mapear la segunda variante para recibir un
+    1062. `clave_en_la_base` es la clave que `map_departamento` usaría, calculada por **MySQL**
+    con la colación real de esa tabla — no por una copia de la colación escrita en Python, que
+    sería infiel (`utf8mb4_unicode_ci` también iguala acentos)."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    for i, texto in enumerate(("EDIFICIOS", "Edificios ", "SOCIAL")):
+        await _nomina_con_departamento(db, empresa_id, f"99999999-9999-9999-9999-99999999002{i}", texto)
+
+    observados = await cfg.observados_de_empresa(db, empresa)
+    por_texto = {d.departamento_texto: d for d in observados.departamentos}
+
+    # Las dos variantes comparten clave, y es la misma para las dos.
+    assert por_texto["EDIFICIOS"].clave_en_la_base == por_texto["Edificios "].clave_en_la_base
+    # Y un departamento sin variantes es su propia clave: así la pantalla sabe a quién avisar.
+    assert por_texto["SOCIAL"].clave_en_la_base == "SOCIAL"
+    con_aviso = [d.departamento_texto for d in observados.departamentos if d.clave_en_la_base != d.departamento_texto]
+    assert con_aviso and "SOCIAL" not in con_aviso
+
+
+async def test_mapear_las_dos_variantes_se_rechaza_explicando_por_que(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """El segundo eslabón, el que enumerar solo no cierra: la PK de `map_departamento` no puede
+    guardar las dos, así que el `INSERT` da 1062. Sin traducirlo, el operador ve un
+    `IntegrityError` crudo — y enumerar las variantes para luego reventar es peor que no
+    enumerarlas.
+
+    La colisión **no se detecta reimplementando la colación**: se intenta escribir y se traduce
+    lo que MySQL contesta, citando su propio valor duplicado.
+    """
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    for i, texto in enumerate(("EDIFICIOS", "Edificios ")):
+        await _nomina_con_departamento(db, empresa_id, f"99999999-9999-9999-9999-99999999003{i}", texto)
+
+    codigo = await _correr(
+        db, "clasificar", "--empresa-id", str(empresa_id),
+        "--departamento", "EDIFICIOS", "CC-01",
+        "--departamento", "Edificios ", "CC-02",
+        "--actor", ACTOR, "--si",
+    )
+
+    assert codigo == 1
+    salida = capsys.readouterr()
+    # **Esta aserción es la que hace honesta la prueba.** La primera versión pasaba por el motivo
+    # equivocado: el comando recortaba el texto, `'Edificios '` se volvía `'Edificios'`, y lo que
+    # rechazaba era la guarda de "no aparece en ningún CFDI" — la colisión no se llegaba a
+    # intentar nunca. Lo destapó la mutación que quitaba la traducción del 1062 y no hacía fallar
+    # nada. Sin comprobar **por qué** falla, esto era una de esas pruebas que no protegen nada.
+    assert "misma clave para la base" in salida.err, salida.err
+    assert "MySQL dijo" in salida.err, "el valor duplicado lo tiene que decir la base, no nosotros"
+    db.expire_all()
+    assert await _contar(db, MapDepartamento) == 0, "o entran las dos o no entra ninguna"
+
+
+async def test_mapear_una_sola_variante_si_entra(db: AsyncSession) -> None:
+    """La gemela: la limitación es "solo una", no "ninguna". Sin esto, un rechazo que abortara
+    cualquier mapeo de departamentos pasaría igual de verde la prueba de arriba."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    for i, texto in enumerate(("EDIFICIOS", "Edificios ")):
+        await _nomina_con_departamento(db, empresa_id, f"99999999-9999-9999-9999-99999999004{i}", texto)
+
+    codigo = await _correr(
+        db, "clasificar", "--empresa-id", str(empresa_id),
+        "--departamento", "EDIFICIOS", "CC-01", "--actor", ACTOR, "--si",
+    )
+
+    assert codigo == 0
+    # Sin `expire_all()`: las dos consultas de abajo son SELECT frescos, y expirar dejaría el
+    # `empresa` cargado sin atributos y su recarga perezosa reventaría fuera del contexto async.
+    assert await cfg.centro_de_costo(db, empresa_id) == {"EDIFICIOS": "CC-01"}
+    # Y la otra variante sigue SIN mapeo, que es lo que B-06 va a reportar: las dos superficies
+    # dicen lo mismo, que es el punto de todo esto.
+    observados = await cfg.observados_de_empresa(db, empresa)
+    sin_centro = [d.departamento_texto for d in observados.departamentos if d.centro_costo is None]
+    assert sin_centro == ["Edificios "]
+
+
+async def test_el_estado_avisa_de_las_variantes_que_comparten_clave(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Y se dice donde se mira, no solo en el README: quien lee `observados` tiene que ver que
+    solo una de las dos podrá llevar centro de costo, **antes** de gastar el intento."""
+    await _admin(db)
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    for i, texto in enumerate(("EDIFICIOS", "Edificios ")):
+        await _nomina_con_departamento(db, empresa_id, f"99999999-9999-9999-9999-99999999005{i}", texto)
+
+    assert await _correr(db, "observados", "--empresa-id", str(empresa_id)) == 0
+
+    salida = capsys.readouterr().out
+    assert "[Edificios ]" in salida, "el corchete es lo único que hace visible el espacio final"
+    assert "comparte clave" in salida
+    assert "Solo UNA puede llevar centro de costo" in salida
+    assert "README" in salida, "el arreglo de fondo tiene que ser localizable desde aquí"
+
+
+async def test_la_colacion_de_las_dos_columnas_es_la_que_esta_asumida(db: AsyncSession) -> None:
+    """Todo lo de arriba depende de una propiedad del **esquema**, no del código: que las dos
+    columnas vivan en `utf8mb4_unicode_ci` (PAD SPACE, insensible a mayúsculas). Si alguien la
+    cambia —o si un servidor con otro default se cuela porque los modelos dejaran de declararla—
+    las variantes dejarían de colisionar y la mitad de estas pruebas pasaría sin probar nada.
+
+    Se comprueba contra `information_schema` de la base de pruebas, que es la única forma de
+    saber que el entorno de pruebas y el de producción coinciden en esto.
+    """
+    filas = (
+        await db.execute(
+            text(
+                "SELECT TABLE_NAME, COLLATION_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME IN ('departamento_texto', 'departamento')"
+            )
+        )
+    ).all()
+
+    por_tabla = {tabla: colacion for tabla, colacion in filas}
+    assert por_tabla["map_departamento"] == "utf8mb4_unicode_ci"
+    assert por_tabla["nomina_receptor"] == "utf8mb4_unicode_ci"
+
+    pad = (
+        await db.execute(
+            text(
+                "SELECT PAD_ATTRIBUTE FROM information_schema.COLLATIONS "
+                "WHERE COLLATION_NAME = 'utf8mb4_unicode_ci'"
+            )
+        )
+    ).scalar_one()
+    assert pad == "PAD SPACE", "si dejara de ser PAD SPACE, el espacio final ya no colisionaría"

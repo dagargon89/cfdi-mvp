@@ -282,6 +282,12 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
   const clasificables = observados.conceptos.filter((c) => c.naturaleza === 'P' && c.clave !== null);
   const sinClasificarAhora = clasificables.filter((c) => !categorias[claveDeConcepto(c)]).length;
   const sinMapearAhora = observados.departamentos.filter((d) => !centros[d.departamento_texto]?.trim()).length;
+  // Variantes del mismo departamento que la base considera la misma clave. `clave_en_la_base` la
+  // decide MySQL con la colación real de `map_departamento`; aquí solo se agrupa por ella, para no
+  // tener una segunda copia de esa regla en TypeScript (que además sería infiel: la colación
+  // también iguala acentos).
+  const conVariantes = observados.departamentos.filter((d) => d.clave_en_la_base !== d.departamento_texto);
+  const clavesConVariantes = new Set(conVariantes.map((d) => d.clave_en_la_base));
   const sinClave = observados.conceptos.filter((c) => c.clave === null);
 
   return (
@@ -368,9 +374,19 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
           <div className="border-t border-border pt-3">
             <h4 className="m-0 text-[14px] font-semibold">Departamentos y centros de costo</h4>
             <p className="m-0 mt-1 text-[13px] text-text-muted text-pretty max-w-[80ch]">
-              Los departamentos tal como vienen escritos en la nómina. Agrúpalos en centros de costo para que el informe
+              Los departamentos tal como vienen escritos en la nómina, <strong>byte a byte</strong>: si tu nómina escribió
+              el mismo departamento de dos formas, aquí salen las dos. Agrúpalos en centros de costo para que el informe
               de costo de nómina (B-06) sume por centro; {sinMapearAhora > 0 ? `mientras falten (${sinMapearAhora}), agrupa por el texto crudo y lo avisa.` : 'ya están todos agrupados.'}
             </p>
+            {conVariantes.length > 0 && (
+              <p role="status" className="m-0 mt-2 rounded-md bg-warning-soft text-warning px-3 py-2.5 text-[13px] text-pretty max-w-[80ch]">
+                Ojo con {conVariantes.length === 1 ? 'un departamento escrito' : `${conVariantes.length} departamentos escritos`} de más de una forma
+                (mayúsculas distintas o un espacio al final). La base <strong>no distingue esas variantes</strong> como claves, así que
+                <strong> solo una de ellas puede llevar centro de costo</strong>: la que quede sin él seguirá contando aparte en B-06, con su texto
+                crudo. No lo arreglamos por debajo a propósito — decidir que dos formas son el mismo departamento es una decisión contable, no
+                tipográfica. El arreglo de fondo es de esquema y está anotado en <code>config/fiscal/README.md</code>.
+              </p>
+            )}
           </div>
           <div className="overflow-x-auto">
             <table>
@@ -385,7 +401,16 @@ function Clasificacion({ empresaId, puedeMutar }: { empresaId: number; puedeMuta
               <tbody>
                 {observados.departamentos.map((d) => (
                   <tr key={d.departamento_texto} className="border-t border-border">
-                    <td className="px-3 py-2 font-mono text-xs">{d.departamento_texto}</td>
+                    <td className="px-3 py-2 font-mono text-xs">
+                      {/* Entre corchetes: es la única forma de ver un espacio al final, que es la
+                          mitad de las variantes que antes colapsaban en un solo renglón. */}
+                      [{d.departamento_texto}]
+                      {clavesConVariantes.has(d.clave_en_la_base) && (
+                        <span className="block mt-0.5 font-sans text-[12px] text-warning text-pretty">
+                          Misma clave que las otras formas de [{d.clave_en_la_base}]: solo una puede llevar centro de costo.
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-right text-[13px] tabular-nums">{d.comprobantes}</td>
                     <td className="px-3 py-2">
                       <input

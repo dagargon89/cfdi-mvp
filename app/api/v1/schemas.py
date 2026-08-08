@@ -677,9 +677,23 @@ class ConceptoObservadoOut(BaseModel):
 
 
 class DepartamentoObservadoOut(BaseModel):
+    """Un texto de departamento tal como viene en los CFDI, **byte a byte**.
+
+    Los renglones se enumeran con una colación NO PAD y sensible a mayúsculas, así que
+    `'EDIFICIOS'` y `'Edificios '` son **dos** renglones. Antes colapsaban en uno y la pantalla
+    no podía enseñar lo que B-06 luego nombraba en `DEPARTAMENTO_SIN_MAPEO`.
+
+    `clave_en_la_base` es la clave que `map_departamento` usaría para este renglón, y **la decide
+    MySQL** (ver `configuracion_fiscal.DepartamentoObservado`). Cuando no coincide con
+    `departamento_texto`, hay otra variante que comparte clave con esta y solo una de las dos
+    puede llevar centro de costo hasta que se migre la columna: la pantalla tiene que decirlo
+    **antes** de que alguien gaste el intento, porque el segundo `INSERT` da 1062.
+    """
+
     departamento_texto: str
     comprobantes: int
     centro_costo: str | None
+    clave_en_la_base: str
 
 
 class ObservadosEmpresaOut(BaseModel):
