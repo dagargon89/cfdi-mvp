@@ -53,7 +53,30 @@ falta, que es lo que permite ver el caso.
 Dos niveles distintos **sí** se funden en un mismo grupo cuando resuelven al mismo centro:
 si "EDIF" está mapeado a "EDIFICIOS" y otro CFDI trae el texto crudo "EDIFICIOS", los dos
 son el mismo centro de costo y suman en la misma fila. El nivel de resolución no forma
-parte de la llave de agrupamiento, a propósito.
+parte de la llave de agrupamiento, a propósito. Lo único que **sí** entra en la llave, además
+del centro, es si el CFDI venía sin departamento: un centro de costo o un texto crudo que se
+llamara literalmente igual que `SIN_DEPARTAMENTO` se fundiría con el grupo de los ausentes
+mientras se contaría en otro nivel del censo, y el rótulo dejaría de significar lo que dice.
+Es un caso rebuscado y la guarda cuesta un elemento de la tupla.
+
+El otro lado del agrupamiento: el **valor** configurado del centro de costo
+----------------------------------------------------------------------------
+La cascada instrumenta a fondo el lado del *texto del departamento*, pero el agrupamiento
+tiene un segundo lado que puede salir mal igual de callado: **el valor de
+`map_departamento.centro_costo` es texto libre sin catálogo** (la pantalla es un `<input>` y
+el esquema solo exige `min_length=1`). Si alguien mapea `EDIF → "EDIFICIOS"` y
+`EDIFICIO → "Edificios"`, salen **dos** centros de costo, los dos contados como nivel 1, y sin
+esta comprobación el censo diría "2 se resolvieron con el mapeo" sin una sola alerta: el
+informe se vería impecable con el gasto partido en dos.
+
+Se detecta **desde el mapa**, no desde las filas impresas, y se **reporta sin normalizar**
+(`CENTRO_DE_COSTO_AMBIGUO`, más `CENTRO_DE_COSTO_EN_BLANCO` para su variante degenerada, que
+`min_length=1` deja pasar). Reportar y no unificar es la misma doctrina que con el texto del
+departamento, y aquí es más importante todavía: unificar dos centros por su parecido
+tipográfico sería el sistema decidiendo un hecho contable —que esos dos son el mismo centro—
+sobre un dato que nadie revisó. Se detecta desde el mapa y no desde lo impreso porque una
+configuración ambigua es un defecto de configuración aunque en este rango no haya cobrado
+nadie de esos departamentos: el arreglo se hace una vez y sirve para todos los rangos.
 
 Cómo se reporta la calidad del agrupamiento, y por qué no cuelga de una fila
 -----------------------------------------------------------------------------
@@ -70,8 +93,12 @@ La ficha pide dos cosas distintas y este módulo las emite con **dos claves dist
   del agrupamiento salió de una configuración revisada y qué parte de un texto libre.
   **Se emite siempre**, incluso cuando todo resolvió por el mapeo, y eso no contradice la
   regla de que "una bandera que dispara siempre es peor que no tenerla": esa regla es sobre
-  *alertas*, y esta no lo es. Por eso lleva severidad `baja` y clave propia, para que quien
-  filtre la hoja por severidad no la confunda con un hallazgo.
+  *alertas*, y esta es un **censo**. Por eso lleva severidad `baja` y clave propia, para que
+  quien filtre la hoja por severidad no la confunda con un hallazgo. **No es una excepción
+  inventada aquí:** `b10_validacion_receptor` emite `VALIDACIONES_EJECUTADAS` con la misma
+  severidad, el mismo ámbito y el mismo argumento —"sin este número, una hoja `Datos` vacía no
+  distingue *los datos están bien* de *no se validó nada*"—, y ahí también existe porque las
+  pruebas que aseveran ausencia pasan **más fácil** cuando se borra la comprobación.
 
 **Ninguna de las dos depende de que se imprima una fila** (la regla general del docstring de
 `b03_gravado_exento`): se calculan sobre el universo de CFDI, no sobre las filas agregadas.
@@ -99,22 +126,35 @@ capturadas y confirmadas como cualquier otro valor fiscal (§2.12). Una cifra es
 presentada junto a cifras timbradas, en el informe con el que se comprueba un recurso
 etiquetado, es exactamente el tipo de error caro que este proyecto evita.
 
-**Qué sí es "Costo bruto", entonces:** total de percepciones + otros pagos, tal como lo
-define la ficha. Conviene saber que entre los "otros pagos" viaja el **subsidio para el
-empleo entregado en efectivo**, que el patrón desembolsa pero recupera contra el ISR: no es
-costo patronal neto. No se descuenta aquí —cambiaría la definición de la columna de la
-ficha— pero queda dicho para que nadie lo lea como gasto propio.
+**Qué sí es "Costo bruto", y el subsidio dentro de él.** Es total de percepciones + otros
+pagos, tal como lo define la ficha, y **no se redefine**: esa columna tiene que atar con
+`nomina.total_percepciones + total_otros_pagos` y con lo que B-01 y B-02 reportan del mismo
+periodo. Publicar aquí un "costo bruto neto de subsidio" sería una columna que se llama igual
+que en los otros informes y significa otra cosa, que es exactamente el defecto que
+`universo_nomina.banderas_de_gravado_y_exento_descuadrados` existe para no repetir ("Total
+gravado" significaba dos cosas según el informe y nadie lo advertía); con un financiador de
+por medio, la cifra que no ata con la de al lado es la que dispara la observación.
+
+Pero el problema contable es real: entre los "otros pagos" viaja el **subsidio para el empleo
+entregado en efectivo** (`c_TipoOtroPago` `002`), que el patrón desembolsa y **recupera contra
+el ISR**, así que no es costo propio. La salida es **aditiva**: se publica en su propia columna,
+«Subsidio para el empleo entregado», al lado de «Otros pagos». "Costo bruto" sigue significando
+lo de la ficha y atando con todo, quien lea resta él mismo, y nada queda escondido. Va además
+en `notas`, porque quien recibe el Excel no lee este docstring.
 
 Reglas transversales que este módulo respeta
 ----------------------------------------------
 - **`Decimal` de punta a punta.** Ni un `float`, ni un `round()`, ni un `quantize()`: el
   único redondeo del sistema es el `ROUND_HALF_UP` de `app.informes.excel` al escribir la
-  celda (R-T4).
+  celda (R-T4). Ojo con su consecuencia en el porcentaje: ver `_porcentaje`.
 - **Cero, no vacío** (R-T7) en toda celda de importe. Aquí no hay ninguna celda que dependa
   de configuración fiscal por capturar, así que no hay ningún hueco legítimo: la ausencia de
   `map_departamento` degrada el **agrupamiento**, nunca los importes.
 - **Cero N+1** (regla 11): cuatro consultas agregadas para todo el informe, más el universo
-  y las banderas compartidas. Ninguna por empleado ni por comprobante.
+  y las banderas compartidas. Ninguna por empleado ni por comprobante. Y las tres tablas del
+  `outerjoin` de `universo()` (`nomina_receptor`, `nomina_totales`, `comprobante_detalle`)
+  tienen `comprobante_id` como PK, así que no multiplican filas: los importes que se suman
+  recorriendo el universo no se pueden inflar por un `join` en abanico.
 - **Claves del catálogo del SAT como texto** (`'001'`, nunca `1`).
 - **Ningún importe fiscal codificado** (§2.12): este informe suma lo timbrado y no aplica
   ningún factor, tope ni tasa, así que no lee `param_fiscal` en absoluto.
@@ -125,6 +165,7 @@ Reglas transversales que este módulo respeta
 
 from __future__ import annotations
 
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -178,10 +219,62 @@ _CLAVE_DEDUCCION_IMSS = "001"
 cuota, la única que trae el CFDI. Mismo valor que `b05_acumulado_anual._CLAVE_DEDUCCION_IMSS`,
 declarado aparte a propósito: es una clave de catálogo, no lógica compartida entre módulos."""
 
+_CLAVE_OTRO_PAGO_SUBSIDIO = "002"
+"""Clave del catálogo `c_TipoOtroPago` de "Subsidio para el empleo (efectivamente entregado al
+trabajador)": la columna «Subsidio para el empleo entregado». Mismo valor que
+`b05_acumulado_anual._CLAVE_OTRO_PAGO_SUBSIDIO`, declarado aparte por el mismo motivo que el
+del IMSS: es una clave de catálogo, no lógica compartida entre módulos."""
+
 SIN_DEPARTAMENTO = "(sin departamento)"
 """Etiqueta del grupo de los CFDI que no traen departamento. Es un rótulo de presentación,
 no un centro de costo: por eso va entre paréntesis y en minúsculas, para que se distinga a
-simple vista de los centros reales, que la organización escribe en mayúsculas."""
+simple vista de los centros reales, que la organización escribe en mayúsculas.
+
+**No es una llave de agrupamiento por sí sola.** La llave lleva además la marca de "venía sin
+departamento", para que un centro de costo o un texto crudo llamado literalmente igual que
+esta cadena no se funda con el grupo de los ausentes."""
+
+_NOTAS: tuple[str, ...] = (
+    "«Núm. de empleados» cuenta trabajadores distintos dentro de cada centro de costo. Un empleado que "
+    "cobró en dos centros del mismo periodo cuenta en los dos (B-06.R3: cada CFDI se atribuye al "
+    "departamento que él declara), así que la suma de esta columna entre centros puede exceder la "
+    "plantilla real; no la sumes.",
+    "«Periodo» es el MES de la fecha de pago. Un mes con dos fechas de pago agrega las dos quincenas en "
+    "una sola fila: con nómina quincenal, una fila puede ser una quincena o dos según cómo caiga el "
+    "calendario de pago de ese mes. Si necesitas el corte por quincena, el dato está en el CFDI "
+    "(`fecha_inicial_pago`/`fecha_final_pago`) pero este informe no lo usa como eje.",
+    "«% del total del periodo» se mide contra el costo bruto de los CFDI que caen DENTRO del rango "
+    "consultado. Un rango que parte un mes por la mitad produce porcentajes sobre un mes truncado, "
+    "indistinguibles de los de un mes completo: para comparar periodos entre sí, consulta meses enteros.",
+    "«Costo bruto» es total de percepciones + otros pagos, como lo define la ficha, y entre los otros "
+    "pagos viaja el subsidio para el empleo entregado en efectivo, que el patrón desembolsa pero "
+    "recupera contra el ISR: no es costo propio. Se publica en su propia columna para que puedas "
+    "restarlo, y NO se descuenta del costo bruto, que así sigue atando con el complemento de nómina y "
+    "con lo que reportan B-01 y B-02 del mismo periodo.",
+)
+"""Lo que `app.informes.excel` rotula en la hoja `Parámetros` del libro.
+
+Son advertencias **permanentes** sobre cómo leer estas cifras, no avisos de la corrida, así que
+van en `ResultadoInforme.notas` y no en `aviso` ni en una `Bandera` (ver el docstring del campo
+en `app.informes.base`). Y van en el libro y no solo en este docstring porque quien recibe el
+Excel —el financiador, o quien arma la comprobación— no lee el código.
+
+Las dos primeras se rompen solas con el uso: la segunda porque la nómina real es quincenal y
+hoy sus dos fechas de pago caen en meses distintos, así que "mes" y "quincena" coinciden **por
+accidente** y dejarán de coincidir en cuanto un mes reciba dos pagos."""
+
+
+def _plegar(texto: str) -> str:
+    """Forma comparable de un centro de costo: sin acentos, sin diferencias de caja y con los
+    espacios colapsados.
+
+    **Solo se usa para DETECTAR ambigüedad, nunca para agrupar.** Es la línea que separa
+    "hazlo visible" de "arréglalo por tu cuenta": agrupar por esta forma haría que el sistema
+    decidiera que "EDIFICIOS" y "Edificios" son el mismo centro de costo —un hecho contable—
+    a partir de un parecido tipográfico que nadie revisó.
+    """
+    sin_acentos = "".join(c for c in unicodedata.normalize("NFD", texto) if not unicodedata.combining(c))
+    return " ".join(sin_acentos.split()).upper()
 
 MAX_TEXTOS_EN_BANDERA = 20
 """Cuántos textos de departamento sin mapear se citan en `DEPARTAMENTO_SIN_MAPEO`. No son
@@ -228,6 +321,15 @@ class Parametros(BaseModel):
             "enmascaramiento ya esté pedido el día que se agregue una columna sensible."
         ),
     )
+    """Queda declarado aunque hoy no tenga efecto, y la decisión es deliberada: quitarlo haría de
+    B-06 el único informe del grupo B sin este parámetro, y el día que alguien agregue una columna
+    sensible habría que volver a declararlo, pasarlo por el formulario y probarlo, con la ventana
+    de que se olvide justo en el informe que ya circula por correo.
+
+    Lo que sí es un defecto —y está **fuera** de este módulo— es que la pantalla muestre el
+    control por el hecho de que el parámetro exista: debería derivar su visibilidad de si el
+    informe declara alguna `Columna(sensible=True)`, que es el dato real y que arregla el mismo
+    síntoma en cualquier informe futuro sin tocar ninguno."""
 
 
 @dataclass(slots=True)
@@ -269,6 +371,10 @@ _COLUMNAS_CIFRAS: tuple[tuple[str, str], ...] = (
     ("Asimilados", "monto"),
     ("Total percepciones", "monto"),
     ("Otros pagos", "monto"),
+    # Va **dentro** de «Otros pagos» y por tanto dentro de «Costo bruto»: es un desglose, no un
+    # sumando más. Existe para que el lector pueda restar dinero federal recuperable contra el
+    # ISR sin que el informe redefina «Costo bruto» (ver el docstring del módulo).
+    ("Subsidio para el empleo entregado", "monto"),
     ("Costo bruto", "monto"),
     ("ISR retenido", "monto"),
     ("IMSS obrero retenido", "monto"),
@@ -421,21 +527,48 @@ async def _deducciones_por_comprobante(db: AsyncSession, ids: list[int]) -> dict
     return por_comprobante
 
 
-async def _otros_pagos_por_comprobante(db: AsyncSession, ids: list[int]) -> dict[int, Decimal]:
-    """Suma de `nomina_otro_pago.importe` por comprobante, en una sola consulta agregada.
+@dataclass(frozen=True, slots=True)
+class _OtrosPagos:
+    """Los otros pagos de un CFDI: el total y, dentro de él, el subsidio para el empleo.
 
-    **Todos** los tipos, no solo el subsidio: la ficha define «Otros pagos» como el nodo
-    completo (viáticos, reintegros, ajustes). Ver el docstring del módulo sobre qué implica
-    eso para «Costo bruto».
+    `subsidio` **no** es un sumando aparte de `total`, es una parte suya. Tenerlos en el mismo
+    objeto es lo que impide sumar dos veces el mismo peso al armar «Costo bruto».
+    """
+
+    total: Decimal = _CERO
+    subsidio: Decimal = _CERO
+
+
+async def _otros_pagos_por_comprobante(db: AsyncSession, ids: list[int]) -> dict[int, _OtrosPagos]:
+    """Otros pagos por comprobante, en una sola consulta agregada por `(comprobante_id, tipo)`.
+
+    El total incluye **todos** los tipos, no solo el subsidio: la ficha define «Otros pagos»
+    como el nodo completo (viáticos, reintegros, ajustes). El desglose por tipo sale del mismo
+    `GROUP BY` —no de una segunda consulta— y solo se usa para publicar el subsidio en su
+    columna. Ver el docstring del módulo sobre por qué es aditivo y no una redefinición de
+    «Costo bruto».
     """
     if not ids:
         return {}
     filas = await db.execute(
-        select(NominaOtroPago.comprobante_id, func.sum(NominaOtroPago.importe).label("importe"))
+        select(
+            NominaOtroPago.comprobante_id,
+            NominaOtroPago.tipo_otro_pago,
+            func.sum(NominaOtroPago.importe).label("importe"),
+        )
         .where(NominaOtroPago.comprobante_id.in_(ids))
-        .group_by(NominaOtroPago.comprobante_id)
+        .group_by(NominaOtroPago.comprobante_id, NominaOtroPago.tipo_otro_pago)
     )
-    return {int(comprobante_id): _dec(importe) for comprobante_id, importe in filas.all()}
+    por_comprobante: dict[int, _OtrosPagos] = {}
+    for comprobante_id, tipo_otro_pago, importe in filas.all():
+        cid = int(comprobante_id)
+        monto = _dec(importe)
+        actual = por_comprobante.get(cid, _OtrosPagos())
+        por_comprobante[cid] = _OtrosPagos(
+            total=actual.total + monto,
+            subsidio=actual.subsidio + (monto if str(tipo_otro_pago) == _CLAVE_OTRO_PAGO_SUBSIDIO else _CERO),
+        )
+    return por_comprobante
 
 
 # --------------------------------------------------------------------------------------
@@ -463,9 +596,20 @@ class _Grupo:
     prestaciones: Decimal = _CERO
     asimilados: Decimal = _CERO
     otros_pagos: Decimal = _CERO
+    subsidio: Decimal = _CERO
     isr: Decimal = _CERO
     imss: Decimal = _CERO
     neto: Decimal = _CERO
+    """«Neto pagado» es el único importe de la fila que **no** sale de los nodos: es la suma de
+    `comprobantes.total`, el neto que el CFDI declara en su encabezado.
+
+    Es procedencia mixta dentro de la misma fila y conviene saberlo: `TOTALES_DESCUADRADOS`
+    coteja el encabezado del complemento contra sus nodos para percepciones, deducciones y otros
+    pagos, pero **no** coteja `comprobantes.total` contra
+    `percepciones + otros pagos − deducciones` — esa identidad no es de B-00 y este informe no la
+    inventa. Se toma del encabezado a propósito, por consistencia con B-05 («Neto pagado» ahí es
+    lo mismo) y porque es la cifra que el patrón depositó; si algún día no cuadra con los nodos,
+    lo verá quien compare esta columna con las otras cinco, no una bandera."""
 
     @property
     def total_percepciones(self) -> Decimal:
@@ -563,6 +707,84 @@ def _bandera_de_sin_mapeo(textos: Mapping[str, int], hay_mapeo: bool) -> Bandera
     )
 
 
+def banderas_de_valores_configurados(mapa: Mapping[str, str]) -> list[Bandera]:
+    """El otro lado del agrupamiento: el **valor** de `map_departamento.centro_costo`.
+
+    Es texto libre sin catálogo (la pantalla es un `<input>`, el esquema solo exige
+    `min_length=1`), así que dos formas de escribir el mismo centro producen dos centros de
+    costo, **los dos contados como nivel 1**, y sin esta comprobación el censo diría "2 se
+    resolvieron con el mapeo" sin una sola alerta: el informe se vería impecable con el gasto
+    partido en dos. Es la asimetría que el resto del módulo no tenía — el lado del *texto del
+    departamento* está instrumentado a fondo y el del *valor configurado* no tenía nada.
+
+    Dos claves:
+
+    - `CENTRO_DE_COSTO_AMBIGUO`: dos o más valores distintos que coinciden al plegarlos
+      (`_plegar`). **Se reporta, no se unifica**, por la misma doctrina que el texto del
+      departamento y con más motivo: declarar que dos centros son el mismo es un hecho contable
+      y no puede salir de un parecido tipográfico que nadie revisó.
+    - `CENTRO_DE_COSTO_EN_BLANCO`: la variante degenerada que `min_length=1` deja pasar (un
+      espacio). Produce una fila cuya columna «Centro de costo» va en blanco y que se cuenta
+      como nivel 1, es decir, como agrupamiento configurado y revisado.
+
+    Los blancos se sacan de la comprobación de ambigüedad para no reportar el mismo renglón dos
+    veces con dos diagnósticos: si hay dos centros en blanco, todos plegan a la cadena vacía y
+    saldrían además como "ambiguos", cuando lo que hay que decir es que están vacíos.
+
+    Se calcula **sobre el mapa completo**, no sobre las filas impresas: una configuración
+    ambigua es un defecto de configuración aunque en este rango no haya cobrado nadie de esos
+    departamentos, se arregla una vez y sirve para todos los rangos. Es el mismo criterio que
+    `b03_gravado_exento._avisos_de_tope_conjunto_sin_evaluar` aplica a lo que no cuelga de una
+    fila.
+    """
+    banderas: list[Bandera] = []
+
+    en_blanco = sorted(texto for texto, centro in mapa.items() if not centro.strip())
+    if en_blanco:
+        banderas.append(
+            Bandera(
+                clave="CENTRO_DE_COSTO_EN_BLANCO",
+                severidad="media",
+                ambito="informe",
+                mensaje=(
+                    f"{len(en_blanco)} departamento(s) están mapeados a un centro de costo vacío o en blanco: "
+                    f"{', '.join(repr(texto) for texto in en_blanco)}. La captura solo exige un carácter, así que "
+                    "un espacio pasa: su costo sale en una fila con la columna «Centro de costo» en blanco y "
+                    "contada como agrupamiento configurado. Corrige el mapeo en Configuración › Empresa › "
+                    "Departamentos."
+                ),
+            )
+        )
+
+    por_forma: dict[str, set[str]] = defaultdict(set)
+    for centro in mapa.values():
+        if centro.strip():
+            por_forma[_plegar(centro)].add(centro)
+
+    for forma in sorted(por_forma):
+        variantes = sorted(por_forma[forma])
+        if len(variantes) < 2:
+            continue
+        departamentos = sorted(texto for texto, centro in mapa.items() if centro in set(variantes))
+        banderas.append(
+            Bandera(
+                clave="CENTRO_DE_COSTO_AMBIGUO",
+                severidad="media",
+                ambito="informe",
+                mensaje=(
+                    f"El mapeo de departamentos tiene {len(variantes)} centros de costo que solo se distinguen "
+                    f"por mayúsculas, acentos o espacios: {', '.join(repr(v) for v in variantes)} "
+                    f"(departamentos afectados: {', '.join(repr(d) for d in departamentos)}). El informe los trata "
+                    "como centros **distintos** y los cuenta a los dos como agrupamiento configurado, así que el "
+                    "gasto de lo que probablemente es un solo centro sale partido en varias filas sin que nada más "
+                    "lo advierta. No se unifican a propósito: decidir que dos centros son el mismo es una decisión "
+                    "contable, no tipográfica. Deja un solo texto en Configuración › Empresa › Departamentos."
+                ),
+            )
+        )
+    return banderas
+
+
 def _bandera_de_departamento_ausente(cuantos: int) -> Bandera:
     """`DEPARTAMENTO_AUSENTE`, agregada: CFDI cuyo complemento no trae departamento.
 
@@ -594,7 +816,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     columnas = _columnas(p.detalle_empleado)
     rfc_empresa = await db.scalar(select(Empresa.rfc).where(Empresa.empresa_id == empresa_id))
     if rfc_empresa is None:
-        return ResultadoInforme(columnas=columnas, aviso="La empresa no existe.")
+        return ResultadoInforme(columnas=columnas, notas=list(_NOTAS), aviso="La empresa no existe.")
 
     p_universo = _ParametrosUniverso(p.fecha_desde, p.fecha_hasta, p.incluir_cancelados)
     filas_universo = list((await db.execute(universo_nomina.universo(empresa_id, rfc_empresa, p_universo))).all())
@@ -603,8 +825,13 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     banderas_fuera = await universo_nomina.banderas_de_no_normalizables(db, empresa_id, rfc_empresa, p_universo)
 
     if not filas_universo:
+        # Las notas también viajan cuando no hay filas: un libro vacío circula igual, y una nota
+        # califica cómo leer la columna, no esta corrida (ver `ResultadoInforme.notas`).
         return ResultadoInforme(
-            columnas=columnas, banderas=banderas_fuera, aviso="Sin CFDI de nómina en el rango solicitado."
+            columnas=columnas,
+            banderas=banderas_fuera,
+            notas=list(_NOTAS),
+            aviso="Sin CFDI de nómina en el rango solicitado.",
         )
 
     ids = [fila[0].comprobante_id for fila in filas_universo]
@@ -615,8 +842,14 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     banderas: list[Bandera] = list(banderas_fuera)
     banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
+    # El otro lado del agrupamiento (el **valor** configurado), sobre el mapa completo y antes
+    # de recorrer el universo: no depende de qué filas se impriman.
+    banderas.extend(banderas_de_valores_configurados(mapa))
 
-    grupos: dict[tuple[int, int, str, str], _Grupo] = {}
+    # El `bool` de la llave marca "venía sin departamento" y es la guarda de `SIN_DEPARTAMENTO`
+    # (ver su docstring): sin él, un centro de costo llamado igual que ese rótulo se fundiría
+    # con el grupo de los ausentes mientras se cuenta en otro nivel del censo.
+    grupos: dict[tuple[int, int, str, bool, str], _Grupo] = {}
     # Insumos de las banderas del agrupamiento. Se cuentan sobre el universo de CFDI y no
     # sobre las filas impresas, para que ningún aviso dependa de que se imprima una fila.
     conteo_por_nivel: dict[NivelDeResolucion, int] = defaultdict(int)
@@ -642,6 +875,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             fecha_pago.year,
             fecha_pago.month,
             resuelto.centro,
+            resuelto.nivel is NivelDeResolucion.AUSENTE,
             rfc_empleado if p.detalle_empleado else "",
         )
         grupo = grupos.setdefault(llave, _Grupo())
@@ -658,7 +892,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         cid = comprobante.comprobante_id
         del_cfdi = percepciones.get(cid, _Percepciones())
         deduccion = deducciones.get(cid, _Deducciones())
-        otro = otros_pagos.get(cid, _CERO)
+        otro = otros_pagos.get(cid, _OtrosPagos())
 
         grupo.empleados.add(rfc_empleado)
         grupo.cfdi += 1
@@ -666,7 +900,8 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         grupo.sueldos += del_cfdi.sueldos
         grupo.prestaciones += del_cfdi.prestaciones
         grupo.asimilados += del_cfdi.asimilados
-        grupo.otros_pagos += otro
+        grupo.otros_pagos += otro.total
+        grupo.subsidio += otro.subsidio
         grupo.isr += deduccion.isr
         grupo.imss += deduccion.imss
         grupo.neto += _dec(comprobante.total)
@@ -681,7 +916,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 (
                     ("total_percepciones", nomina.total_percepciones, del_cfdi.total),
                     ("total_deducciones", nomina.total_deducciones, deduccion.total),
-                    ("total_otros_pagos", nomina.total_otros_pagos, otro),
+                    ("total_otros_pagos", nomina.total_otros_pagos, otro.total),
                 ),
             )
         )
@@ -690,12 +925,12 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # centros de costo. Con `detalle_empleado` el denominador no cambia, así que las filas de
     # un periodo siguen sumando 100.
     total_por_periodo: dict[tuple[int, int], Decimal] = defaultdict(lambda: _CERO)
-    for (ejercicio, periodo, _centro, _rfc), grupo in grupos.items():
+    for (ejercicio, periodo, _centro, _ausente, _rfc), grupo in grupos.items():
         total_por_periodo[(ejercicio, periodo)] += grupo.costo_bruto
 
     filas: list[list[Any]] = []
     for llave in sorted(grupos):
-        ejercicio, periodo, centro, _rfc = llave
+        ejercicio, periodo, centro, _ausente, _rfc = llave
         grupo = grupos[llave]
         identidad: list[Any] = [ejercicio, periodo, centro]
         if p.detalle_empleado:
@@ -711,6 +946,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 grupo.asimilados,
                 grupo.total_percepciones,
                 grupo.otros_pagos,
+                grupo.subsidio,
                 grupo.costo_bruto,
                 grupo.isr,
                 grupo.imss,
@@ -726,7 +962,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     if conteo_por_nivel.get(NivelDeResolucion.AUSENTE, 0):
         banderas.append(_bandera_de_departamento_ausente(conteo_por_nivel[NivelDeResolucion.AUSENTE]))
 
-    return ResultadoInforme(columnas=columnas, filas=filas, banderas=banderas)
+    return ResultadoInforme(columnas=columnas, filas=filas, banderas=banderas, notas=list(_NOTAS))
 
 
 def _porcentaje(parte: Decimal, total: Decimal) -> Decimal:
@@ -738,6 +974,11 @@ def _porcentaje(parte: Decimal, total: Decimal) -> Decimal:
     la suma de la columna en la hoja de cálculo.
 
     **Sin `quantize()`**: el único redondeo del sistema es el de `app.informes.excel` (R-T4).
+    Y ojo con su consecuencia aquí: `excel._celda` solo cuantiza las columnas de tipo `monto`,
+    así que esta celda guarda el cociente con los 28 dígitos significativos del contexto de
+    `Decimal` y solo el formato de la hoja (`#,##0.000`) los oculta. Es lo correcto —redondear
+    en el informe sería el error que R-T4 prohíbe— pero quien lea el archivo con otra
+    herramienta verá el número largo.
     """
     if total == _CERO:
         return _CERO

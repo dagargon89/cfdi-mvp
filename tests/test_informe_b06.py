@@ -19,19 +19,30 @@ Lo que estas pruebas fijan, en orden de importancia:
 Ninguna prueba de este archivo se dio por buena sin romper a propósito lo que dice proteger y
 comprobar que **falla** (ver las tres trampas de la evidencia por mutación anotadas en
 `tests/test_cli_configuracion.py`).
+
+**Y una cuarta trampa, encontrada aquí y la más traicionera de las cuatro: la mutación que es
+un no-op.** Las otras tres hacen que la comprobación mienta; esta hace que dudes de una prueba
+que sí protege. Para "apagar" el reporte de descuadres se escribió
+`banderas.extend([] or universo_nomina.banderas_de_totales_descuadrados(...))`, y `[] or X`
+evalúa a `X`: el informe siguió emitiendo la bandera, la prueba siguió pasando y la mutación
+"sobrevivió" sin haber cambiado nada. Antes de dar por débil una prueba porque su mutación
+sobrevive, hay que comprobar que la mutación **hace algo**.
 """
 
 from __future__ import annotations
 
-from datetime import date
+import io
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from openpyxl import load_workbook
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b06_centro_costo as b06
-from app.informes import registro
+from app.informes import excel, registro
+from app.informes.base import ContextoInforme
 from app.models.configuracion_fiscal import MapDepartamento
 from app.models.enums import EstatusCfdi
 from app.models.nomina import NominaReceptor
@@ -208,6 +219,9 @@ async def test_desglose_de_sueldos_prestaciones_y_asimilados(db: AsyncSession) -
     assert _valor(resultado, 0, "Asimilados") == Decimal("500.00")
     assert _valor(resultado, 0, "Total percepciones") == Decimal("13000.00")
     assert _valor(resultado, 0, "Otros pagos") == Decimal("120.00")
+    # El subsidio es un DESGLOSE de «Otros pagos», no un sumando aparte: sigue dentro del costo
+    # bruto (13000 + 120), que es lo que ata con `nomina.total_percepciones + total_otros_pagos`.
+    assert _valor(resultado, 0, "Subsidio para el empleo entregado") == Decimal("120.00")
     assert _valor(resultado, 0, "Costo bruto") == Decimal("13120.00")
     assert _valor(resultado, 0, "ISR retenido") == Decimal("900.00")
     assert _valor(resultado, 0, "IMSS obrero retenido") == Decimal("300.00")
@@ -258,9 +272,76 @@ async def test_las_celdas_de_importe_sin_dato_son_cero_no_vacio(db: AsyncSession
 
     resultado = await b06.consultar(db, empresa.empresa_id, _p())
 
-    for titulo in ("Prestaciones", "Asimilados", "Otros pagos", "ISR retenido", "IMSS obrero retenido"):
+    for titulo in (
+        "Prestaciones",
+        "Asimilados",
+        "Otros pagos",
+        "Subsidio para el empleo entregado",
+        "ISR retenido",
+        "IMSS obrero retenido",
+    ):
         assert _valor(resultado, 0, titulo) == Decimal("0"), titulo
         assert _valor(resultado, 0, titulo) is not None, titulo
+
+
+async def test_un_otro_pago_que_no_es_subsidio_no_llena_la_columna_del_subsidio(db: AsyncSession) -> None:
+    """Gemela negativa del desglose del subsidio: los viáticos son «Otros pagos» y no subsidio.
+
+    Si la columna copiara «Otros pagos», el lector restaría dinero que el patrón sí desembolsó y
+    no recupera — el error espejo del que la columna existe para evitar.
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        otros_pagos=[("999", "099", "Ajuste al neto", "50.00", "")],
+        total_otros_pagos="50.00",
+        total="1050.00",
+    )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert _valor(resultado, 0, "Otros pagos") == Decimal("50.00")
+    assert _valor(resultado, 0, "Subsidio para el empleo entregado") == Decimal("0")
+    assert _valor(resultado, 0, "Costo bruto") == Decimal("1050.00")
+
+
+async def test_el_subsidio_se_desglosa_sin_salir_del_costo_bruto(db: AsyncSession) -> None:
+    """El subsidio entregado es dinero federal recuperable contra el ISR, no costo propio — pero
+    «Costo bruto» **no se redefine**: tiene que atar con `total_percepciones + total_otros_pagos`
+    y con lo que B-01 y B-02 reportan del mismo periodo. La salida es aditiva: se publica aparte
+    para que el lector reste, y el costo bruto sigue significando lo de la ficha.
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        otros_pagos=[("002", "035", "Subs al Empleo mes", "80.00", "80.00"), ("999", "099", "Ajuste", "20.00", "")],
+        total_otros_pagos="100.00",
+        total="1100.00",
+    )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert _valor(resultado, 0, "Otros pagos") == Decimal("100.00")
+    assert _valor(resultado, 0, "Subsidio para el empleo entregado") == Decimal("80.00")
+    # Ata con el encabezado del complemento: 1000 + 100. El subsidio NO se resta.
+    assert _valor(resultado, 0, "Costo bruto") == Decimal("1100.00")
+    assert "TOTALES_DESCUADRADOS" not in _claves(resultado)
+    # Y la columna va entre «Otros pagos» y «Costo bruto», donde se lee como su desglose.
+    titulos = [c.titulo for c in resultado.columnas]
+    assert titulos.index("Otros pagos") + 1 == titulos.index("Subsidio para el empleo entregado")
+    assert titulos.index("Subsidio para el empleo entregado") + 1 == titulos.index("Costo bruto")
 
 
 async def test_el_costo_promedio_por_empleado_divide_entre_empleados_no_entre_cfdi(db: AsyncSession) -> None:
@@ -498,6 +579,137 @@ async def test_los_dos_niveles_se_funden_cuando_resuelven_al_mismo_centro(db: As
     assert len(_de_clave(resultado, "DEPARTAMENTO_SIN_MAPEO")) == 1
 
 
+# --------------------------------------------------------------------------------------
+# 3-bis. El otro lado del agrupamiento: el VALOR configurado del centro de costo
+# --------------------------------------------------------------------------------------
+
+
+async def test_dos_centros_de_costo_que_solo_difieren_en_forma_se_reportan_sin_unificarse(
+    db: AsyncSession,
+) -> None:
+    """`map_departamento.centro_costo` es texto libre sin catálogo.
+
+    Sin esta bandera, mapear `EDIF → "EDIFICIOS"` y `EDIFICIO → "Edificios"` parte el gasto en
+    dos centros, **los dos contados como nivel 1**, y el censo diría "2 se resolvieron con el
+    mapeo" con el informe viéndose impecable. Es la asimetría que el módulo no cubría: el lado
+    del texto del departamento estaba instrumentado y el del valor configurado no.
+
+    Y **no se unifican**: declarar que dos centros son el mismo es una decisión contable, no
+    tipográfica. El informe lo hace visible, no lo arregla por su cuenta.
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await _mapear(db, empresa.empresa_id, "EDIF", "EDIFICIOS")
+    await _mapear(db, empresa.empresa_id, "EDIFICIO", "Edificios")
+    # Y la variante con acento, que es la que un `upper()` a secas no atrapa.
+    await _mapear(db, empresa.empresa_id, "GEST", "OPERACIÓN")
+    await _mapear(db, empresa.empresa_id, "GESTION", "OPERACION")
+    for indice, departamento in enumerate(("EDIF", "EDIFICIO", "GEST", "GESTION")):
+        await insertar_nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=f"{indice + 1}1111111-1111-1111-1111-111111111111",
+            rfc_receptor=f"XAXX01010100{indice}",
+            fecha_pago=date(2026, 6, 30),
+            departamento=departamento,
+            percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+            total_percepciones="1000.00",
+            total="1000.00",
+        )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    # Cuatro centros distintos, no dos: el gasto sale partido, y eso es lo que la bandera dice.
+    assert sorted(_centros(resultado)) == ["EDIFICIOS", "Edificios", "OPERACION", "OPERACIÓN"]
+    banderas = _de_clave(resultado, "CENTRO_DE_COSTO_AMBIGUO")
+    assert len(banderas) == 2, "una por grupo de variantes que colisionan, no una por renglón"
+    assert all(b.severidad == "media" and b.ambito == "informe" for b in banderas)
+    mensajes = " ".join(b.mensaje for b in banderas)
+    assert "'EDIFICIOS'" in mensajes and "'Edificios'" in mensajes
+    assert "'OPERACIÓN'" in mensajes and "'OPERACION'" in mensajes
+    # Nombra los departamentos afectados: es lo que hay que ir a corregir.
+    assert "'EDIF'" in mensajes and "'GESTION'" in mensajes
+    # El censo sigue diciendo la verdad de la cascada: los cuatro resolvieron por el mapeo.
+    assert "4 se resolvieron con el mapeo" in _de_clave(resultado, "RESOLUCION_DE_CENTRO_DE_COSTO")[0].mensaje
+
+
+async def test_centros_de_costo_bien_capturados_no_disparan_ninguna_bandera_de_configuracion(
+    db: AsyncSession,
+) -> None:
+    """Gemela negativa de las dos anteriores: con dos centros de verdad distintos y ninguno en
+    blanco, no hay nada que reportar. Una bandera que dispara siempre no la lee nadie."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await _mapear(db, empresa.empresa_id, _EDIFICIOS, "CC-EDIFICIOS")
+    await _mapear(db, empresa.empresa_id, _SOCIAL, "CC-SOCIAL")
+    for indice, departamento in enumerate((_EDIFICIOS, _SOCIAL)):
+        await insertar_nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=f"{indice + 1}1111111-1111-1111-1111-111111111111",
+            rfc_receptor=f"XAXX01010100{indice}",
+            fecha_pago=date(2026, 6, 30),
+            departamento=departamento,
+            percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+            total_percepciones="1000.00",
+            total="1000.00",
+        )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert sorted(_centros(resultado)) == ["CC-EDIFICIOS", "CC-SOCIAL"]
+    assert "CENTRO_DE_COSTO_AMBIGUO" not in _claves(resultado)
+    assert "CENTRO_DE_COSTO_EN_BLANCO" not in _claves(resultado)
+
+
+async def test_un_centro_de_costo_configurado_en_blanco_se_reporta(db: AsyncSession) -> None:
+    """`min_length=1` en el esquema deja pasar un espacio: el costo sale en una fila con la
+    columna «Centro de costo» en blanco y contado como agrupamiento configurado y revisado."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await _mapear(db, empresa.empresa_id, _EDIFICIOS, " ")
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        total="1000.00",
+    )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    banderas = _de_clave(resultado, "CENTRO_DE_COSTO_EN_BLANCO")
+    assert len(banderas) == 1
+    assert banderas[0].severidad == "media"
+    assert repr(_EDIFICIOS) in banderas[0].mensaje
+    # Un solo centro en blanco NO es además "ambiguo": el diagnóstico útil es que está vacío.
+    assert "CENTRO_DE_COSTO_AMBIGUO" not in _claves(resultado)
+
+
+async def test_la_ambiguedad_se_detecta_desde_el_mapa_aunque_no_haya_cobrado_nadie(db: AsyncSession) -> None:
+    """Una configuración ambigua es un defecto de configuración aunque en este rango no haya
+    cobrado nadie de esos departamentos: se arregla una vez y sirve para todos los rangos. Es la
+    misma razón por la que la bandera no cuelga de ninguna fila impresa."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await _mapear(db, empresa.empresa_id, "OTRO_A", "MANTENIMIENTO")
+    await _mapear(db, empresa.empresa_id, "OTRO_B", "Mantenimiento")
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        total="1000.00",
+    )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert _centros(resultado) == [_EDIFICIOS], "ninguna fila usa los centros ambiguos"
+    assert len(_de_clave(resultado, "CENTRO_DE_COSTO_AMBIGUO")) == 1
+
+
 async def test_un_cfdi_sin_departamento_se_agrupa_aparte_con_su_propia_bandera(db: AsyncSession) -> None:
     empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
     for indice, (uuid_cfdi, departamento) in enumerate(
@@ -551,6 +763,48 @@ async def test_sin_cfdi_sin_departamento_no_hay_bandera_de_departamento_ausente(
     resultado = await b06.consultar(db, empresa.empresa_id, _p())
 
     assert "DEPARTAMENTO_AUSENTE" not in _claves(resultado)
+
+
+async def test_un_centro_llamado_como_el_rotulo_de_ausentes_no_se_funde_con_ellos(db: AsyncSession) -> None:
+    """La guarda de `SIN_DEPARTAMENTO`: es un rótulo de presentación, no una llave.
+
+    Rebuscado —hay que capturar un centro de costo llamado exactamente «(sin departamento)»—
+    pero si se fundiera, el grupo mezclaría costo atribuido con costo no atribuible mientras el
+    censo los cuenta en niveles distintos, y el rótulo dejaría de significar lo que dice.
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await _mapear(db, empresa.empresa_id, _EDIFICIOS, b06.SIN_DEPARTAMENTO)
+    for indice, (uuid_cfdi, departamento) in enumerate(
+        (
+            ("11111111-1111-1111-1111-111111111111", _EDIFICIOS),
+            ("22222222-2222-2222-2222-222222222222", "SE VA A NULO"),
+        )
+    ):
+        cid = await insertar_nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=uuid_cfdi,
+            rfc_receptor=f"XAXX01010100{indice}",
+            fecha_pago=date(2026, 6, 30),
+            departamento=departamento,
+            percepciones=[("001", "001", "Sueldo", f"{(indice + 1) * 1000}.00", "0.00")],
+            total_percepciones=f"{(indice + 1) * 1000}.00",
+            total=f"{(indice + 1) * 1000}.00",
+        )
+        if departamento == "SE VA A NULO":
+            await _borrar_departamento(db, cid)
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    # Dos filas con la misma etiqueta y distinto origen, no una fila con el costo mezclado.
+    assert _centros(resultado) == [b06.SIN_DEPARTAMENTO, b06.SIN_DEPARTAMENTO]
+    assert sorted(_valor(resultado, i, "Costo bruto") for i in range(2)) == [
+        Decimal("1000.00"),
+        Decimal("2000.00"),
+    ]
+    mensaje = _de_clave(resultado, "RESOLUCION_DE_CENTRO_DE_COSTO")[0].mensaje
+    assert "1 se resolvieron con el mapeo" in mensaje
+    assert "1 no traen departamento" in mensaje
 
 
 # --------------------------------------------------------------------------------------
@@ -912,6 +1166,91 @@ async def test_el_cfdi_de_nomina_sin_normalizar_no_desaparece_en_silencio(db: As
     resultado = await b06.consultar(db, empresa.empresa_id, _p())
 
     assert "SIN_NORMALIZAR" in _claves(resultado)
+
+
+async def test_un_universo_sano_no_reporta_ningun_cfdi_perdido(db: AsyncSession) -> None:
+    """Gemela negativa de la anterior. Sin ella, una consulta que reportara *todos* los CFDI de
+    nómina como perdidos pasaría igual de verde, y la hoja `Banderas` que el patrón usa para
+    saber qué le falta diría que le falta todo."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        total="1000.00",
+    )
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert "SIN_NORMALIZAR" not in _claves(resultado)
+    assert "COMPLEMENTO_AUSENTE" not in _claves(resultado)
+
+
+# --------------------------------------------------------------------------------------
+# 7-bis. Las notas: lo que tiene que llegar al libro, no solo al docstring
+# --------------------------------------------------------------------------------------
+
+
+def _contexto() -> ContextoInforme:
+    return ContextoInforme(
+        clave=b06.CLAVE,
+        nombre=b06.NOMBRE,
+        usuario="dgarcia@planjuarez.org",
+        generado_en=datetime(2026, 8, 7, 9, 0, 0),
+        parametros={"fecha_desde": str(_DESDE), "fecha_hasta": str(_HASTA), "enmascarar_datos_personales": True},
+        etl_version=1,
+    )
+
+
+async def test_las_notas_llegan_a_la_hoja_parametros_del_libro(db: AsyncSession) -> None:
+    """No basta con que `consultar` las devuelva: quien recibe el Excel por correo no lee el
+    código ni el objeto de resultado. Se genera el libro de verdad y se lee la hoja."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="11111111-1111-1111-1111-111111111111",
+        fecha_pago=date(2026, 6, 30),
+        departamento=_EDIFICIOS,
+        percepciones=[("001", "001", "Sueldo", "1000.00", "0.00")],
+        total_percepciones="1000.00",
+        total="1000.00",
+    )
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    libro = load_workbook(io.BytesIO(excel.escribir_libro(resultado, _contexto())))
+    hoja = libro["Parámetros"]
+    texto = "\n".join(str(c.value) for fila in hoja.iter_rows() for c in fila if c.value is not None)
+
+    # Duda 4: no sumar «Núm. de empleados» entre centros (B-06.R3).
+    assert "no la sumes" in texto
+    assert "exceder la plantilla real" in texto
+    # Duda 3: periodo = mes, y un mes con dos fechas de pago agrega dos quincenas. Hoy mes y
+    # quincena coinciden por accidente del calendario, y deja de ser así con la próxima descarga.
+    assert "es el MES de la fecha de pago" in texto
+    assert "dos quincenas" in texto
+    # El rango que parte un mes: porcentajes sobre un mes truncado, indistinguibles.
+    assert "mes truncado" in texto
+    # Y por qué el subsidio está en su propia columna sin salir del costo bruto.
+    assert "subsidio para el empleo" in texto.lower()
+    assert "recupera contra el ISR" in texto
+
+
+async def test_las_notas_viajan_aunque_no_haya_filas(db: AsyncSession) -> None:
+    """Un libro sin filas circula igual, y una nota califica cómo leer la columna, no esta
+    corrida: no puede depender de que haya datos (mismo criterio que el rótulo de B-08)."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+
+    resultado = await b06.consultar(db, empresa.empresa_id, _p())
+
+    assert resultado.filas == []
+    assert resultado.notas, "las notas no pueden depender de que haya filas"
+    assert any("es el MES de la fecha de pago" in nota for nota in resultado.notas)
+    assert any("no la sumes" in nota for nota in resultado.notas)
 
 
 async def test_el_orden_de_las_filas_es_determinista(db: AsyncSession) -> None:
