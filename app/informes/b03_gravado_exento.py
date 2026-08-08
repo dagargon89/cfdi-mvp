@@ -100,6 +100,19 @@ Las tres reglas de la ficha
   Es la regla que hace útil el informe: periodo por periodo casi nunca se excede.
 - **B-03.R3** — `base_exencion = NINGUNA` con `importe_exento > 0` es `EXENCION_INDEBIDA`.
 
+**Sustituciones: la misma regla que B-05.R1, y por la misma razón.** Un CFDI de nómina
+corregido por sustitución deja dos comprobantes con **el mismo pago**. Como B-03.R2 acumula por
+`(rfc, tipo, ejercicio)`, contarlos los dos duplicaba el exento anual y el informe emitía una
+`EXENCION_EXCEDIDA` —severidad **alta**, un hallazgo de auditoría— **acusando al patrón de un
+exceso que no existe**; y la hoja `Datos` imprimía dos filas para un solo pago, así que sumar
+su columna de exento daba el doble. El daño es solo en esa dirección (nunca deja pasar un
+exceso real: con base `PORCENTAJE` el tope anual se duplica igual y la razón se conserva, así
+que se concentra en `UMA_DIAS`/`SM_DIAS`, donde está el aguinaldo). Se resuelve con
+`universo_nomina.uuids_sustituidos`, **siempre** y sobre el **ejercicio completo**, en las dos
+superficies —filas y acumulado— y con bandera `CFDI_SUSTITUIDO` para que la exclusión no sea
+silenciosa. El filtro por `estatus` no sustituye a esto: la verificación contra el SAT es
+asíncrona, así que el sustituido normalmente está `no_verificado`, no `cancelado`.
+
 **Ningún importe fiscal vive en este archivo** (§2.12): la UMA, el salario mínimo y los
 factores salen de `param_fiscal` y de `catalogo_percepcion_marca`, resueltos por fecha.
 **Ningún redondeo, tampoco** (R-T4): `Decimal` de punta a punta y el único `ROUND_HALF_UP`
@@ -115,7 +128,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import extract, func, select
+from sqlalchemy import Select, extract, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import catalogos, universo_nomina
@@ -380,6 +393,28 @@ class _Acumulado:
     total: Decimal
 
 
+def _nomina_del_ejercicio(empresa_id: int, rfc_empresa: str, ejercicios: set[int]) -> Select[Any]:
+    """Los `comprobante_id` de la nómina de la empresa en esos ejercicios, **sin filtro de
+    estatus**: es el alcance en el que se buscan los sustitutos.
+
+    Deliberadamente más ancho que el universo del informe, en las dos direcciones. Todo el
+    ejercicio, porque el acumulado que hay que proteger es anual (una sustitución de enero
+    envenena el tope anual de un informe de junio). Y sin mirar el estatus, porque la relación
+    `tipo_relacion='04'` es un hecho del XML del sustituto: sigue siendo cierta que reemplazó a
+    otro comprobante aunque el sustituto acabe cancelado a su vez.
+    """
+    return (
+        select(Comprobante.comprobante_id)
+        .join(Nomina, Nomina.comprobante_id == Comprobante.comprobante_id)
+        .where(
+            Comprobante.empresa_id == empresa_id,
+            Comprobante.rfc_emisor == rfc_empresa,
+            Comprobante.tipo_comprobante == "N",
+            extract("year", Nomina.fecha_pago).in_(sorted(ejercicios)),
+        )
+    )
+
+
 async def _acumulado_anual(
     db: AsyncSession,
     empresa_id: int,
@@ -387,6 +422,7 @@ async def _acumulado_anual(
     ejercicios: set[int],
     tipos: set[str],
     incluir_cancelados: bool,
+    sustituidos: set[str],
 ) -> dict[tuple[str, str, int], _Acumulado]:
     """Suma anual de exento y de importe total por `(rfc_receptor, tipo_percepcion, ejercicio)`.
 
@@ -397,6 +433,12 @@ async def _acumulado_anual(
 
     No se aplica el filtro `tipo_percepcion` de los parámetros: acota qué **filas se
     imprimen**, no contra qué se compara el acumulado, que sigue siendo el del tipo entero.
+
+    **`sustituidos` se excluye siempre, sin mirar `incluir_cancelados`** (ver
+    `universo_nomina.uuids_sustituidos`): un CFDI sustituido y su sustituto traen el mismo pago,
+    y sumar los dos hacía que el informe emitiera una `EXENCION_EXCEDIDA` —severidad alta,
+    hallazgo de auditoría— acusando al patrón de un exceso inexistente. La exclusión va en el
+    `WHERE` y no en Python porque las sumas las hace la BD.
     """
     if not ejercicios or not tipos:
         return {}
@@ -422,6 +464,8 @@ async def _acumulado_anual(
     )
     if not incluir_cancelados:
         consulta = consulta.where(Comprobante.estatus != EstatusCfdi.CANCELADO)
+    if sustituidos:
+        consulta = consulta.where(Comprobante.uuid.notin_(sorted(sustituidos)))
 
     acumulados: dict[tuple[str, str, int], _Acumulado] = {}
     for rfc, tipo, ejercicio, exento, total in (await db.execute(consulta)).all():
@@ -985,6 +1029,11 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         tipos.update(nodo.tipo_percepcion for nodo in nodos[comprobante.comprobante_id])
     fechas.update(date(ejercicio, 12, 31) for ejercicio in ejercicios)
 
+    # Resolución de sustituciones, **antes** de imprimir o acumular nada, y sobre el ejercicio
+    # completo: es el mismo alcance del acumulado que protege (ver `_nomina_del_ejercicio`).
+    ids_sustitutos = list((await db.scalars(_nomina_del_ejercicio(empresa_id, rfc_empresa, ejercicios))).all())
+    sustituidos = await universo_nomina.uuids_sustituidos(db, ids_sustitutos)
+
     config = await _configuracion(db, empresa_id, fechas, ejercicios)
     # El acumulado cubre los tipos de las filas impresas **y** todos los que podrían estar
     # sujetos al tope conjunto —confirmados o solo propuestos—, aunque ninguno aparezca en el
@@ -999,6 +1048,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         ejercicios,
         tipos | tipos_que_podrian_estar_sujetos_al_tope_conjunto(config),
         p.incluir_cancelados,
+        sustituidos,
     )
 
     banderas: list[Bandera] = list(banderas_fuera)
@@ -1027,6 +1077,25 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     for comprobante, nomina, receptor, _totales, detalle in filas_universo:
         percepciones = nodos.get(comprobante.comprobante_id, [])
         if not percepciones:
+            continue
+        if comprobante.uuid in sustituidos:
+            # Ni fila ni acumulado: el sustituto ya trae este pago. Imprimir las dos versiones
+            # daría el doble al sumar la columna "Importe exento" de un papel de trabajo que
+            # existe justo para revisar concepto por concepto.
+            banderas.append(
+                Bandera(
+                    clave=universo_nomina.CLAVE_CFDI_SUSTITUIDO,
+                    severidad="baja",
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=(
+                        "Excluido del informe: otro CFDI de nómina del ejercicio lo declara sustituido "
+                        "(`cfdi_relacionado.tipo_relacion='04'`), así que su sustituto ya trae este pago. "
+                        "Se excluye de la hoja Datos —dos filas para un solo pago darían el doble al sumar "
+                        "la columna de exento— y del acumulado anual del artículo 93, donde contarlo dos "
+                        "veces produciría un exceso de exención que no existe."
+                    ),
+                )
+            )
             continue
         fecha_pago = nomina.fecha_pago
         uma = config.uma.get(fecha_pago) if fecha_pago is not None else None

@@ -28,8 +28,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b03_gravado_exento as b03
+from app.models.cfdi_detalle import CfdiRelacionado
 from app.models.configuracion_fiscal import CatalogoPercepcionMarca, ConfiguracionEmpresa, ParamFiscal
-from app.models.enums import OrigenValor, ZonaSalarial
+from app.models.enums import EstatusCfdi, OrigenValor, ZonaSalarial
 from app.services import configuracion_fiscal as cfg
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
@@ -667,6 +668,247 @@ async def test_sin_valor_al_cierre_del_ejercicio_no_se_inventa_un_tope_anual(
     excedidas = _de_clave(resultado, "EXENCION_EXCEDIDA")
     assert len(excedidas) == 1
     assert "no se pudo comparar contra el tope anual" in excedidas[0].mensaje
+
+
+# --------------------------------------------------------------------------------------
+# Sustituciones (`cfdi_relacionado.tipo_relacion='04'`)
+# --------------------------------------------------------------------------------------
+
+
+async def _sustituir(db: AsyncSession, *, sustituto_id: int, uuid_sustituido: str) -> None:
+    """El nodo `CfdiRelacionado` con el que el **sustituto** declara a quién reemplaza.
+
+    Se inserta directo con el modelo, no por un servicio: es un dato del XML, no
+    configuración fiscal (la regla de "siembra con el servicio" es sobre la configuración,
+    cuyo invariante de confirmación hay que ejercitar).
+    """
+    db.add(CfdiRelacionado(comprobante_id=sustituto_id, tipo_relacion="04", uuid_relacionado=uuid_sustituido))
+    await db.commit()
+
+
+async def test_un_cfdi_sustituido_no_se_cuenta_dos_veces_en_el_acumulado(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """**El defecto más grave que tuvo este informe: acusaba al patrón de un exceso que no
+    existe.**
+
+    Un timbrado corregido por sustitución deja dos CFDI con el mismo pago. B-05 lo resuelve
+    (B-05.R1) porque su grano es un acumulado anual; B-03.R2 hace el mismo acumulado anual y
+    no tenía ninguna defensa. Un aguinaldo de 3 000 exento —muy por debajo del tope de 30 UMA,
+    3 519.30— se contaba dos veces, daba 6 000 y salía una `EXENCION_EXCEDIDA` de severidad
+    alta por 2 480.70 "exentos de más" **que no existen**. No es una degradación: es un
+    hallazgo de auditoría en falso.
+
+    **El sustituido está `no_verificado`, no cancelado**, que es el caso normal y no un caso de
+    borde: la verificación contra el SAT es asíncrona, así que un timbrado se sustituye casi
+    siempre antes de que la corrida de verificación alcance al sustituido. Ningún filtro por
+    `estatus` lo atrapa; la única señal confiable es la relación que declara el sustituto.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    uuid_malo = "aaaabbbb-0000-0000-0000-00000000ma10"
+    uuid_bueno = "aaaabbbb-0000-0000-0000-00000000bu10"
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_malo,
+        estatus=EstatusCfdi.NO_VERIFICADO,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    sustituto = await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_bueno,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    await _sustituir(db, sustituto_id=sustituto, uuid_sustituido=uuid_malo)
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    # Una sola fila: la hoja `Datos` es un papel de trabajo y sumar su columna de exento
+    # tiene que dar el pago real, no el doble.
+    assert [f[_columna(resultado, "UUID")] for f in resultado.filas] == [uuid_bueno]
+    # Y ninguna acusación: 3 000 caben en el tope de 3 519.30.
+    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+    # La exclusión no es silenciosa.
+    avisos = _de_clave(resultado, "CFDI_SUSTITUIDO")
+    assert len(avisos) == 1
+    assert avisos[0].ambito == f"uuid:{uuid_malo}"
+
+
+async def test_una_sustitucion_ya_cancelada_sigue_resolviendose(db: AsyncSession, tmp_path: Path) -> None:
+    """Gemela: cuando el sustituido **sí** llegó a `CANCELADO`, el filtro de estatus ya lo
+    dejaba fuera de las filas. Lo que hay que comprobar es que tampoco entre en el acumulado
+    —que no pasa por ese filtro de la misma forma— y que el resultado no cambie."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    uuid_malo = "aaaabbbb-0000-0000-0000-00000000ma20"
+    uuid_bueno = "aaaabbbb-0000-0000-0000-00000000bu20"
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_malo,
+        estatus=EstatusCfdi.CANCELADO,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    sustituto = await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_bueno,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    await _sustituir(db, sustituto_id=sustituto, uuid_sustituido=uuid_malo)
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert [f[_columna(resultado, "UUID")] for f in resultado.filas] == [uuid_bueno]
+    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+
+
+async def test_un_sustituido_incluido_a_proposito_tampoco_suma_dos_veces(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """`incluir_cancelados=True` mete el sustituido en el universo, y ahí el acumulado volvería
+    a contar el pago dos veces si la exclusión dependiera del estatus. La resolución de
+    sustituciones se aplica **siempre**, como en B-05.R1."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    uuid_malo = "aaaabbbb-0000-0000-0000-00000000ma30"
+    uuid_bueno = "aaaabbbb-0000-0000-0000-00000000bu30"
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_malo,
+        estatus=EstatusCfdi.CANCELADO,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    sustituto = await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_bueno,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "3000.00")],
+        total_percepciones="3000.00",
+    )
+    await _sustituir(db, sustituto_id=sustituto, uuid_sustituido=uuid_malo)
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p(incluir_cancelados=True))
+
+    assert [f[_columna(resultado, "UUID")] for f in resultado.filas] == [uuid_bueno]
+    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+    assert len(_de_clave(resultado, "CFDI_SUSTITUIDO")) == 1
+
+
+async def test_un_sustituido_fuera_del_rango_tampoco_suma_en_el_acumulado(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """El acumulado cubre el **ejercicio completo**, no el rango del informe, así que la
+    resolución de sustituciones tiene que cubrir lo mismo: un pago de enero sustituido y su
+    sustituto, con el informe de junio, seguían sumando el doble en el tope anual sin que
+    ninguna fila del informe lo delatara."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    uuid_malo = "aaaabbbb-0000-0000-0000-00000000ma40"
+    uuid_bueno = "aaaabbbb-0000-0000-0000-00000000bu40"
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_malo,
+        fecha_pago=date(2026, 1, 31),
+        estatus=EstatusCfdi.NO_VERIFICADO,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "2000.00")],
+        total_percepciones="2000.00",
+    )
+    sustituto = await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_bueno,
+        fecha_pago=date(2026, 1, 31),
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "2000.00")],
+        total_percepciones="2000.00",
+    )
+    await _sustituir(db, sustituto_id=sustituto, uuid_sustituido=uuid_malo)
+    # La fila que sí se imprime, en junio, y que se llevaría la acusación.
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="aaaabbbb-0000-0000-0000-00000000ju40",
+        fecha_pago=date(2026, 6, 30),
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "1500.00")],
+        total_percepciones="1500.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 1, "el rango del informe es junio-julio"
+    # Acumulado real: 2 000 (sustituto) + 1 500 = 3 500, bajo el tope de 3 519.30. Con el pago
+    # duplicado serían 5 500 y saldría la acusación.
+    assert "EXENCION_EXCEDIDA" not in _claves(resultado)
+
+
+async def test_sin_sustituciones_no_se_pierde_ninguna_fila(db: AsyncSession, tmp_path: Path) -> None:
+    """Gemela negativa: la resolución no puede tragarse filas cuando no hay relación `04`.
+    Dos CFDI del mismo empleado, tipo y ejercicio, sin sustitución entre ellos, son dos pagos
+    de verdad y suman los dos."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    for uuid_cfdi in ("aaaabbbb-0000-0000-0000-0000000000a5", "aaaabbbb-0000-0000-0000-0000000000b5"):
+        await insertar_nomina(
+            db,
+            empresa_id=empresa.empresa_id,
+            uuid=uuid_cfdi,
+            percepciones=[("002", "002", "Aguinaldo", "0.00", "2000.00")],
+            total_percepciones="2000.00",
+        )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 2
+    assert "CFDI_SUSTITUIDO" not in _claves(resultado)
+    # 4 000 acumulados contra un tope de 3 519.30: este exceso sí es real.
+    assert len(_de_clave(resultado, "EXENCION_EXCEDIDA")) == 1
+
+
+async def test_otra_relacion_que_no_sea_sustitucion_no_excluye_nada(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Solo `tipo_relacion='04'` sustituye. Un `01` (nota de crédito) o cualquier otra relación
+    no quita nada del acumulado — tratarlas todas igual borraría pagos reales."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "002", "base": "UMA_DIAS", "factor": "30"}])
+    uuid_uno = "aaaabbbb-0000-0000-0000-0000000000a6"
+    uuid_dos = "aaaabbbb-0000-0000-0000-0000000000b6"
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_uno,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "2000.00")],
+        total_percepciones="2000.00",
+    )
+    otro = await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid=uuid_dos,
+        percepciones=[("002", "002", "Aguinaldo", "0.00", "2000.00")],
+        total_percepciones="2000.00",
+    )
+    db.add(CfdiRelacionado(comprobante_id=otro, tipo_relacion="01", uuid_relacionado=uuid_uno))
+    await db.commit()
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 2
+    assert "CFDI_SUSTITUIDO" not in _claves(resultado)
 
 
 # --------------------------------------------------------------------------------------

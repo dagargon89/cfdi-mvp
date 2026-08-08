@@ -53,13 +53,26 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes.base import Bandera
-from app.models.cfdi_detalle import ComprobanteDetalle
+from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
 from app.models.nomina import Nomina, NominaPercepcion, NominaReceptor, NominaTotales
 
 TOLERANCIA = Decimal("0.01")
 """Tolerancia de redondeo para comparar un total declarado contra la suma de sus nodos."""
+
+TIPO_RELACION_SUSTITUCION = "04"
+"""`tipo_relacion` del nodo `CfdiRelacionado` que declara "Este CFDI sustituye a otro
+anterior" (catálogo `c_TipoRelacion` del SAT). Es la única señal confiable de que un
+comprobante fue reemplazado — ver `uuids_sustituidos`."""
+
+CLAVE_CFDI_SUSTITUIDO = "CFDI_SUSTITUIDO"
+"""Clave de la bandera con la que **cualquier** informe reporta un CFDI excluido por
+sustitución. Es una constante y no un literal por informe porque es la columna por la que el
+usuario filtra la hoja `Banderas`: si un informe la escribiera con otra ortografía, quien
+filtre por ella dejaría de ver sus exclusiones sin notarlo. El *mensaje* sí lo redacta cada
+informe, porque la consecuencia de excluir es distinta en cada uno (en B-05 es un ingreso
+anual duplicado; en B-03, además, una fila de más en un papel de trabajo)."""
 
 MARGEN_TIMBRADO_DIAS = 31
 """Holgura, en días naturales y hacia los dos lados, entre `nomina.fecha_pago` (con la que
@@ -239,6 +252,47 @@ async def banderas_de_no_normalizables(db: AsyncSession, empresa_id: int, rfc_em
                 )
             )
     return banderas
+
+
+async def uuids_sustituidos(db: AsyncSession, ids_sustitutos: Sequence[int]) -> set[str]:
+    """Los `uuid_relacionado` que los comprobantes de `ids_sustitutos` declaran con
+    `tipo_relacion='04'`: el conjunto de UUID que **no** deben contarse, porque un sustituto
+    del mismo alcance ya los reemplazó.
+
+    **Por qué esto es lógica compartida y no de un solo informe.** Nació como `_sustituidos` en
+    B-05 (regla B-05.R1), donde el grano es un acumulado anual y contar dos veces el mismo pago
+    duplica el ingreso que el empleado declara ante el SAT. B-03 hace **el mismo acumulado
+    anual** por `(rfc, tipo, ejercicio)` y no la tenía: un aguinaldo timbrado y corregido por
+    sustitución se contaba dos veces y el informe emitía una `EXENCION_EXCEDIDA` de severidad
+    alta —un hallazgo de auditoría— acusando al patrón de un exceso que no existe. Cualquier
+    informe que sume importes de varios CFDI del mismo empleado tiene el mismo problema, así
+    que la resolución vive aquí, con el resto de lo común.
+
+    **La exclusión no depende del `estatus` del sustituido, y ese es el punto.** La verificación
+    contra el SAT es asíncrona en este sistema, así que un timbrado se sustituye casi siempre
+    **antes** de que la corrida de verificación alcance al sustituido: en la práctica el
+    sustituido está `no_verificado`, no `cancelado`, y ningún filtro por estatus lo atrapa. La
+    relación que declara el sustituto es la única señal confiable. Por eso quien la use debe
+    aplicarla **siempre**, también con `incluir_cancelados=True`.
+
+    La relación la declara el **sustituto**; `uuid_relacionado` es el UUID del **sustituido**,
+    que puede no tener fila propia en `comprobantes` (si nunca se descargó no hay nada que
+    excluir, y el acumulado ya era correcto — es ausencia de dato, no un error).
+
+    `ids_sustitutos` define el alcance en el que se buscan los sustitutos, y **debe cubrir el
+    mismo alcance que la suma que se quiere proteger**: si un informe acumula el ejercicio
+    completo pero solo pasa los ids del rango que imprime, una sustitución de enero seguiría
+    duplicando el acumulado de un informe de junio, sin ninguna fila que lo delate.
+    """
+    if not ids_sustitutos:
+        return set()
+    filas = await db.execute(
+        select(CfdiRelacionado.uuid_relacionado).where(
+            CfdiRelacionado.comprobante_id.in_(ids_sustitutos),
+            CfdiRelacionado.tipo_relacion == TIPO_RELACION_SUSTITUCION,
+        )
+    )
+    return {str(uuid_relacionado) for uuid_relacionado in filas.scalars().all()}
 
 
 UMBRAL_COLAPSO_NO_VERIFICADO = 15
