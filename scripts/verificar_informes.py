@@ -197,9 +197,20 @@ async def _verificar_b02(db: AsyncSession, comprobantes_normalizados: int) -> li
 def _parametros_minimos(clave: str) -> dict[str, object]:
     """Parámetros mínimos —solo lo requerido, todo lo demás con su default declarado,
     incluido `enmascarar_datos_personales=True`— para ejercitar cada informe del catálogo
-    contra el histórico completo de la empresa."""
+    contra el histórico completo de la empresa.
+
+    El `else` final asume que un informe se acota por rango de fechas, que es lo que hacen seis
+    de los nueve. Los que no, van nombrados arriba. **Un informe nuevo con parámetros requeridos
+    distintos revienta aquí en `Parametros(**...)`, y el mensaje se lee como un defecto del
+    informe cuando es de esta función** — le pasó a B-08, que exige `ejercicio` y `fecha_corte`,
+    y el resultado fue que el único auditor de fugas contra datos reales nunca miró su libro.
+    Si agregas un informe, agrégalo aquí.
+    """
     if clave == "B-05":
         return {"ejercicio": 2026}
+    if clave == "B-08":
+        # `fecha_corte` al cierre del ejercicio: es la fecha a la que un auditor pide la provisión.
+        return {"ejercicio": 2026, "fecha_corte": date(2026, 12, 31)}
     return {"fecha_desde": date(2026, 1, 1), "fecha_hasta": date(2026, 12, 31)}
 
 
