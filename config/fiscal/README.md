@@ -345,15 +345,39 @@ visible es mejor que un default plausible.
 
 ---
 
-## 7. Qué falta por capturar, y quién
+## 7. Estado real de la configuración, verificado en vivo
+
+> **Corte al 2026-08-07**, leído de la base de desarrollo por
+> `scripts/verificar_informes.py` (que imprime este mismo estado antes de correr los nueve
+> informes, y del que **deriva** qué degradación debe ver: ver su docstring). No es una lista de
+> intenciones — es lo que la base dice hoy.
+
+### 7.1 Lo que ya está confirmado y por tanto **calcula**
+
+| Qué | Estado |
+|---|---|
+| Los **5 valores de `param_fiscal`** (`UMA_DIARIA` 117.31, `UMA_MENSUAL` 3 566.22, `UMA_ANUAL` 42 794.64, `SALARIO_MINIMO_GENERAL` 315.04, `SALARIO_MINIMO_ZLFN` 440.87) | **CONFIRMADOS.** `valor_vigente()` los devuelve y B-03 llena su columna «UMA aplicable» |
+| `tabla_vacaciones` | 14 renglones cargados. Se aplica al cargarse, no lleva confirmación |
+| `configuracion_empresa` de la empresa real | Zona **ZLFN**, **15** días de aguinaldo, factor de prima **0.2500** |
+| `map_concepto_provision` | 3 conceptos clasificados; la **clasificación de percepciones está completa**, y por eso B-08 **sí se genera** |
+
+### 7.2 Lo que sigue pendiente, y de quién es
 
 | Falta | Por qué importa | Quién |
 |---|---|---|
-| **Los valores 2025 de `param_fiscal`** | La UMA cambia el 1 de febrero: del **1 al 31 de enero de 2026** aplica todavía la UMA 2025. Hoy `valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None` y el informe reporta el hueco. Al capturarlos hay que **cerrar** el tramo 2025 con `vigencia_hasta: 2026-01-31`, o el cargador rechazará el solapamiento | dueño del repo, con el boletín INEGI 2025 y el DOF del salario mínimo 2025 |
-| **`TIPO_CAMBIO_USD`** | Cambia todos los días hábiles: no es una semilla. Lo llena la sincronización con el DOF. **No se sembró un valor "de ejemplo" a propósito**: un tipo de cambio viejo y confirmado es peor que la ausencia del dato | la sincronización automática |
-| **Confirmar los 5 valores de `param_fiscal`** | Sin confirmar no calculan | dueño del repo, desde la pantalla de configuración |
-| **Revisar y confirmar las 44 marcas**, empezando por el grupo A (`024`) y el grupo D (el tope conjunto) | Sin confirmar, B-05 reporta `FALTA_CATALOGO_DE_MARCAS` en vez de calcular | dueño del repo |
-| **Un `empresa-*.yaml` por organización** | Sin `zona_salarial` no hay validación de salario mínimo; sin `map_concepto_provision` no hay provisión de vacaciones en B-08 | quien administra cada organización |
+| **Revisar y confirmar las 44 marcas de percepción** (0 confirmadas hoy; 39 traen `nota_revision`), empezando por el grupo A (`024`) y el grupo D (el tope conjunto). **De la nómina real solo dos aplican:** `001` Sueldos —sin duda declarada, se puede confirmar sin criterio de nadie— y `005` Fondo de Ahorro, cuya duda es si integra el SBC | Mientras no se confirmen, **B-03** emite `MARCA_SIN_CONFIRMAR` por tipo y deja vacías «Base de exención», «Tope de exención» y «Exceso sobre el tope»; **B-05** emite `MARCA_SIN_CONFIRMAR` y deja vacía «Gravado ordinario». Confirmadas las dos, las cuatro columnas se llenan y las banderas desaparecen (comprobado en una transacción revertida, tarea 11) | dueño del repo, desde la pantalla |
+| **`map_departamento`** — 0 renglones | **Decisión tomada, no olvido:** B-06 agrupa por el texto crudo del departamento (`EDIFICIOS`, `SOCIAL`) y lo declara con `DEPARTAMENTO_SIN_MAPEO` y `RESOLUCION_DE_CENTRO_DE_COSTO`. El agrupamiento es correcto; lo que falta es la constancia de que alguien revisó que esos dos textos son los dos centros de costo | dueño del repo, si quiere la constancia |
+| **Los valores 2025 de `param_fiscal`** | La UMA cambia el 1 de febrero: del **1 al 31 de enero de 2026** aplica todavía la UMA 2025. Hoy `valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None` y el informe reporta el hueco. No muerde con los datos actuales (el primer CFDI descargado se pagó en junio de 2026), y morderá en cuanto se descargue enero. Al capturarlos hay que **cerrar** el tramo 2025 con `vigencia_hasta: 2026-01-31`, o el cargador rechazará el solapamiento | dueño del repo, con el boletín INEGI 2025 y el DOF del salario mínimo 2025 |
+| **`TIPO_CAMBIO_USD`** | Cambia todos los días hábiles: no es una semilla. Lo llena la sincronización con el DOF, que necesita `BANXICO_TOKEN` (gratuito); sin él la alerta `SINCRONIZACION_FALLIDA` es permanente. **No se sembró un valor "de ejemplo" a propósito**: un tipo de cambio viejo y confirmado es peor que la ausencia del dato | la sincronización automática |
+| **`tarifa_isr` y el subsidio al empleo** | Deuda declarada de la fase 3, y con ella **B-09**. Es el Anexo 8 de la RMF, en PDF; B-09.R2 advierte de errores de dos órdenes de magnitud por una tasa mal capturada | fase posterior |
+| **Un `empresa-*.yaml` por cada organización nueva** | Sin `zona_salarial` no hay validación de salario mínimo en B-10; sin `map_concepto_provision` completo, B-08 no se genera | quien administra cada organización |
+
+**Un aviso sobre los nombres de bandera:** la versión anterior de esta sección decía que sin
+confirmar las marcas «B-05 reporta `FALTA_CATALOGO_DE_MARCAS`». Esa clave no existe. Las dos que
+sí existen son `MARCA_SIN_CONFIRMAR` (la marca está capturada y solo falta el clic) y `FALTA_MARCA`
+(no hay marca capturada), y la diferencia es justo lo que separa un aviso accionable de uno que
+manda a capturar lo que ya está capturado. `scripts/verificar_informes.py` comprueba que la que
+salga sea la de la causa real.
 
 ---
 
