@@ -34,9 +34,21 @@
 # Política laboral de la organización.
 #
 # Los tres campos nacen en NULL a propósito y NO tienen valor por omisión (ver el docstring
-# de `app/models/configuracion_fiscal.py`). Si dejas uno fuera, el informe que lo necesita
-# reporta "no evalué esto y te digo por qué", que es información; un valor adivinado sería
-# una mentira silenciosa.
+# de `app/models/configuracion_fiscal.py`). En la PRIMERA carga, dejar uno fuera hace que el
+# informe que lo necesita reporte "no evalué esto y te digo por qué", que es información; un
+# valor adivinado sería una mentira silenciosa.
+#
+# AL RECARGAR es distinto, y conviene tenerlo claro: **el campo que este archivo no menciona
+# no se toca**. Si alguien capturó los días de aguinaldo por la pantalla o por
+# `administrar_configuracion configurar-empresa` y aquí no aparecen, se conservan. Antes se
+# borraban en silencio y sin bitácora —el cargador no escribe ninguna—, y sin días de
+# aguinaldo B-08 deja de generarse: un informe se apagaba y no había rastro de quién lo
+# apagó. El resumen de la carga te dice qué campos conservó.
+#
+# Para BORRAR uno hay que escribirlo con `null` explícito (`dias_aguinaldo:` a secas, o
+# `dias_aguinaldo: null`). Es la diferencia entre "esto no lo administra este archivo" y
+# "quítalo": ausente conserva, `null` borra. Y el rastro de ese borrado es este archivo en
+# git, que es el único que tiene el cargador.
 # --------------------------------------------------------------------------------------
 configuracion_empresa:
   # GENERAL o ZLFN (Zona Libre de la Frontera Norte).
@@ -71,7 +83,7 @@ map_departamento:
     centro_costo: 'CC-001'
 
 # --------------------------------------------------------------------------------------
-# Concepto de nómina de la organización -> categoría de provisión contable (B-06).
+# Concepto de nómina de la organización -> categoría de provisión contable (B-08).
 #
 #   naturaleza  'P' percepción · 'D' deducción · 'O' otro pago  (una sola posición)
 #   tipo        clave del catálogo del SAT (tres posiciones, ENTRECOMILLADA)
@@ -82,7 +94,7 @@ map_departamento:
 # `tipo_percepcion` propio en el catálogo `c_TipoPercepcion` — se pagan dentro del 001
 # (Sueldos, Salarios Rayas y Jornales). La única forma de identificarlas para el pasivo
 # laboral es la clave interna del patrón, y esa es distinta en cada organización. Sin esta
-# sección, B-06 no puede provisionar vacaciones.
+# sección, B-08 no puede provisionar vacaciones.
 # --------------------------------------------------------------------------------------
 map_concepto_provision:
   - naturaleza: 'P'

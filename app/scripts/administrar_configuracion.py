@@ -318,7 +318,7 @@ class _MarcaLeida:
     """Las marcas de un tipo tal como están hoy, con la huella de su duda. Por columnas, por
     la misma razón que `_TramoLeido`."""
 
-    marcas: cfg.MarcasQueCalculan
+    marcas: cfg.MarcasQueSeConfirman
     nota_revision: str | None
     huella: str | None
     confirmado_por: str | None
@@ -344,7 +344,7 @@ async def leer_marca(db: AsyncSession, tipo: str) -> _MarcaLeida | None:
     if fila is None:
         return None
     return _MarcaLeida(
-        marcas=cfg.MarcasQueCalculan(
+        marcas=cfg.MarcasQueSeConfirman(
             es_ingreso_ordinario=fila.es_ingreso_ordinario,
             base_exencion=fila.base_exencion,
             factor_exencion=fila.factor_exencion,
@@ -435,23 +435,39 @@ async def _mostrar_percepciones(db: AsyncSession, *, detallado: bool, como_coman
     for fila in filas:
         descripcion = descripciones.get(fila.tipo_percepcion) or "(sin descripción en el catálogo instalado)"
         print(f"\n  {fila.tipo_percepcion}  {descripcion}")
-        print(
-            f"      ingreso ordinario: {_si_no(fila.es_ingreso_ordinario)}   "
-            f"integra SBC: {_si_no(fila.integra_sbc)}   provisionable: {_si_no(fila.es_provisionable)}"
-        )
-        factor = fila.factor_exencion if fila.factor_exencion is not None else "—"
-        print(
-            f"      exención: base {fila.base_exencion.value}, factor {factor}   "
-            f"tope conjunto art. 93: {_si_no(fila.sujeto_a_tope_conjunto)}"
-        )
+        _imprimir_marcas(cfg.MarcasQueSeConfirman.de_fila(fila), sangria="      ")
         if fila.nota_revision:
             print(f"      DUDA DECLARADA: {fila.nota_revision}")
             print(f"      huella de la duda: {cfg.huella_de_nota(fila.nota_revision)}")
-        print(f"      huella de las marcas: {cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))}")
+        print(f"      huella de las marcas: {cfg.huella_de_marcas(cfg.MarcasQueSeConfirman.de_fila(fila))}")
         if fila.confirmado_en is not None:
             print(f"      confirmada   sí, por {fila.confirmado_por} el {fila.confirmado_en:%Y-%m-%d %H:%M} UTC")
         else:
             print("      confirmada   NO — sin confirmar no calcula ninguna exención")
+
+
+def _imprimir_marcas(marcas: cfg.MarcasQueSeConfirman, *, sangria: str) -> None:
+    """Las seis marcas **agrupadas por quién las lee**, que es lo que decide cuánto trabajo
+    tiene sentido dedicarles.
+
+    Existe porque las 44 marcas se revisan una por una y dos de las seis (`integra_sbc` y
+    `es_provisionable`) no las lee ningún informe todavía. Sin decirlo, quien revisa gasta el
+    mismo esfuerzo en las seis y —peor— puede "corregir" `es_provisionable` buscando arreglar la
+    provisión de B-08, que en realidad sale de `map_concepto_provision`: el cambio no altera
+    ningún resultado y en cambio **le borra la confirmación** de esa marca. Decirlo aquí es lo
+    que evita ese trabajo inútil; aflojar la guarda no (ver `cfg.MarcasQueSeConfirman`).
+    """
+    factor = marcas.factor_exencion if marcas.factor_exencion is not None else "—"
+    print(f"{sangria}Las que hoy calculan:")
+    print(f"{sangria}  ingreso ordinario (B-05)       {_si_no(marcas.es_ingreso_ordinario)}")
+    print(f"{sangria}  exención (B-03)                base {marcas.base_exencion.value}, factor {factor}")
+    print(f"{sangria}  tope conjunto art. 93 (B-03)   {_si_no(marcas.sujeto_a_tope_conjunto)}")
+    print(f"{sangria}Informativas — ningún informe las lee todavía, así que cambiarlas no altera")
+    print(f"{sangria}ningún resultado, pero sí obliga a volver a confirmar la marca:")
+    print(f"{sangria}  integra SBC (art. 27 LSS)      {_si_no(marcas.integra_sbc)}")
+    print(f"{sangria}  provisionable                  {_si_no(marcas.es_provisionable)}")
+    print(f"{sangria}    (el pasivo laboral de B-08 sale de la clasificación de conceptos de cada")
+    print(f"{sangria}     empresa, `clasificar`, no de esta marca)")
 
 
 def _imprimir_comandos_de_marcas(
@@ -514,7 +530,7 @@ def _imprimir_comandos_de_marcas(
         print(
             f"python -m app.scripts.administrar_configuracion confirmar-marca "
             f"{fila.tipo_percepcion} \\\n  {guarda} \\\n"
-            f"  --marcas {cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))} --actor {actor}"
+            f"  --marcas {cfg.huella_de_marcas(cfg.MarcasQueSeConfirman.de_fila(fila))} --actor {actor}"
         )
 
 
@@ -864,12 +880,7 @@ async def cmd_confirmar_marca(db: AsyncSession, args: argparse.Namespace) -> int
             "responder por lo que se miró."
         )
     print(f"CONFIRMAR la marca {tipo} — {descripcion}, a nombre de {actor}\n")
-    print(f"  ingreso ordinario      {_si_no(marcas.es_ingreso_ordinario)}")
-    print(f"  integra SBC            {_si_no(marcas.integra_sbc)}")
-    print(f"  provisionable          {_si_no(marcas.es_provisionable)}")
-    print(f"  base de exención       {marcas.base_exencion.value}")
-    print(f"  factor de exención     {marcas.factor_exencion if marcas.factor_exencion is not None else '—'}")
-    print(f"  tope conjunto art. 93  {_si_no(marcas.sujeto_a_tope_conjunto)}")
+    _imprimir_marcas(marcas, sangria="  ")
     if leida.nota_revision:
         print(f"\n  DUDA DECLARADA: {leida.nota_revision}")
     else:
@@ -1266,7 +1277,9 @@ def construir_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Con --percepciones: imprime los comandos `confirmar-marca` de lo que falta, cada uno con su "
-            "duda encima. La huella solo sale si la salida va a una terminal."
+            "duda encima para que se lea antes de copiarlo. Las huellas salen siempre, vaya la salida a "
+            "una terminal o a un archivo: condicionarlas al terminal no frenaba a nadie y sí borraba las "
+            "huellas de quien paginaba la lista para leerla."
         ),
     )
     estado.add_argument("--actor", default=None, help="Correo con el que rellenar los comandos de --como-comandos.")

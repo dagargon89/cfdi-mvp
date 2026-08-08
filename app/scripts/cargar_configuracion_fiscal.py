@@ -75,6 +75,14 @@ def main() -> None:
         print(f"\n{len(resultado.omitidos)} renglón(es) NO se cargaron para no pisar una corrección manual:")
         for aviso in resultado.omitidos:
             print(f"  - {aviso}")
+    if resultado.conservados:
+        # Canal aparte del de arriba: aquí no se omitió nada que el archivo pidiera, sino que se
+        # **dejó en paz** lo que el archivo no menciona. Se imprime porque el caso silencioso
+        # —recargar una semilla que solo trae `zona_salarial`— borraba los otros dos campos, y
+        # sin días de aguinaldo B-08 deja de generarse.
+        print("\nCampos que el archivo no administra:")
+        for aviso in resultado.conservados:
+            print(f"  - {aviso}")
     if any(resumen.get(tabla) for tabla in _EXIGEN_CONFIRMACION):
         print(
             "\nPENDIENTE DE CONFIRMACIÓN: lo cargado NO se usa en ningún cálculo hasta que una\n"

@@ -431,7 +431,12 @@ class ParamFiscalConfirmarIn(BaseModel):
 
 
 class MarcasPercepcion(BaseModel):
-    """Las seis marcas del §3.1 que **calculan**: lo que se revisa y lo que se confirma.
+    """Las seis marcas del §3.1 que se revisan y por las que se **responde** al confirmar.
+
+    Dos de las seis (`integra_sbc` y `es_provisionable`) todavía no las lee ningún informe, y
+    aun así entran en la comparación que devuelve `409`: ver
+    `configuracion_fiscal.MarcasQueSeConfirman` para el argumento. En corto, lo que se confirma
+    es lo que la fila afirma, no lo que hoy se calcula con ella.
 
     Mismas reglas que el cargador de semillas (`_leer_marca`): sin base de exención no hay
     factor, y con base sí lo hay.

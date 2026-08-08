@@ -19,9 +19,11 @@ from app.models.enums import OrigenValor
 from app.services import sincronizacion_fiscal as sync
 
 
-def _param(clave: str, valor: str, desde: date, *, confirmado: bool) -> ParamFiscal:
+def _param(
+    clave: str, valor: str, desde: date, *, confirmado: bool, hasta: date | None = None
+) -> ParamFiscal:
     return ParamFiscal(
-        ejercicio=desde.year, clave=clave, valor=Decimal(valor), vigencia_desde=desde, vigencia_hasta=None,
+        ejercicio=desde.year, clave=clave, valor=Decimal(valor), vigencia_desde=desde, vigencia_hasta=hasta,
         origen=OrigenValor.SEMILLA, fuente="prueba",
         confirmado_por="uid" if confirmado else None,
         confirmado_en=datetime(2026, 8, 6) if confirmado else None,
@@ -352,3 +354,69 @@ async def test_la_tarea_del_beat_no_corre_si_el_admin_la_apago(monkeypatch: pyte
     monkeypatch.setattr(tasks.config_repo, "valor", _apagada)
     resultado = await tasks._revisar_vigencia_fiscal_async()
     assert resultado == {"alertas": 0, "propuestos": 0, "razon": "desactivada"}
+
+
+async def test_un_tramo_confirmado_y_cerrado_sin_sucesor_no_esta_al_dia(db: AsyncSession) -> None:
+    """El hueco que la alarma no veía: `al_dia` comparaba solo `vigencia_desde >= esperada` y
+    no miraba `vigencia_hasta`.
+
+    Escenario: `UMA_DIARIA` confirmada del 2026-02-01 al 2026-06-30, sin sucesor. En agosto la
+    pantalla decía **"todo al día"** mientras `valor_vigente(hoy)` era `None` y B-03 y B-10
+    emitían `FALTA_UMA` / `FALTA_SALARIO_MINIMO`: la alarma afirmaba lo contrario de lo que
+    decían los informes, que es la peor forma de fallar de una alarma.
+
+    Y no es de laboratorio: cerrar el tramo anterior a mano es el procedimiento **obligatorio**
+    del módulo (`guardar_param_fiscal` no lo cierra solo, a propósito), así que teclear mal ese
+    `vigencia_hasta` es el dedazo natural del proceso — y era el único de esa familia que la
+    alarma no veía.
+    """
+    db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1), confirmado=True, hasta=date(2026, 6, 30)))
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 7))
+
+    de_uma = next(a for a in alertas if a.clave == "UMA_DIARIA")
+    assert de_uma.motivo == "CADUCADO"
+    assert "se cerró el 2026-06-30" in de_uma.detalle
+    assert "vigencia_hasta" in de_uma.detalle, "la acción que toca es revisar el cierre, y hay que decirla"
+
+
+async def test_un_tramo_confirmado_y_abierto_si_esta_al_dia(db: AsyncSession) -> None:
+    """La gemela: el caso normal no puede empezar a dar alarma. Sin ella, un `al_dia` que fuera
+    siempre falso pasaría igual de verde la prueba de arriba."""
+    db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1), confirmado=True))
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 7))
+
+    assert not [a for a in alertas if a.clave == "UMA_DIARIA"]
+
+
+async def test_un_tramo_cerrado_con_sucesor_confirmado_esta_al_dia(db: AsyncSession) -> None:
+    """El procedimiento hecho bien: se cierra el viejo y se abre el nuevo. No hay alarma.
+
+    Y cubre la trampa de la implementación: la comprobación de "cubre hoy" es sobre **todos**
+    los tramos confirmados, no sobre el de `vigencia_desde` máximo. Si se le exigiera al máximo
+    que cubra hoy, un tramo futuro confirmado por adelantado —la UMA de febrero confirmada en
+    enero— encendería una alarma falsa.
+    """
+    db.add(_param("UMA_DIARIA", "113.140000", date(2025, 2, 1), confirmado=True, hasta=date(2026, 1, 31)))
+    db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1), confirmado=True))
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 7))
+
+    assert not [a for a in alertas if a.clave == "UMA_DIARIA"]
+
+
+async def test_un_tramo_futuro_confirmado_por_adelantado_no_da_alarma_falsa(db: AsyncSession) -> None:
+    """En enero de 2026, con la UMA de febrero ya confirmada y la de 2025 vigente y cerrada al
+    31 de enero: el tramo de `vigencia_desde` máximo **no** cubre hoy, y aun así todo está en
+    orden. Es exactamente el caso que rompería una comprobación hecha sobre `max()`."""
+    db.add(_param("UMA_DIARIA", "113.140000", date(2025, 2, 1), confirmado=True, hasta=date(2026, 1, 31)))
+    db.add(_param("UMA_DIARIA", "117.310000", date(2026, 2, 1), confirmado=True))
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 1, 15))
+
+    assert not [a for a in alertas if a.clave == "UMA_DIARIA"]

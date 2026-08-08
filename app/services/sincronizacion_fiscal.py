@@ -274,7 +274,21 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
     confirmado = max(confirmados, key=lambda t: t.vigencia_desde) if confirmados else None
     propuesto = max(propuestos, key=lambda t: t.vigencia_desde) if propuestos else None
 
-    al_dia = confirmado is not None and confirmado.vigencia_desde >= esperada
+    # "Al día" son **dos** cosas, y confundirlas era el defecto: que el tramo confirmado más
+    # reciente sea del periodo que toca, y que **haya un tramo confirmado que cubra hoy**. Sin la
+    # segunda, un tramo confirmado y luego cerrado antes de hoy (`vigencia_hasta` en el pasado y
+    # sin sucesor) salía "al día" mientras `valor_vigente(hoy)` devolvía `None` y B-03 y B-10
+    # emitían `FALTA_UMA` / `FALTA_SALARIO_MINIMO`: la alarma decía "todo en orden" justo cuando
+    # los informes decían que no. Y no es un caso de laboratorio: cerrar el tramo anterior a mano
+    # es el procedimiento **obligatorio** del módulo (`guardar_param_fiscal` no lo cierra solo, a
+    # propósito), así que teclear mal ese `vigencia_hasta` es el dedazo natural del proceso.
+    #
+    # La comprobación es sobre **todos** los confirmados y no sobre el más reciente, porque
+    # `max()` puede ser un tramo futuro confirmado por adelantado (la UMA de febrero, confirmada
+    # en enero) mientras el que cubre hoy es el anterior: exigirle a ese máximo que cubra hoy
+    # habría encendido una alarma falsa en el caso legítimo.
+    cubre_hoy = any(t.vigencia_desde <= hoy and (t.vigencia_hasta is None or t.vigencia_hasta >= hoy) for t in confirmados)
+    al_dia = confirmado is not None and confirmado.vigencia_desde >= esperada and cubre_hoy
     if not al_dia:
         # Hay una propuesta que **sí** cubre el periodo: confirmarla resuelve el problema, y eso
         # es un clic. Distinguirlo de "ve a capturar" es lo que hace la alarma accionable.
@@ -290,6 +304,31 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
                     "confirmación. Hasta que alguien lo revise y lo confirme no entra a ningún cálculo."
                 ),
             )
+        # El hueco: lo confirmado es del periodo que toca, pero **ninguno cubre hoy**. Se
+        # informa aparte porque la acción es otra —revisar el `vigencia_hasta` que alguien
+        # tecleó al cerrar, o capturar el sucesor— y el mensaje genérico de abajo diría algo
+        # falso ("arranca antes de la fecha de actualización", cuando arranca después).
+        if confirmado is not None and confirmado.vigencia_desde >= esperada and not cubre_hoy:
+            cerrado = confirmado.vigencia_hasta
+            return AlertaVigencia(
+                clave=clave,
+                motivo="CADUCADO",
+                vigencia_desde=confirmado.vigencia_desde,
+                fecha_esperada=esperada,
+                detalle=(
+                    f"`{clave}` tiene un tramo confirmado ({confirmado.valor}, desde "
+                    f"{confirmado.vigencia_desde.isoformat()}) que "
+                    + (
+                        f"se cerró el {cerrado.isoformat()}"
+                        if cerrado is not None
+                        else f"todavía no arranca (empieza el {confirmado.vigencia_desde.isoformat()})"
+                    )
+                    + ", así que hoy no hay ningún valor vigente y los informes lo reportan como "
+                    "faltante aunque la tabla parezca completa. Revisa si el `vigencia_hasta` se "
+                    "tecleó mal al cerrar el tramo, o captura el tramo que cubre hoy."
+                ),
+            )
+
         # Lo único que hay es de antes de la fecha de actualización. Aunque esté sin confirmar,
         # el motivo es la caducidad: confirmar una propuesta de 2025 no arregla que falte la de
         # 2026, y la acción que toca es capturar el valor del ejercicio.

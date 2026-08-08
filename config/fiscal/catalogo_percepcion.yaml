@@ -1,5 +1,7 @@
 # Marcas por tipo de percepción de nómina (§3.1 del documento fuente): lo que el catálogo
-# `c_TipoPercepcion` del SAT no trae y los informes B-03/B-05/B-06 necesitan.
+# `c_TipoPercepcion` del SAT no trae y los informes B-03 y B-05 necesitan (dos de las seis
+# marcas, `integra_sbc` y `es_provisionable`, todavía no las lee ningún informe: ver
+# `MarcasQueSeConfirman` en app/services/configuracion_fiscal.py).
 #
 # ======================================================================================
 # CÓMO SE REVISA ESTE ARCHIVO
@@ -58,7 +60,10 @@
 #                     esas exclusiones son PARCIALES (hasta un tope; el excedente sí
 #                     integra). Este campo es booleano y no puede expresar un tope: donde la
 #                     exclusión es parcial se capturó el caso típico y se marcó la duda.
-#   es_provisionable  Si entra al pasivo laboral que calcula B-06.
+#   es_provisionable  Si el concepto es de los que se devengan. INFORMATIVA: el pasivo
+#                     laboral lo calcula B-08 con `map_concepto_provision` de cada empresa,
+#                     no con esta marca; hoy no la lee ningún informe. Cambiarla no altera
+#                     ningún resultado, pero sí invalida la confirmación de la marca.
 #   nota_revision     La duda declarada de este renglón, si la hay: qué la genera y qué
 #                     habría que verificar antes de confirmar. OPCIONAL. Se carga a la
 #                     columna `catalogo_percepcion_marca.nota_revision` y la API la devuelve
@@ -125,7 +130,8 @@ catalogo_percepcion_marca:
   # [UMA] elevado a 30 días, cuando dichas gratificaciones se otorguen en forma general".
   # SBC: "gratificaciones" está en la lista de integrantes del art. 27, primer párrafo, LSS
   # y no aparece en ninguna de las nueve exclusiones.
-  # Provisionable: es el pasivo laboral clásico de B-06 (art. 87 LFT).
+  # Provisionable: es el pasivo laboral clásico (art. 87 LFT). B-08 lo calcula por
+  # `map_concepto_provision`, no por esta marca; aquí queda como dato del catálogo.
   - tipo_percepcion: '002'
     es_ingreso_ordinario: true
     base_exencion: UMA_DIAS
@@ -319,7 +325,8 @@ catalogo_percepcion_marca:
   # 021 Prima vacacional.
   # Exención: art. 93, fracción XIV LISR — 15 días de UMA, "en forma general".
   # SBC: "primas" integra (art. 27, primer párrafo LSS); es parte del factor de integración.
-  # Provisionable: pasivo laboral de B-06 (art. 80 LFT, prima no menor al 25%).
+  # Provisionable: pasivo laboral (art. 80 LFT, prima no menor al 25%). Lo calcula B-08 por
+  # `map_concepto_provision`, no por esta marca.
   - tipo_percepcion: '021'
     es_ingreso_ordinario: true
     base_exencion: UMA_DIAS

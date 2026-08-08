@@ -47,6 +47,7 @@ import argparse
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from decimal import Decimal
@@ -124,7 +125,7 @@ def _marca(tipo: str, *, nota: str | None = None, tope: bool = False) -> Catalog
 
 def _huella_marcas(fila: CatalogoPercepcionMarca) -> str:
     """La huella de las seis marcas de una fila, tal como la muestra `estado --percepciones`."""
-    return cfg.huella_de_marcas(cfg.MarcasQueCalculan.de_fila(fila))
+    return cfg.huella_de_marcas(cfg.MarcasQueSeConfirman.de_fila(fila))
 
 
 async def _bitacora(db: AsyncSession, accion: str) -> list[Bitacora]:
@@ -1127,7 +1128,9 @@ async def test_sin_si_las_marcas_salen_en_el_plan_y_las_compara_la_persona(
     codigo = await _correr(db, "confirmar-marca", "010", "--sin-duda", "--actor", ACTOR)
 
     assert codigo == 0
-    assert "tope conjunto art. 93  sí" in capsys.readouterr().out, "las seis tienen que verse antes de decidir"
+    salida = capsys.readouterr().out
+    assert "tope conjunto art. 93 (B-03)   sí" in salida, "las seis tienen que verse antes de decidir"
+    assert "integra SBC" in salida and "provisionable" in salida
     db.expire_all()
     assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
 
@@ -1174,12 +1177,12 @@ async def test_la_huella_de_marcas_no_incluye_la_nota(db: AsyncSession) -> None:
     """Si la nota entrara en la huella de las marcas, **resolver una duda invalidaría una
     revisión en vuelo** — lo contrario de la asimetría que `duda_no_vista` protege. Son dos
     huellas porque son dos cosas que se mueven por separado."""
-    sin_nota = cfg.MarcasQueCalculan.de_fila(_marca("010", nota=None))
-    con_nota = cfg.MarcasQueCalculan.de_fila(_marca("010", nota=_DUDA))
+    sin_nota = cfg.MarcasQueSeConfirman.de_fila(_marca("010", nota=None))
+    con_nota = cfg.MarcasQueSeConfirman.de_fila(_marca("010", nota=_DUDA))
     assert cfg.huella_de_marcas(sin_nota) == cfg.huella_de_marcas(con_nota)
     # Y la gemela: una marca que sí cambia, cambia la huella.
     assert cfg.huella_de_marcas(sin_nota) != cfg.huella_de_marcas(
-        cfg.MarcasQueCalculan.de_fila(_marca("010", tope=True))
+        cfg.MarcasQueSeConfirman.de_fila(_marca("010", tope=True))
     )
 
 
@@ -1326,3 +1329,227 @@ async def test_el_proceso_real_sale_con_error_cuando_el_comando_esta_mal(
 
     assert proc.returncode != 0
     assert "no es una clave conocida" in proc.stderr
+
+
+# --------------------------------------------------------------------------------------
+# 13. Las dos marcas que hoy no lee ningún informe
+# --------------------------------------------------------------------------------------
+
+
+async def test_una_marca_que_no_lee_ningun_informe_igual_invalida_la_confirmacion(
+    db: AsyncSession,
+) -> None:
+    """`integra_sbc` y `es_provisionable` no las lee ningún informe **todavía**, y aun así
+    entran en la comparación que rechaza el confirmar.
+
+    Es el mismo argumento que este módulo ya aceptó para `sujeto_a_tope_conjunto`: lo que la
+    confirmación protege no es "lo que calcula hoy" sino **lo que la fila afirma**, y
+    `marcas_de_percepcion` devuelve la fila entera. El día que un informe lea `integra_sbc` —es
+    la base de cotización del IMSS, lo va a leer— leería un valor que nadie revisó. Sacarlas de
+    la comparación cambiaría una fricción visible hoy por un hueco silencioso mañana.
+    """
+    await _admin(db)
+    fila = _marca("010", nota=None)
+    db.add(fila)
+    await db.commit()
+    huella_de_antes = _huella_marcas(fila)
+
+    fila.integra_sbc = True  # cambia una marca que hoy no calcula nada
+    await db.commit()
+
+    codigo = await _correr(
+        db, "confirmar-marca", "010", "--sin-duda", "--marcas", huella_de_antes, "--actor", ACTOR, "--si"
+    )
+
+    assert codigo == 1, "confirmar contra una fila que ya dice otra cosa se rechaza, calcule o no"
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}
+
+
+@pytest.mark.parametrize("campo", ["integra_sbc", "es_provisionable"])
+async def test_la_puerta_del_servicio_rechaza_aunque_la_marca_no_calcule_nada(
+    db: AsyncSession, campo: str
+) -> None:
+    """La misma afirmación, pero **contra la puerta del servicio**, que es la que comparten la
+    pantalla y la terminal.
+
+    La prueba de arriba no sirve para esto y la evidencia por mutación lo demostró: quitar
+    `integra_sbc` de `marcas_difieren` la dejaba pasar, porque el comando compara la huella
+    *antes* de llegar a la puerta y ese vistazo la tapaba. Es la tercera vez en esta fase que una
+    comprobación externa esconde la guarda interna. Aquí se llama a `confirmar_marca_percepcion`
+    directamente con unas marcas que difieren solo en el campo huérfano, que es lo que hace la
+    pantalla cuando el cuerpo del `POST` trae un valor viejo.
+    """
+    await _admin(db)
+    fila = _marca("010", nota=None)
+    db.add(fila)
+    await db.commit()
+
+    revisadas = replace(cfg.MarcasQueSeConfirman.de_fila(fila), **{campo: not getattr(fila, campo)})
+
+    with pytest.raises(cfg.MarcasCambiaron):
+        await cfg.confirmar_marca_percepcion(
+            db, tipo="010", marcas=revisadas, nota_revision_hash=None, actor=ACTOR
+        )
+
+    await db.rollback()
+    db.expire_all()
+    assert await cfg.marcas_de_percepcion(db) == {}, (
+        f"`{campo}` no lo lee ningún informe todavía, pero confirmar una fila que dice otra cosa "
+        "sigue siendo confirmar sin haber mirado: el día que un informe lo lea, leería un valor "
+        "que nadie revisó"
+    )
+
+
+@pytest.mark.parametrize("campo", ["integra_sbc", "es_provisionable"])
+async def test_la_puerta_del_servicio_si_confirma_lo_que_coincide(db: AsyncSession, campo: str) -> None:
+    """La gemela de la anterior, y la que impide que `marcas_difieren` se vuelva "rechaza
+    siempre": con las seis iguales, confirma."""
+    await _admin(db)
+    fila = _marca("010", nota=None)
+    setattr(fila, campo, True)
+    db.add(fila)
+    await db.commit()
+
+    _, cambio = await cfg.confirmar_marca_percepcion(
+        db,
+        tipo="010",
+        marcas=cfg.MarcasQueSeConfirman.de_fila(fila),
+        nota_revision_hash=None,
+        actor=ACTOR,
+    )
+    await db.commit()
+
+    assert cambio is True
+    db.expire_all()
+    assert set(await cfg.marcas_de_percepcion(db)) == {"010"}
+
+
+async def test_las_seis_entran_en_la_huella_incluidas_las_dos_huerfanas(db: AsyncSession) -> None:
+    """La gemela, al nivel de la huella: si `huella_de_marcas` ignorara las dos huérfanas, la
+    prueba de arriba pasaría igual y el hueco quedaría abierto."""
+    base = cfg.MarcasQueSeConfirman.de_fila(_marca("010"))
+    for campo in (
+        "es_ingreso_ordinario",
+        "integra_sbc",
+        "es_provisionable",
+        "sujeto_a_tope_conjunto",
+    ):
+        distinta = replace(base, **{campo: not getattr(base, campo)})
+        assert cfg.huella_de_marcas(base) != cfg.huella_de_marcas(distinta), (
+            f"`{campo}` tiene que mover la huella: si no, se puede cambiar bajo una confirmación"
+        )
+
+
+async def test_el_estado_dice_que_dos_marcas_no_las_lee_nadie(
+    db: AsyncSession, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """El coste real de las dos huérfanas no es la guarda, es el trabajo inútil: quien revisa
+    las 44 puede "corregir" `es_provisionable` para arreglar la provisión de B-08 —que sale de
+    `map_concepto_provision`, no de ahí—, no cambiar ningún resultado y perder la confirmación.
+    Decirlo donde se revisa es lo que lo evita."""
+    await _admin(db)
+    db.add(_marca("010", nota=None))
+    await db.commit()
+
+    assert await _correr(db, "estado", "--percepciones") == 0
+
+    salida = capsys.readouterr().out
+    assert "Las que hoy calculan:" in salida
+    assert "ingreso ordinario (B-05)" in salida
+    assert "exención (B-03)" in salida
+    assert "ningún informe las lee todavía" in salida
+    assert "B-08 sale de la clasificación de conceptos" in salida.replace("\n", " ").replace("  ", " ") or (
+        "B-08" in salida and "clasificar" in salida
+    )
+    assert "B-06" not in salida, "el pasivo laboral es B-08; B-06 es el de centros de costo"
+
+
+# --------------------------------------------------------------------------------------
+# 14. Recargar una semilla de empresa no puede borrar lo que no menciona
+# --------------------------------------------------------------------------------------
+
+
+async def test_recargar_una_semilla_no_borra_los_campos_que_no_menciona(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """El caso verificado: empresa con `ZLFN / 15 / 0.25`, se recarga un YAML que solo trae
+    `zona_salarial`. Antes quedaba `ZLFN / None / None`, **sin bitácora** —el cargador no
+    escribe ninguna a propósito—, y sin días de aguinaldo B-08 deja de generarse: un informe se
+    apagaba y no había rastro de quién lo apagó.
+
+    Es la misma decisión que `cmd_configurar_empresa` ya tomaba ("lo que no se menciona se
+    conserva"), y el cargador es el camino **documentado** en `empresa.yaml.ejemplo`.
+    """
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    db.add(
+        ConfiguracionEmpresa(
+            empresa_id=empresa_id,
+            zona_salarial=ZonaSalarial.ZLFN,
+            dias_aguinaldo=15,
+            factor_prima_vacacional=Decimal("0.2500"),
+        )
+    )
+    await db.commit()
+
+    ruta = tmp_path / "empresa-solo-zona.yaml"
+    ruta.write_text("configuracion_empresa:\n  - zona_salarial: ZLFN\n", encoding="utf-8")
+
+    resultado = await cfg.cargar_desde_yaml_detallado(db, ruta, empresa_id=empresa_id)
+
+    db.expire_all()
+    config = await db.get(ConfiguracionEmpresa, empresa_id)
+    assert config is not None
+    assert config.zona_salarial is ZonaSalarial.ZLFN
+    assert config.dias_aguinaldo == 15, "el archivo no los menciona: no se tocan"
+    assert config.factor_prima_vacacional == Decimal("0.2500")
+    # Y el resumen lo dice, para que no sea una conservación silenciosa tampoco.
+    avisos = " ".join(resultado.conservados)
+    assert "dias_aguinaldo" in avisos and "factor_prima_vacacional" in avisos
+    assert "no los menciona" in avisos
+
+
+async def test_un_null_explicito_si_borra(db: AsyncSession, tmp_path: Path) -> None:
+    """La gemela, y es la que hace que la de arriba no sea "el cargador ya no escribe nada":
+    ausente conserva, `null` **borra**. La diferencia es la intención declarada, y el rastro de
+    ese borrado es el propio archivo en git — el único que tiene el cargador."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+    db.add(ConfiguracionEmpresa(empresa_id=empresa_id, zona_salarial=ZonaSalarial.ZLFN, dias_aguinaldo=15))
+    await db.commit()
+
+    ruta = tmp_path / "empresa-borra.yaml"
+    ruta.write_text("configuracion_empresa:\n  - zona_salarial: ZLFN\n    dias_aguinaldo: null\n", encoding="utf-8")
+
+    resultado = await cfg.cargar_desde_yaml_detallado(db, ruta, empresa_id=empresa_id)
+
+    db.expire_all()
+    config = await db.get(ConfiguracionEmpresa, empresa_id)
+    assert config is not None
+    assert config.dias_aguinaldo is None, "un `null` explícito es una orden de borrar"
+    assert any("se BORRÓ" in aviso for aviso in resultado.conservados), "y se dice en voz alta"
+
+
+async def test_la_primera_carga_escribe_lo_que_el_archivo_trae(db: AsyncSession, tmp_path: Path) -> None:
+    """Y la gemela de la gemela: sobre una empresa sin configuración, el cargador sigue creando
+    la fila con lo que el archivo declara. Sin esto, "conservar lo que no se menciona" podría
+    haberse implementado como "no escribir nunca"."""
+    empresa = await factories.crear_empresa(db, rfc=RFC_EMPRESA)
+    empresa_id = empresa.empresa_id
+
+    ruta = tmp_path / "empresa-nueva.yaml"
+    ruta.write_text(
+        "configuracion_empresa:\n  - zona_salarial: ZLFN\n    dias_aguinaldo: 30\n"
+        "    factor_prima_vacacional: '0.25'\n",
+        encoding="utf-8",
+    )
+
+    await cfg.cargar_desde_yaml_detallado(db, ruta, empresa_id=empresa_id)
+
+    db.expire_all()
+    config = await db.get(ConfiguracionEmpresa, empresa_id)
+    assert config is not None
+    assert config.zona_salarial is ZonaSalarial.ZLFN
+    assert config.dias_aguinaldo == 30
+    assert config.factor_prima_vacacional == Decimal("0.2500")

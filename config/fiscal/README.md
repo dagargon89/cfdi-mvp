@@ -318,7 +318,7 @@ en el art. 27, primer párrafo, LSS).
 
 El catálogo `c_TipoPercepcion` **no trae un tipo para vacaciones**: se pagan dentro del `001`
 (Sueldos, Salarios Rayas y Jornales). Por eso `es_provisionable` es verdadero solo en `002` y
-`021`, y **la provisión de vacaciones de B-06 no puede salir de este archivo**: tiene que
+`021`, y **la provisión de vacaciones de B-08 no puede salir de este archivo**: tiene que
 salir de `map_concepto_provision` en el YAML de cada organización, usando la clave interna que
 el patrón le da al concepto. Está explicado en la plantilla `empresa.yaml.ejemplo`.
 
@@ -353,7 +353,7 @@ visible es mejor que un default plausible.
 | **`TIPO_CAMBIO_USD`** | Cambia todos los días hábiles: no es una semilla. Lo llena la sincronización con el DOF. **No se sembró un valor "de ejemplo" a propósito**: un tipo de cambio viejo y confirmado es peor que la ausencia del dato | la sincronización automática |
 | **Confirmar los 5 valores de `param_fiscal`** | Sin confirmar no calculan | dueño del repo, desde la pantalla de configuración |
 | **Revisar y confirmar las 44 marcas**, empezando por el grupo A (`024`) y el grupo D (el tope conjunto) | Sin confirmar, B-05 reporta `FALTA_CATALOGO_DE_MARCAS` en vez de calcular | dueño del repo |
-| **Un `empresa-*.yaml` por organización** | Sin `zona_salarial` no hay validación de salario mínimo; sin `map_concepto_provision` no hay provisión de vacaciones en B-06 | quien administra cada organización |
+| **Un `empresa-*.yaml` por organización** | Sin `zona_salarial` no hay validación de salario mínimo; sin `map_concepto_provision` no hay provisión de vacaciones en B-08 | quien administra cada organización |
 
 ---
 

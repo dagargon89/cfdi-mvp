@@ -165,11 +165,11 @@ def _marca_a_detalle(fila: CatalogoPercepcionMarca) -> dict[str, Any]:
     }
 
 
-def _marcas_de(body: MarcasPercepcion) -> cfg.MarcasQueCalculan:
+def _marcas_de(body: MarcasPercepcion) -> cfg.MarcasQueSeConfirman:
     """El cuerpo Pydantic en la forma que entienden las guardas del servicio. La conversión es
     explícita y no un `model_dump()`: `MarcaPercepcionIn` y `MarcaPercepcionConfirmarIn` traen
     un campo de más cada uno, y un `**dict` los colaría o reventaría según cuál llegara."""
-    return cfg.MarcasQueCalculan(
+    return cfg.MarcasQueSeConfirman(
         es_ingreso_ordinario=body.es_ingreso_ordinario,
         base_exencion=body.base_exencion,
         factor_exencion=body.factor_exencion,

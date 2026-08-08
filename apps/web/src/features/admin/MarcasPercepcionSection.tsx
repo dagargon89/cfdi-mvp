@@ -566,7 +566,7 @@ function TarjetaMarca({
             <Marca nombre="Integra al SBC" ayuda="Salario base de cotización del artículo 27 de la LSS.">
               <SiNo valor={marca.integra_sbc} />
             </Marca>
-            <Marca nombre="Provisionable" ayuda="Entra al pasivo laboral que calcula B-06.">
+            <Marca nombre="Provisionable" ayuda="Marca informativa del catálogo: el pasivo laboral lo calcula B-08 a partir de la clasificación de conceptos de cada empresa, no de esta casilla. Ningún informe la lee todavía.">
               <SiNo valor={marca.es_provisionable} />
             </Marca>
             <Marca
@@ -868,7 +868,7 @@ function ModalMarca({
         <CampoSwitch
           id="marca-provisionable"
           etiqueta="Es provisionable"
-          ayuda="Si entra al pasivo laboral que calcula B-06 (aguinaldo, prima vacacional y demás obligaciones que se devengan)."
+          ayuda="Si el concepto es de los que se devengan (aguinaldo, prima vacacional). Informativa: B-08 calcula el pasivo laboral con la clasificación de conceptos de cada empresa, no con esta casilla, así que cambiarla no altera ningún informe — pero sí obliga a volver a confirmar la marca."
           checked={provisionable}
           onChange={setProvisionable}
         />

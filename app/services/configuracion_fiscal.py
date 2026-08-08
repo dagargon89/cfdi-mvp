@@ -794,12 +794,46 @@ def huella_de_nota(nota: str | None) -> str | None:
 
 
 @dataclass(frozen=True)
-class MarcasQueCalculan:
-    """Las seis marcas del §3.1 que **calculan**: lo que se revisa y lo que se confirma.
+class MarcasQueSeConfirman:
+    """Las seis marcas del §3.1 que una persona revisa y por las que **responde** al confirmar.
 
-    Es la forma que entienden las guardas, independiente de Pydantic y de argparse, para que
-    la pantalla y la línea de comandos comparen contra lo mismo. `nota_revision` no está: no
-    entra en la comparación (ver `marcas_difieren`) y su guarda propia es la huella.
+    Es la forma que entienden las guardas, independiente de Pydantic y de argparse, para que la
+    pantalla y la línea de comandos comparen contra lo mismo. `nota_revision` no está: no entra
+    en la comparación (ver `marcas_difieren`) y su guarda propia es la huella.
+
+    **Se llamaba `MarcasQueCalculan` y era mentira en dos de las seis.** Hoy, verificado por
+    grep sobre `app/informes/`:
+
+    | marca                    | quién la lee hoy |
+    |--------------------------|------------------|
+    | `es_ingreso_ordinario`   | B-05             |
+    | `base_exencion`          | B-03             |
+    | `factor_exencion`        | B-03             |
+    | `sujeto_a_tope_conjunto` | B-03             |
+    | `integra_sbc`            | **nadie todavía** |
+    | `es_provisionable`       | **nadie todavía** |
+
+    B-08 clasifica el pasivo laboral por `map_concepto_provision` (por empresa, porque la
+    política es del patrón), no por `es_provisionable`; y `integra_sbc` es un hecho del art. 27
+    de la LSS que ningún informe del grupo B consume aún.
+
+    Por qué las dos huérfanas **siguen dentro** de `marcas_difieren` y `huella_de_marcas`
+    ---------------------------------------------------------------------------------------
+    Porque lo que la confirmación protege no es "lo que calcula hoy" sino **lo que la fila
+    afirma**, y `marcas_de_percepcion` devuelve la fila entera: el día que un informe lea
+    `integra_sbc` —y lo va a leer, es la base de cotización del IMSS— leería un valor que nadie
+    revisó, porque la confirmación se habría otorgado sin mirarlo. Es palabra por palabra el
+    argumento que este módulo ya aceptó para `sujeto_a_tope_conjunto` ("sin este renglón,
+    confirmar una marca de previsión social con un cuerpo que no menciona el tope pasaría y
+    activaría una bandera que nadie miró"), y no cambia porque el informe que lo leerá no exista
+    todavía. Sacarlas de la comparación cambiaría una fricción visible hoy por un hueco
+    silencioso mañana, que es justo el intercambio que este proyecto rechaza en todas partes.
+
+    El coste real —que corregir `es_provisionable` invalida una confirmación por un cambio sin
+    efecto visible— **no se arregla aflojando la guarda, sino diciéndole a quien revisa qué
+    lee cada marca**: la pantalla, el YAML de semillas y `estado --percepciones` lo dicen ahora,
+    y las tres apuntaban al informe equivocado (B-06, que usa `map_departamento` y no toca esta
+    tabla). Un operador que sabe que `es_provisionable` no mueve B-08 no lo va a "arreglar".
     """
 
     es_ingreso_ordinario: bool
@@ -810,7 +844,7 @@ class MarcasQueCalculan:
     sujeto_a_tope_conjunto: bool
 
     @classmethod
-    def de_fila(cls, fila: CatalogoPercepcionMarca) -> MarcasQueCalculan:
+    def de_fila(cls, fila: CatalogoPercepcionMarca) -> MarcasQueSeConfirman:
         return cls(
             es_ingreso_ordinario=fila.es_ingreso_ordinario,
             base_exencion=fila.base_exencion,
@@ -821,8 +855,8 @@ class MarcasQueCalculan:
         )
 
 
-def huella_de_marcas(marcas: MarcasQueCalculan) -> str:
-    """Huella de las seis marcas que calculan, para poder exigirlas en una línea de comandos
+def huella_de_marcas(marcas: MarcasQueSeConfirman) -> str:
+    """Huella de las seis marcas que se confirman, para poder exigirlas en una línea de comandos
     sin teclear seis banderas.
 
     Es el equivalente de mandar el importe en `confirmar_param_fiscal`: lo que se confirma es
@@ -838,9 +872,13 @@ def huella_de_marcas(marcas: MarcasQueCalculan) -> str:
     return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
 
 
-def marcas_difieren(fila: CatalogoPercepcionMarca, marcas: MarcasQueCalculan) -> bool:
-    """Si las marcas que **calculan** cambiaron. Decide dos cosas: si la captura tiene que
-    limpiar la confirmación, y si el confirmar se rechaza.
+def marcas_difieren(fila: CatalogoPercepcionMarca, marcas: MarcasQueSeConfirman) -> bool:
+    """Si alguna de las seis marcas cambió. Decide dos cosas: si la captura tiene que limpiar
+    la confirmación, y si el confirmar se rechaza.
+
+    Entran las seis, **incluidas las dos que hoy no lee ningún informe** (`integra_sbc` y
+    `es_provisionable`): ver el argumento completo en `MarcasQueSeConfirman`. En corto: lo que
+    se confirma es lo que la fila afirma, no lo que hoy se calcula con ella.
 
     `nota_revision` queda fuera de **esta** comparación, y por dos razones distintas según
     para qué se use la función:
@@ -904,7 +942,7 @@ def detalle_de_tramo(fila: ParamFiscal) -> dict[str, Any]:
     }
 
 
-def detalle_de_marcas(marcas: MarcasQueCalculan) -> dict[str, Any]:
+def detalle_de_marcas(marcas: MarcasQueSeConfirman) -> dict[str, Any]:
     """Las seis marcas para el `detalle` de bitácora, con el `Decimal` como texto."""
     return {
         "es_ingreso_ordinario": marcas.es_ingreso_ordinario,
@@ -1018,7 +1056,7 @@ async def confirmar_marca_percepcion(
     db: AsyncSession,
     *,
     tipo: str,
-    marcas: MarcasQueCalculan,
+    marcas: MarcasQueSeConfirman,
     nota_revision_hash: str | None,
     actor: str,
 ) -> tuple[CatalogoPercepcionMarca, bool]:
@@ -1108,9 +1146,19 @@ class _FilaProvision:
 
 @dataclass(frozen=True)
 class _FilaConfigEmpresa:
+    """La política laboral que el archivo declara, **y cuáles de los tres campos menciona**.
+
+    `campos` no es redundante con los valores: en YAML, "no está la clave" y "está con `null`"
+    llegan las dos como `None`, y significan cosas opuestas. Ausente es "esto no lo administra
+    este archivo, deja lo que haya"; `null` explícito es "bórralo". Sin distinguirlas, recargar
+    una semilla que solo trae `zona_salarial` borraba los días de aguinaldo y el factor de prima
+    que alguien capturó por otra vía — y sin bitácora, porque el cargador no escribe ninguna.
+    """
+
     zona_salarial: ZonaSalarial | None
     dias_aguinaldo: int | None
     factor_prima_vacacional: Decimal | None
+    campos: frozenset[str]
 
 
 @dataclass
@@ -1407,15 +1455,25 @@ def _leer_config_empresa(fila: Mapping[str, object], ctx: str) -> _FilaConfigEmp
         zona_salarial=None if zona_bruto is None else _opcion(zona_bruto, ZonaSalarial, "zona_salarial", ctx),
         dias_aguinaldo=dias,
         factor_prima_vacacional=factor,
+        # Presencia de la clave, no valor: `dias_aguinaldo: null` es un borrado declarado en el
+        # archivo (que vive en git, y ese es el rastro); la clave ausente no es nada.
+        campos=frozenset(c for c in ("zona_salarial", "dias_aguinaldo", "factor_prima_vacacional") if c in fila),
     )
 
 
 @dataclass(frozen=True)
 class ResultadoCarga:
-    """Lo que hizo una carga: cuántos renglones escribió por tabla y cuáles se saltó."""
+    """Lo que hizo una carga: cuántos renglones escribió por tabla, cuáles se saltó, y qué
+    **no** tocó pudiendo hacerlo.
+
+    `conservados` es un canal aparte de `omitidos` a propósito: `omitidos` son renglones que el
+    archivo pedía y no se escribieron (una corrección manual protegida), mientras que
+    `conservados` son campos que el archivo **no** pedía y que antes se borraban en silencio.
+    Mezclarlos haría que el resumen dijera "no se cargó" de algo que sí se cargó."""
 
     filas: dict[str, int]
     omitidos: list[str]
+    conservados: list[str] = field(default_factory=list)
 
 
 async def cargar_desde_yaml(
@@ -1466,6 +1524,7 @@ async def cargar_desde_yaml_detallado(
 
     resumen = {seccion: 0 for seccion in plan.secciones}
     omitidos: list[str] = []
+    conservados: list[str] = []
     try:
         # Ordenar por (clave, vigencia_desde) hace dos cosas: permite cerrar el tramo viejo y
         # abrir el nuevo en una sola edición del archivo sin depender del orden de los
@@ -1549,16 +1608,18 @@ async def cargar_desde_yaml_detallado(
                 resumen["tabla_vacaciones"] += 1
 
         if empresa_id is not None:
-            resumen.update(await _cargar_por_empresa(db, plan, empresa_id))
+            resumen.update(await _cargar_por_empresa(db, plan, empresa_id, conservados))
 
         await db.commit()
     except Exception:
         await db.rollback()
         raise
-    return ResultadoCarga(filas=resumen, omitidos=omitidos)
+    return ResultadoCarga(filas=resumen, omitidos=omitidos, conservados=conservados)
 
 
-async def _cargar_por_empresa(db: AsyncSession, plan: _Plan, empresa_id: int) -> dict[str, int]:
+async def _cargar_por_empresa(
+    db: AsyncSession, plan: _Plan, empresa_id: int, conservados: list[str]
+) -> dict[str, int]:
     """Las tres secciones que cuelgan de una empresa. Cada una precarga lo existente con una
     sola consulta y decide en memoria si inserta o actualiza (regla 11: nada de una consulta
     por renglón)."""
@@ -1615,18 +1676,35 @@ async def _cargar_por_empresa(db: AsyncSession, plan: _Plan, empresa_id: int) ->
         actual = await db.get(ConfiguracionEmpresa, empresa_id)
         for config in plan.config_empresa:
             if actual is None:
-                db.add(
-                    ConfiguracionEmpresa(
-                        empresa_id=empresa_id,
-                        zona_salarial=config.zona_salarial,
-                        dias_aguinaldo=config.dias_aguinaldo,
-                        factor_prima_vacacional=config.factor_prima_vacacional,
+                actual = ConfiguracionEmpresa(empresa_id=empresa_id)
+                db.add(actual)
+            # **Solo se escribe lo que el archivo menciona.** Asignar los tres a ciegas hacía
+            # que recargar un `empresa-*.yaml` con solo `zona_salarial` borrara los días de
+            # aguinaldo y el factor de prima vacacional — en silencio y sin bitácora, porque
+            # este cargador no escribe ninguna a propósito. La consecuencia no era cosmética:
+            # B-08 no se genera sin días de aguinaldo, así que un informe dejaba de salir y no
+            # había rastro de quién lo había apagado. Es la misma decisión que
+            # `cmd_configurar_empresa` en `app/scripts/administrar_configuracion.py`, y por el
+            # mismo motivo: lo que no se menciona se conserva.
+            #
+            # Lo que este cargador **no** puede hacer, y conviene saberlo: `configuracion_empresa`
+            # no tiene columna `origen`, así que no hay un equivalente de
+            # `proteger_correccion_manual` — si el archivo *sí* menciona un campo, la semilla
+            # gana sobre lo que hubiera, y el rastro es el propio YAML en git.
+            for campo in config.campos:
+                setattr(actual, campo, getattr(config, campo))
+                if getattr(config, campo) is None:
+                    conservados.append(
+                        f"`{campo}` de la empresa {empresa_id} venía en el archivo como `null`: se BORRÓ."
                     )
+            sin_mencionar = sorted(
+                {"zona_salarial", "dias_aguinaldo", "factor_prima_vacacional"} - config.campos
+            )
+            if sin_mencionar:
+                conservados.append(
+                    f"la empresa {empresa_id} conserva {', '.join(f'`{c}`' for c in sin_mencionar)}: "
+                    "el archivo no los menciona, así que no se tocaron."
                 )
-            else:
-                actual.zona_salarial = config.zona_salarial
-                actual.dias_aguinaldo = config.dias_aguinaldo
-                actual.factor_prima_vacacional = config.factor_prima_vacacional
         resumen["configuracion_empresa"] = len(plan.config_empresa)
 
     await db.flush()
