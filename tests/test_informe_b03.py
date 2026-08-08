@@ -1537,6 +1537,93 @@ async def test_sm_dias_sin_zona_configurada_deja_el_tope_vacio(db: AsyncSession,
     assert faltantes[0].severidad == "alta"
 
 
+async def test_sm_dias_con_propuesta_sin_confirmar_dice_que_basta_confirmarla(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Los tres estados del salario mínimo piden tres acciones distintas, y B-03 hacía esta
+    distinción para la UMA pero **no** para el salario mínimo: con el valor capturado y sin
+    confirmar decía "no hay salario mínimo confirmado", que se lee como "ve a buscar el dato"
+    cuando en realidad es un clic. La clave es la misma que emite B-10 (`SALARIO_MINIMO_SIN_CONFIRMAR`),
+    para que quien filtre la hoja `Banderas` por ella encuentre los dos informes.
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _zona(db, empresa.empresa_id, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "SALARIO_MINIMO_ZLFN", _SM_ZLFN, confirmado=False, desde=date(2026, 1, 1))
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "003", "base": "SM_DIAS", "factor": "15"}])
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="a7a7a7a7-a7a7-a7a7-a7a7-a7a7a7a7a7a7",
+        percepciones=[("003", "003", "PTU", "0.00", "9000.00")],
+        total_percepciones="9000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert _valor(resultado, 0, "Tope de exención") is None
+    avisos = _de_clave(resultado, "SALARIO_MINIMO_SIN_CONFIRMAR")
+    assert len(avisos) == 1
+    assert avisos[0].severidad == "alta"
+    assert avisos[0].ambito == "informe"
+    # Accionable: dice la fuente de la propuesta y que basta confirmarla.
+    assert _FUENTE in avisos[0].mensaje
+    assert "confirmarlo" in avisos[0].mensaje
+    # Y ninguna de las otras dos causas: son acciones distintas.
+    assert "FALTA_SALARIO_MINIMO" not in _claves(resultado)
+    assert "FALTA_ZONA_SALARIAL" not in _claves(resultado)
+
+
+async def test_sm_dias_sin_ningun_valor_capturado_dice_que_hay_que_capturarlo(
+    db: AsyncSession, tmp_path: Path
+) -> None:
+    """Tercer estado: la zona está configurada y no hay **ningún** renglón para ella, ni
+    confirmado ni esperando confirmación. Aquí sí hay que ir a buscar el dato."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _zona(db, empresa.empresa_id, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "003", "base": "SM_DIAS", "factor": "15"}])
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="b7b7b7b7-b7b7-b7b7-b7b7-b7b7b7b7b7b7",
+        percepciones=[("003", "003", "PTU", "0.00", "9000.00")],
+        total_percepciones="9000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert _valor(resultado, 0, "Tope de exención") is None
+    faltantes = _de_clave(resultado, "FALTA_SALARIO_MINIMO")
+    assert len(faltantes) == 1
+    assert "SALARIO_MINIMO_SIN_CONFIRMAR" not in _claves(resultado)
+    assert "FALTA_ZONA_SALARIAL" not in _claves(resultado)
+
+
+async def test_el_minimo_de_otra_zona_no_cuenta_como_propuesta(db: AsyncSession, tmp_path: Path) -> None:
+    """La propuesta tiene que ser **de la zona configurada**. Con la empresa en `ZLFN` y solo el
+    mínimo general capturado, no hay nada que confirmar para esta empresa: decir "confírmalo"
+    llevaría a confirmar el renglón equivocado, que es la clase de error que hace que el mínimo
+    de frontera (440.87) se sustituya por el general (315.04)."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _zona(db, empresa.empresa_id, ZonaSalarial.ZLFN)
+    await _sembrar_param(db, "UMA_DIARIA", _UMA_DIARIA, confirmado=True)
+    await _sembrar_param(db, "SALARIO_MINIMO_GENERAL", "315.04", confirmado=False, desde=date(2026, 1, 1))
+    await _sembrar_marcas(db, tmp_path, [{"tipo": "003", "base": "SM_DIAS", "factor": "15"}])
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="c7c7c7c7-c7c7-c7c7-c7c7-c7c7c7c7c7c7",
+        percepciones=[("003", "003", "PTU", "0.00", "9000.00")],
+        total_percepciones="9000.00",
+    )
+
+    resultado = await b03.consultar(db, empresa.empresa_id, _p())
+
+    assert len(_de_clave(resultado, "FALTA_SALARIO_MINIMO")) == 1
+    assert "SALARIO_MINIMO_SIN_CONFIRMAR" not in _claves(resultado)
+
+
 async def test_sm_dias_con_zona_zlfn_calcula_sobre_el_minimo_de_frontera(
     db: AsyncSession, tmp_path: Path
 ) -> None:
@@ -1557,7 +1644,10 @@ async def test_sm_dias_con_zona_zlfn_calcula_sobre_el_minimo_de_frontera(
     resultado = await b03.consultar(db, empresa.empresa_id, _p())
 
     assert _valor(resultado, 0, "Tope de exención") == Decimal("15") * Decimal(_SM_ZLFN)
+    # Gemela de los tres estados: con el valor confirmado no sale ninguna de las tres causas.
     assert "FALTA_ZONA_SALARIAL" not in _claves(resultado)
+    assert "FALTA_SALARIO_MINIMO" not in _claves(resultado)
+    assert "SALARIO_MINIMO_SIN_CONFIRMAR" not in _claves(resultado)
 
 
 # --------------------------------------------------------------------------------------

@@ -259,6 +259,7 @@ class _Configuracion:
     uma: dict[date, Decimal | None]
     uma_propuesta: dict[date, cfg.ValorFiscal | None]
     salario_minimo: dict[date, Decimal | None]
+    salario_minimo_propuesto: dict[date, cfg.ValorFiscal | None]
     zona_configurada: bool
     uma_anual: dict[int, Decimal | None]
     uma_anual_propuesta: dict[int, cfg.ValorFiscal | None]
@@ -272,15 +273,42 @@ async def _configuracion(db: AsyncSession, empresa_id: int, fechas: set[date], e
     ejercicio, que es el que corresponde a una cifra anual, mientras que el tope que se
     imprime en cada fila usa el valor vigente a su fecha de pago (B-03.R1). Cuando el
     ejercicio tiene un solo tramo de UMA —el caso normal— los dos coinciden.
+
+    **El salario mínimo se resuelve con la zona en la mano, no con `salario_minimo_de_empresa`
+    por fecha**, y eso hace dos cosas a la vez:
+
+    1. Distingue los tres estados. `salario_minimo_de_empresa` devuelve `Decimal | None` y
+       colapsa "no hay valor" con "hay uno esperando confirmación", así que con ella el informe
+       no podía decir "es un clic" — que es la premisa de toda la interfaz de confirmación de
+       esta fase. Con `clave_de_salario_minimo` se resuelven `valor_vigente` y `valor_propuesto`
+       igual que con la UMA.
+    2. Ahorra una consulta por fecha: esa función vuelve a leer `configuracion_empresa` en cada
+       llamada, y aquí ya está leída una vez arriba.
+
+    Lo que **no** se duplica es la decisión de negocio que encapsula esa función: *sin zona
+    configurada no hay valor y no se mira ningún renglón*. Aquí se respeta por construcción —si
+    `zona is None` no se consulta ninguna clave— y la causa que sale es `FALTA_ZONA_SALARIAL`,
+    que es una acción distinta (configurar la empresa, no capturar un valor).
     """
     config_empresa = await cfg.configuracion_de_empresa(db, empresa_id)
+    zona = config_empresa.zona_salarial if config_empresa is not None else None
+    clave_minimo = cfg.clave_de_salario_minimo(zona) if zona is not None else None
+
     uma: dict[date, Decimal | None] = {}
     uma_propuesta: dict[date, cfg.ValorFiscal | None] = {}
     salario_minimo: dict[date, Decimal | None] = {}
+    salario_minimo_propuesto: dict[date, cfg.ValorFiscal | None] = {}
     for fecha in sorted(fechas):
         uma[fecha] = await cfg.valor_vigente(db, "UMA_DIARIA", fecha)
         uma_propuesta[fecha] = None if uma[fecha] is not None else await cfg.valor_propuesto(db, "UMA_DIARIA", fecha)
-        salario_minimo[fecha] = await cfg.salario_minimo_de_empresa(db, empresa_id, fecha)
+        if clave_minimo is None:
+            salario_minimo[fecha] = None
+            salario_minimo_propuesto[fecha] = None
+            continue
+        salario_minimo[fecha] = await cfg.valor_vigente(db, clave_minimo, fecha)
+        salario_minimo_propuesto[fecha] = (
+            None if salario_minimo[fecha] is not None else await cfg.valor_propuesto(db, clave_minimo, fecha)
+        )
 
     uma_anual: dict[int, Decimal | None] = {}
     uma_anual_propuesta: dict[int, cfg.ValorFiscal | None] = {}
@@ -297,7 +325,8 @@ async def _configuracion(db: AsyncSession, empresa_id: int, fechas: set[date], e
         uma=uma,
         uma_propuesta=uma_propuesta,
         salario_minimo=salario_minimo,
-        zona_configurada=config_empresa is not None and config_empresa.zona_salarial is not None,
+        salario_minimo_propuesto=salario_minimo_propuesto,
+        zona_configurada=zona is not None,
         uma_anual=uma_anual,
         uma_anual_propuesta=uma_anual_propuesta,
     )
@@ -326,6 +355,7 @@ def _tope_de_fila(
     uma: Decimal | None,
     hay_propuesta_de_uma: bool,
     salario_minimo: Decimal | None,
+    hay_propuesta_de_salario_minimo: bool,
     zona_configurada: bool,
     hay_fecha_de_pago: bool,
     importe_total: Decimal,
@@ -378,7 +408,15 @@ def _tope_de_fila(
             return _Tope(None, "UMA_SIN_CONFIRMAR" if hay_propuesta_de_uma else "FALTA_UMA")
         return _Tope(factor * uma, None)
     if salario_minimo is None:
-        return _Tope(None, "FALTA_SALARIO_MINIMO" if zona_configurada else "FALTA_ZONA_SALARIAL")
+        # Tres estados, tres acciones distintas: configurar la zona de la empresa, capturar el
+        # valor, o confirmar el que ya está capturado. Colapsar los dos últimos convertía "es un
+        # clic" en "ve a buscar el dato", que es justo la distinción que la interfaz de
+        # confirmación de esta fase existe para poder hacer.
+        if not zona_configurada:
+            return _Tope(None, "FALTA_ZONA_SALARIAL")
+        if hay_propuesta_de_salario_minimo:
+            return _Tope(None, "SALARIO_MINIMO_SIN_CONFIRMAR")
+        return _Tope(None, "FALTA_SALARIO_MINIMO")
     return _Tope(factor * salario_minimo, None)
 
 
@@ -512,8 +550,10 @@ _MENSAJES_DE_CAUSA: dict[str, str] = {
         "INEGI cada enero y entra en vigor el 1 de febrero) y vuelve a generar el informe."
     ),
     "FALTA_SALARIO_MINIMO": (
-        "La zona salarial de la empresa está configurada, pero no hay un salario mínimo confirmado para esa "
-        "zona en la fecha de pago de estas filas, así que no se pudo calcular su tope de exención."
+        "La zona salarial de la empresa está configurada, pero no hay **ningún** salario mínimo capturado para "
+        "esa zona en la fecha de pago de estas filas —ni confirmado ni esperando confirmación—, así que no se "
+        "pudo calcular su tope de exención. Captúralo en Configuración › Fiscal con su fuente (lo publica el "
+        "CONASAMI en el DOF y cambia el 1 de enero)."
     ),
     "FALTA_ZONA_SALARIAL": (
         "Estas filas tienen una exención que se mide en días de salario mínimo y la empresa no tiene zona "
@@ -555,8 +595,8 @@ def _banderas_de_configuracion(
     banderas: list[Bandera] = []
     for causa in sorted(por_causa):
         recuento = por_causa[causa]
-        if causa == "UMA_SIN_CONFIRMAR":
-            banderas.append(_bandera_de_uma_propuesta(recuento, config))
+        if causa in _PROPUESTAS_POR_CAUSA:
+            banderas.append(_bandera_de_valor_propuesto(causa, recuento, config))
             continue
         banderas.append(
             Bandera(
@@ -642,25 +682,48 @@ def _bandera_de_tipo(causa: str, tipo: str, recuento: _Recuento, config: _Config
     )
 
 
-def _bandera_de_uma_propuesta(recuento: _Recuento, config: _Configuracion) -> Bandera:
-    """`UMA_SIN_CONFIRMAR`: el estado que más importa que quede bien, porque es el que tiene
-    hoy la instalación real (5 parámetros y 44 marcas, ninguno confirmado).
+_PROPUESTAS_POR_CAUSA: dict[str, tuple[str, str]] = {
+    "UMA_SIN_CONFIRMAR": (
+        "uma_propuesta",
+        "Hay una UMA diaria capturada para la fecha de pago de estas filas, pero nadie la ha confirmado, y un "
+        "valor sin confirmar no calcula: los topes de exención sobre UMA salieron vacíos.",
+    ),
+    "SALARIO_MINIMO_SIN_CONFIRMAR": (
+        "salario_minimo_propuesto",
+        "Hay un salario mínimo capturado para la zona de la empresa en la fecha de pago de estas filas, pero "
+        "nadie lo ha confirmado, y un valor sin confirmar no calcula: los topes de exención medidos en días de "
+        "salario mínimo salieron vacíos.",
+    ),
+}
+"""Las causas que significan "el valor **existe**, solo falta el clic": el campo de
+`_Configuracion` del que sale su procedencia, y el texto de qué quedó sin calcular.
+
+Es una tabla y no dos funciones porque las dos banderas dicen lo mismo con distinto sujeto, y
+porque `SALARIO_MINIMO_SIN_CONFIRMAR` nació de que B-03 **no** hacía esta distinción para el
+salario mínimo mientras sí la hacía para la UMA: dos ramas separadas es exactamente cómo se
+vuelve a perder. La clave es la misma que emite B-10 desde su ronda 1, a propósito — quien
+filtre la hoja `Banderas` por ella tiene que encontrar los dos informes."""
+
+
+def _bandera_de_valor_propuesto(causa: str, recuento: _Recuento, config: _Configuracion) -> Bandera:
+    """El estado que más importa que quede bien, porque es el que tiene hoy la instalación real:
+    el valor está capturado y solo espera que una persona lo revise.
 
     El mensaje trae la **fuente** de la propuesta, que es lo que separa un aviso accionable de
     uno inútil: "falta la UMA, ve a buscarla" frente a "la UMA 2026 está propuesta con su liga
     al boletín del INEGI, confírmala".
     """
-    fuentes = sorted({v.fuente for v in config.uma_propuesta.values() if v is not None})
+    campo, texto = _PROPUESTAS_POR_CAUSA[causa]
+    propuestas: dict[date, cfg.ValorFiscal | None] = getattr(config, campo)
+    fuentes = sorted({v.fuente for v in propuestas.values() if v is not None})
     procedencia = f" Fuente de la propuesta: {'; '.join(fuentes)}." if fuentes else ""
     return Bandera(
-        clave="UMA_SIN_CONFIRMAR",
+        clave=causa,
         severidad="alta",
         ambito="informe",
         mensaje=(
-            "Hay una UMA diaria capturada para la fecha de pago de estas filas, pero nadie la ha confirmado, y "
-            "un valor sin confirmar no calcula: los topes de exención sobre UMA salieron vacíos. Basta con "
-            f"revisarla y confirmarla en Configuración › Fiscal.{procedencia} Filas afectadas: "
-            f"{recuento.filas} (muestra de UUID: {recuento.muestra})."
+            f"{texto} Basta con revisarlo y confirmarlo en Configuración › Fiscal.{procedencia} "
+            f"Filas afectadas: {recuento.filas} (muestra de UUID: {recuento.muestra})."
         ),
     )
 
@@ -1101,6 +1164,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         uma = config.uma.get(fecha_pago) if fecha_pago is not None else None
         propuesta_uma = config.uma_propuesta.get(fecha_pago) if fecha_pago is not None else None
         salario_minimo = config.salario_minimo.get(fecha_pago) if fecha_pago is not None else None
+        propuesta_minimo = config.salario_minimo_propuesto.get(fecha_pago) if fecha_pago is not None else None
         ejercicio = fecha_pago.year if fecha_pago is not None else None
         if ejercicio is not None:
             empleados.add((comprobante.rfc_receptor, ejercicio))
@@ -1114,6 +1178,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 uma,
                 propuesta_uma is not None,
                 salario_minimo,
+                propuesta_minimo is not None,
                 config.zona_configurada,
                 fecha_pago is not None,
                 total,
