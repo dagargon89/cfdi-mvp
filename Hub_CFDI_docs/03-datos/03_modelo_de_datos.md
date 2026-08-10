@@ -335,6 +335,43 @@ CREATE TABLE configuracion (
 ) ENGINE=InnoDB;
 ```
 
+### Configuración fiscal — tarifa del ISR
+
+```sql
+-- Cabecera de una tarifa (ejercicio + periodicidad): procedencia y confirmación.
+-- Va aparte de los renglones a propósito: la procedencia y la confirmación son
+-- propiedades de LA TARIFA, no de cada renglón. Con una tabla plana existiría el
+-- estado "renglón 3 confirmado, renglón 4 no", que no significa nada y que ningún
+-- cálculo puede usar; con la cabecera separada ese estado es inexpresable.
+CREATE TABLE tarifa_isr (
+  ejercicio         INT NOT NULL,
+  periodicidad      ENUM('DIARIA','DIAS_7','DIAS_10','DIAS_15','MENSUAL','EJERCICIO') NOT NULL,
+  origen            ENUM('IMPORTADA','MANUAL') NOT NULL,
+  fuente            VARCHAR(500) NOT NULL,
+  documento_sha256  CHAR(64) NULL,          -- nulo si se capturó a mano sin documento
+  encabezado        VARCHAR(1000) NOT NULL, -- texto citado literal del documento fuente
+  importado_en      DATETIME NOT NULL,
+  confirmado_por    VARCHAR(128) NULL,
+  confirmado_en     DATETIME NULL,
+  PRIMARY KEY (ejercicio, periodicidad)
+) ENGINE=InnoDB;
+
+-- Renglones de una tarifa. limite_superior NULL es el último renglón ("En adelante").
+-- tasa_excedente se guarda como fracción decimal (0.213600), nunca como el porcentaje
+-- que publica el SAT (21.36).
+CREATE TABLE tarifa_isr_renglon (
+  ejercicio         INT NOT NULL,
+  periodicidad      ENUM('DIARIA','DIAS_7','DIAS_10','DIAS_15','MENSUAL','EJERCICIO') NOT NULL,
+  renglon           INT NOT NULL,
+  limite_inferior   DECIMAL(14,2) NOT NULL,
+  limite_superior   DECIMAL(14,2) NULL,
+  cuota_fija        DECIMAL(14,2) NOT NULL,
+  tasa_excedente    DECIMAL(7,6) NOT NULL,
+  PRIMARY KEY (ejercicio, periodicidad, renglon),
+  FOREIGN KEY (ejercicio, periodicidad) REFERENCES tarifa_isr(ejercicio, periodicidad) ON DELETE CASCADE
+) ENGINE=InnoDB;
+```
+
 ---
 
 ## 4. Reglas de integridad en capa de aplicación
@@ -356,3 +393,4 @@ CREATE TABLE configuracion (
 - **`eventos` con hash de idempotencia:** las corridas diarias re-evalúan el mundo entero; sin idempotencia, cada corrida re-alertaría lo mismo.
 - **DECIMAL(18,2) para totales:** los importes fiscales no se almacenan en flotante.
 - **Desnormalización en `comprobantes`:** listar y exportar sin re-abrir XML (RNF-03: 1M filas por empresa).
+- **`tarifa_isr` separada de `tarifa_isr_renglon`:** la procedencia (`origen`, `fuente`, `documento_sha256`) y la confirmación (`confirmado_por`, `confirmado_en`) son atributos de la tarifa completa, no de cada renglón — una tabla plana permitiría el estado sin sentido "renglón 3 confirmado, renglón 4 no". Con la cabecera aparte, la tarifa se confirma entera o no se confirma nada.

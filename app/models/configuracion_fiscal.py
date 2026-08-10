@@ -49,11 +49,31 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CHAR, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, false
+from sqlalchemy import (
+    CHAR,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    false,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import BaseExencion, CategoriaProvision, OrigenValor, ZonaSalarial, enum_column
+from app.models.enums import (
+    BaseExencion,
+    CategoriaProvision,
+    OrigenTarifa,
+    OrigenValor,
+    PeriodicidadTarifa,
+    ZonaSalarial,
+    enum_column,
+)
 
 _TABLA_ARGS = {"mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_unicode_ci"}
 
@@ -269,3 +289,61 @@ class ConfiguracionEmpresa(Base):
     zona_salarial: Mapped[ZonaSalarial | None] = mapped_column(enum_column(ZonaSalarial), nullable=True)
     dias_aguinaldo: Mapped[int | None] = mapped_column(Integer, nullable=True)
     factor_prima_vacacional: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+
+
+class TarifaIsr(Base):
+    """Una tarifa del ISR (`ejercicio` + `periodicidad`) con su procedencia y su confirmación.
+
+    **La cabecera va aparte de los renglones a propósito**, divergiendo del §12 del documento
+    fuente, que describe `tarifa_isr` como una tabla plana. La procedencia y la confirmación son
+    propiedades de *la tarifa*: con una tabla plana existiría el estado "renglón 3 confirmado,
+    renglón 4 no", que no significa nada, que ningún cálculo puede usar y que habría que excluir
+    a mano en cada consulta. Aquí ese estado es inexpresable.
+
+    `documento_sha256` es nulo cuando la tarifa se capturó a mano sin documento. `encabezado`
+    guarda **citado literal** el texto del que salieron los renglones: es lo que se le muestra a
+    quien confirma para que vea de qué tabla del documento vinieron, y sin él el ancla del
+    extractor sería una decisión invisible.
+    """
+
+    __tablename__ = "tarifa_isr"
+    __table_args__ = (_TABLA_ARGS,)
+
+    ejercicio: Mapped[int] = mapped_column(Integer, primary_key=True)
+    periodicidad: Mapped[PeriodicidadTarifa] = mapped_column(enum_column(PeriodicidadTarifa), primary_key=True)
+    origen: Mapped[OrigenTarifa] = mapped_column(enum_column(OrigenTarifa), nullable=False)
+    fuente: Mapped[str] = mapped_column(String(500), nullable=False)
+    documento_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    encabezado: Mapped[str] = mapped_column(String(1000), nullable=False)
+    importado_en: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    confirmado_por: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confirmado_en: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TarifaIsrRenglon(Base):
+    """Un renglón de una tarifa. `limite_superior` nulo es el último renglón ("En adelante").
+
+    `tasa_excedente` se guarda como **fracción decimal** (`0.213600`), nunca como el porcentaje
+    que publica el SAT (`21.36`). La conversión ocurre en un único lugar
+    (`app.services.anexo8`) y `tarifa_isr.validar` la vigila: una tasa en la escala equivocada
+    produce un ISR cien veces mayor o menor, y el segundo caso pasa desapercibido porque el
+    resultado sigue siendo un número pequeño y plausible (B-09.R2).
+    """
+
+    __tablename__ = "tarifa_isr_renglon"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["ejercicio", "periodicidad"],
+            ["tarifa_isr.ejercicio", "tarifa_isr.periodicidad"],
+            ondelete="CASCADE",
+        ),
+        _TABLA_ARGS,
+    )
+
+    ejercicio: Mapped[int] = mapped_column(Integer, primary_key=True)
+    periodicidad: Mapped[PeriodicidadTarifa] = mapped_column(enum_column(PeriodicidadTarifa), primary_key=True)
+    renglon: Mapped[int] = mapped_column(Integer, primary_key=True)
+    limite_inferior: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    limite_superior: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    cuota_fija: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    tasa_excedente: Mapped[Decimal] = mapped_column(Numeric(7, 6), nullable=False)

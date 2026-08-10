@@ -125,3 +125,27 @@ class ZonaSalarial(str, Enum):
 
     GENERAL = "GENERAL"
     ZLFN = "ZLFN"
+
+
+class PeriodicidadTarifa(str, Enum):
+    """Periodicidades **como las publica el Anexo 8**, no como las nombra el CFDI.
+
+    El catálogo `c_PeriodicidadPago` del SAT tiene periodicidades para las que el Anexo no
+    publica tarifa (`03` catorcenal, `06` bimestral), así que admitirlas aquí sugeriría que
+    existen. La traducción de una cosa a la otra vive en `app.services.tarifa_isr.PARA_CFDI`.
+    """
+
+    DIARIA = "DIARIA"
+    DIAS_7 = "DIAS_7"
+    DIAS_10 = "DIAS_10"
+    DIAS_15 = "DIAS_15"
+    MENSUAL = "MENSUAL"
+    EJERCICIO = "EJERCICIO"
+
+
+class OrigenTarifa(str, Enum):
+    """De dónde salió una tarifa. `IMPORTADA` no es `SEMILLA`: no viene del repositorio, viene
+    del documento oficial que alguien subió, y su huella queda en `documento_sha256`."""
+
+    IMPORTADA = "IMPORTADA"
+    MANUAL = "MANUAL"
