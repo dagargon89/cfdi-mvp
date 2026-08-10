@@ -71,6 +71,7 @@ que no se puede abrir no es un valor "ausente" ni pide ir a capturar nada.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -128,9 +129,21 @@ CLAVE_BANXICO: Final = "SINCRONIZACION_BANXICO"
 # (vive en `tarifa_isr`/`tarifa_isr_renglon`, con su propio repositorio), y su alarma no cabe en
 # `FECHAS_DE_ACTUALIZACION` porque no es "una fecha fija en la que un solo valor cambia" — son
 # hasta cinco tarifas (una por periodicidad que la nómina timbre) y la fecha que importa es
-# cuándo empieza el ejercicio, no un día puntual dentro de él. Una sola clave para las cinco: la
-# pantalla no necesita distinguir "falta la quincenal" de "falta la mensual" por clave, el
-# `detalle` ya lo dice.
+# cuándo empieza el ejercicio, no un día puntual dentro de él.
+#
+# **A lo sumo una alerta con esta clave**, igual que con cualquier otra clave del módulo (una
+# UMA caducada es una alerta, no una por cada mes que lleva caducada). La primera versión de
+# esta tarea emitía una alerta por periodicidad faltante, todas con `clave="TARIFA_ISR"`, y una
+# revisión lo marcó como un hallazgo real: nada en el tipo dice que "a lo sumo una por clave"
+# es un invariante, así que romperlo pasaba en silencio, y un consumidor que tratara `alertas`
+# como un mapa por clave (razonable, dado que todas las demás lo cumplen) se quedaría solo con
+# la última. Se corrigió consolidando en `_alertas_de_tarifa`: si faltan varias periodicidades,
+# es **una** alerta cuyo `detalle` las enumera todas. No se agregó un campo `periodicidad` a
+# `AlertaVigenciaOut` (doc 05) para poder decirlo de otra forma: el único caso real hoy es una
+# empresa que timbra una sola periodicidad, y ampliar el contrato de la API para un escenario
+# hipotético es la misma sobreconstrucción que el proyecto evita en todas partes. Si el día de
+# mañana varias empresas con periodicidades distintas necesitan ver el desglose estructurado en
+# pantalla y no solo en prosa, ese es el momento de tocar el contrato — no antes.
 CLAVE_TARIFA_ISR: Final = "TARIFA_ISR"
 
 # Etiqueta breve para meter la periodicidad dentro de una frase ("la tarifa del ISR {etiqueta}
@@ -145,6 +158,20 @@ _ETIQUETAS_PERIODICIDAD_TARIFA: Final[dict[PeriodicidadTarifa, str]] = {
     PeriodicidadTarifa.DIAS_15: "quincenal (15 días)",
     PeriodicidadTarifa.MENSUAL: "mensual",
 }
+
+# Orden fijo en el que se enumeran las periodicidades dentro del `detalle`, para que el mensaje
+# no cambie de redacción según el orden en que la consulta agregada devuelva las filas (un
+# `GROUP BY` sin `ORDER BY` no promete ningún orden). No es el alfabético de `.value`: ese
+# dejaría "DIAS_10" antes que "DIAS_15" y que "DIAS_7" (comparando texto, no número), un orden
+# que no se parece a como el Anexo 8 presenta sus tablas. Este es el orden natural: de la
+# periodicidad más corta a la más larga.
+_ORDEN_PERIODICIDAD_TARIFA: Final[tuple[PeriodicidadTarifa, ...]] = (
+    PeriodicidadTarifa.DIARIA,
+    PeriodicidadTarifa.DIAS_7,
+    PeriodicidadTarifa.DIAS_10,
+    PeriodicidadTarifa.DIAS_15,
+    PeriodicidadTarifa.MENSUAL,
+)
 
 # Clave de `configuracion` donde la tarea del beat deja el resultado del último intento de
 # sincronización. Vive en la base y no en memoria porque quien tiene que ver el fallo es el
@@ -505,13 +532,26 @@ async def _alerta_de_sincronizacion(db: AsyncSession) -> AlertaVigencia | None:
     )
 
 
+def _enumera(textos: Sequence[str]) -> str:
+    """Une textos al estilo español: `"a"`, `"a y b"`, `"a, b y c"`. Sin esto, un `", ".join`
+    simple dejaría "a, b, y c" (con una coma de más antes del "y") o "a, b, c" (sin "y" y con
+    ambigüedad de si la lista sigue). Los nombres de periodicidad no llevan comas propias, así
+    que no hay que escapar nada."""
+    lista = list(textos)
+    if len(lista) <= 1:
+        return "".join(lista)
+    return f"{', '.join(lista[:-1])} y {lista[-1]}"
+
+
 async def _alertas_de_tarifa(db: AsyncSession, hoy: date) -> list[AlertaVigencia]:
     """Falta la tarifa del ejercicio en curso para alguna periodicidad **que la nómina
-    realmente timbra**.
+    realmente timbra**. Devuelve **como mucho una** alerta (ver el comentario de
+    `CLAVE_TARIFA_ISR`): si faltan varias periodicidades, se enumeran todas dentro del mismo
+    `detalle` en vez de repetir la alerta una vez por cada una.
 
-    Solo las observadas, no las cinco que `PARA_CFDI` sabe traducir. Exigir la tarifa de 10
-    días que ninguna empresa usa dejaría la alarma permanentemente encendida, que es el
-    argumento que este módulo ya tiene escrito para dejar el tipo de cambio fuera de
+    Solo las periodicidades observadas, no las cinco que `PARA_CFDI` sabe traducir. Exigir la
+    tarifa de 10 días que ninguna empresa usa dejaría la alarma permanentemente encendida, que
+    es el argumento que este módulo ya tiene escrito para dejar el tipo de cambio fuera de
     `FECHAS_DE_ACTUALIZACION`: *"una alarma siempre encendida es una alarma que se aprende a
     ignorar"*.
 
@@ -528,48 +568,60 @@ async def _alertas_de_tarifa(db: AsyncSession, hoy: date) -> list[AlertaVigencia
     Usa `repo_tarifa.obtener` (confirmada o propuesta) y no `repo_tarifa.vigente` (solo
     confirmada): la alarma necesita distinguir `AUSENTE` de `SIN_CONFIRMAR`, y `vigente`
     colapsa las dos en `None`.
+
+    Cuando hay periodicidades de los dos grupos a la vez, el `motivo` de la única alerta es
+    `AUSENTE`: es el caso más grave (ni siquiera hay un documento cargado) y el que exige la
+    acción más urgente. El `detalle` no colapsa la distinción —dice separado qué falta *cargar*
+    y qué falta *confirmar*—, porque son dos acciones distintas y quien lee la alerta necesita
+    saber cuál le toca a cada periodicidad, no solo que "algo" falta.
     """
     observadas = await cfg.periodicidades_pago_observadas(db)
-    periodicidades = sorted(
-        {p for clave, _n in observadas if (p := reglas_tarifa.PARA_CFDI.get(clave)) is not None},
-        key=lambda p: p.value,
-    )
-    esperada = date(hoy.year, 1, 1)
-    alertas: list[AlertaVigencia] = []
-    for periodicidad in periodicidades:
+    periodicidades_observadas = {
+        p for clave, _n in observadas if (p := reglas_tarifa.PARA_CFDI.get(clave)) is not None
+    }
+    if not periodicidades_observadas:
+        return []
+
+    ausentes: list[str] = []
+    sin_confirmar: list[str] = []
+    for periodicidad in _ORDEN_PERIODICIDAD_TARIFA:
+        if periodicidad not in periodicidades_observadas:
+            continue
         # Acotado a como mucho cinco periodicidades (regla 11): nunca una consulta por CFDI ni
         # por empresa, la misma proporción que ya acepta `_tarifa_a_salida` en la API.
         tarifa = await repo_tarifa.obtener(db, ejercicio=hoy.year, periodicidad=periodicidad)
         etiqueta = _ETIQUETAS_PERIODICIDAD_TARIFA[periodicidad]
         if tarifa is None:
-            alertas.append(
-                AlertaVigencia(
-                    clave=CLAVE_TARIFA_ISR,
-                    motivo="AUSENTE",
-                    vigencia_desde=None,
-                    fecha_esperada=esperada,
-                    detalle=(
-                        f"Falta la tarifa del ISR {etiqueta} de {hoy.year}. Descarga el Anexo 8 de la "
-                        "Resolución Miscelánea Fiscal del portal del SAT (sat.gob.mx → Normatividad → "
-                        "RMF → Anexos) y súbelo en Configuración → Fiscal."
-                    ),
-                )
-            )
+            ausentes.append(etiqueta)
         elif not tarifa.confirmada:
-            alertas.append(
-                AlertaVigencia(
-                    clave=CLAVE_TARIFA_ISR,
-                    motivo="SIN_CONFIRMAR",
-                    vigencia_desde=None,
-                    fecha_esperada=esperada,
-                    detalle=(
-                        f"La tarifa del ISR {etiqueta} de {hoy.year} ya está cargada pero nadie la ha "
-                        "confirmado. Revísala en Configuración → Fiscal y confírmala con un clic; hasta "
-                        "entonces no entra a ningún cálculo."
-                    ),
-                )
-            )
-    return alertas
+            sin_confirmar.append(etiqueta)
+
+    if not ausentes and not sin_confirmar:
+        return []
+
+    partes: list[str] = []
+    if ausentes:
+        partes.append(
+            f"Falta cargar la tarifa del ISR de {hoy.year} para: {_enumera(ausentes)}. Descarga el "
+            "Anexo 8 de la Resolución Miscelánea Fiscal del portal del SAT (sat.gob.mx → "
+            "Normatividad → RMF → Anexos) y súbelo en Configuración → Fiscal."
+        )
+    if sin_confirmar:
+        partes.append(
+            f"Está cargada pero sin confirmar la tarifa del ISR de {hoy.year} para: "
+            f"{_enumera(sin_confirmar)}. Revísala en Configuración → Fiscal y confírmala; mientras "
+            "tanto no entra a ningún cálculo."
+        )
+
+    return [
+        AlertaVigencia(
+            clave=CLAVE_TARIFA_ISR,
+            motivo="AUSENTE" if ausentes else "SIN_CONFIRMAR",
+            vigencia_desde=None,
+            fecha_esperada=date(hoy.year, 1, 1),
+            detalle=" ".join(partes),
+        )
+    ]
 
 
 async def alertas_de_vigencia(db: AsyncSession, hoy: date) -> list[AlertaVigencia]:

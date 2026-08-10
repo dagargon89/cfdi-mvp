@@ -495,3 +495,48 @@ async def test_sin_nomina_no_hay_alerta_de_tarifa(db: AsyncSession) -> None:
     alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
 
     assert not [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
+
+
+async def test_dos_periodicidades_ausentes_dan_una_sola_alerta_que_enumera_las_dos(db: AsyncSession) -> None:
+    """Con nómina quincenal y mensual, y ninguna de las dos tarifas cargada, **una** alerta
+    (no dos) con las dos periodicidades enumeradas en el `detalle`. Es la prueba que impide que
+    alguien vuelva a emitir una alerta por periodicidad sin darse cuenta de que rompe el
+    invariante "a lo sumo una alerta por clave" que respeta el resto del módulo."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="44444444-4444-4444-4444-444444444444", periodicidad="04")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="55555555-5555-5555-5555-555555555555", periodicidad="05")
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    tarifa = [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
+    assert len(tarifa) == 1
+    assert tarifa[0].motivo == "AUSENTE"
+    assert "quincenal (15 días)" in (tarifa[0].detalle or "")
+    assert "mensual" in (tarifa[0].detalle or "")
+
+
+async def test_una_ausente_y_otra_sin_confirmar_es_una_alerta_que_distingue_los_dos_grupos(db: AsyncSession) -> None:
+    """El caso mixto: quincenal sin ningún documento cargado, mensual cargada pero sin
+    confirmar. Sigue siendo **una** alerta, con el motivo más grave (`AUSENTE`, porque ahí ni
+    siquiera hay nada que confirmar) y el `detalle` tiene que decir cuál periodicidad necesita
+    qué acción — no basta con nombrar las dos si no queda claro cuál está en cuál grupo."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="66666666-6666-6666-6666-666666666666", periodicidad="04")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="77777777-7777-7777-7777-777777777777", periodicidad="05")
+    await repo_tarifa.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.MENSUAL, renglones=_renglones_isr(), fuente="Anexo 8 DOF",
+    )
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    tarifa = [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
+    assert len(tarifa) == 1
+    assert tarifa[0].motivo == "AUSENTE"
+    detalle = tarifa[0].detalle or ""
+    # Cada periodicidad tiene que aparecer junto a la acción que le toca, no solo estar
+    # mencionada en algún lugar del texto: "cargar quincenal" y "confirmar mensual", no al
+    # revés.
+    antes_de_cargar, _, despues_de_cargar = detalle.partition("cargar")
+    assert "quincenal (15 días)" in despues_de_cargar.split(".")[0]
+    assert "mensual" in detalle.split("sin confirmar")[1]
