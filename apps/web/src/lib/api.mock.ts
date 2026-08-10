@@ -15,6 +15,7 @@ import type {
   BitacoraEntrada,
   CategoriaProvision,
   Comprobante,
+  ComprobacionTarifa,
   ConceptoObservado,
   ConfigSmtp,
   ConfigSmtpIn,
@@ -26,6 +27,7 @@ import type {
   EstadoJob,
   EstatusCfdi,
   Evento,
+  ImportacionTarifas,
   InformeCatalogo,
   Job,
   MapeosEmpresa,
@@ -36,11 +38,16 @@ import type {
   MetadataPreview,
   NotificacionDestino,
   ObservadosEmpresa,
+  OrigenTarifaIsr,
   OrigenValor,
   Page,
   ParametroFiscal,
   ParametroFiscalIn,
+  PeriodicidadTarifaIsr,
   Rol,
+  TarifaIsr,
+  TarifaIsrRenglon,
+  TarifaIsrRenglonIn,
   TipoEvento,
   UsuarioAdmin,
   ZonaSalarial,
@@ -85,6 +92,22 @@ interface DbMapConceptoProvision { empresa_id: number; naturaleza: string; tipo:
 interface DbNominaObservada {
   empresa_id: number; naturaleza: string; tipo: string; clave: string | null; concepto: string;
   descripcion_sat: string | null; comprobantes: number; importe: string; departamento: string;
+}
+/** El recibo real contra el que se compara una tarifa (doc 05 §8bis, tarifa ISR). Se guarda
+ * aparte de la tarifa porque no cambia cuando alguien corrige un renglón — lo que cambia es el
+ * ISR *calculado con* la tarifa, que `comprobacionTarifaASalida` recalcula contra los renglones
+ * vigentes en cada lectura, igual que hace `app.services.comprobacion_tarifa` en el servidor. */
+interface DbComprobacionInsumo {
+  uuid: string; fecha_inicial_pago: string | null; fecha_final_pago: string | null;
+  num_empleado: string | null; dias_pagados: string | null; gravado: string; isr_timbrado: string;
+  advertencias: string[];
+}
+interface DbTarifaIsr {
+  ejercicio: number; periodicidad: PeriodicidadTarifaIsr; periodicidad_cfdi: string | null;
+  origen: OrigenTarifaIsr; fuente: string; documento_sha256: string | null; encabezado: string;
+  importado_en: string; confirmado_por: string | null; confirmado_en: string | null;
+  aplica_a_la_nomina: boolean; renglones: TarifaIsrRenglonIn[];
+  comprobacion_insumo: DbComprobacionInsumo | null;
 }
 
 const db = {
@@ -240,6 +263,50 @@ const db = {
     { empresa_id: 7, naturaleza: 'P', tipo: '029', clave: null, concepto: 'FONDO DE AHORRO', descripcion_sat: 'Fondo de ahorro', comprobantes: 6, importe: '30000.00', departamento: 'OPERACIONES' },
     { empresa_id: 7, naturaleza: 'D', tipo: '001', clave: 'D010', concepto: 'PRESTAMO PERSONAL', descripcion_sat: 'Seguridad social', comprobantes: 4, importe: '12800.00', departamento: 'OPERACIONES' },
   ] as DbNominaObservada[],
+  // Tarifa del ISR (Anexo 8 de la RMF) — añadido post-freeze (2026-08-10, tarifa ISR). Dos
+  // tarifas del mismo documento importado, en los dos estados que la pantalla necesita ver sin
+  // backend: la quincenal **confirmada**, con una comprobación de diferencia de unos pesos
+  // (subsidio al empleo que el CFDI no desglosa); la mensual **propuesta**, sin comprobación
+  // (ningún recibo mensual elegible en este universo de prueba). Los renglones de las dos
+  // cumplen las reglas del Anexo I.1: el primero arranca en 0.01 con cuota fija 0.00, cada uno
+  // empieza un centavo después del límite superior del anterior, la tasa crece renglón a
+  // renglón y el último se queda sin límite superior.
+  tarifa_isr: [
+    {
+      ejercicio: 2026, periodicidad: 'DIAS_15', periodicidad_cfdi: '04', origen: 'IMPORTADA',
+      fuente: 'Anexo 8 de la Resolución Miscelánea Fiscal para 2026, DOF 27-12-2025 — https://www.dof.gob.mx/',
+      documento_sha256: 'a3f1c9d8e2b47650f9a1c3d5e7b9f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6',
+      encabezado: 'TARIFA APLICABLE PARA EL CÁLCULO DE LOS PAGOS PROVISIONALES QUINCENALES CORRESPONDIENTES A 2026, PERSONAS FÍSICAS QUE OBTENGAN INGRESOS POR SALARIOS',
+      importado_en: '2026-08-01 09:00:00', confirmado_por: 'dgarcia@planjuarez.org', confirmado_en: '2026-08-01 09:15:00',
+      aplica_a_la_nomina: true,
+      renglones: [
+        { renglon: 1, limite_inferior: '0.01', limite_superior: '368.10', cuota_fija: '0.00', tasa_excedente: '0.019200' },
+        { renglon: 2, limite_inferior: '368.11', limite_superior: '3124.35', cuota_fija: '7.07', tasa_excedente: '0.064000' },
+        { renglon: 3, limite_inferior: '3124.36', limite_superior: null, cuota_fija: '183.47', tasa_excedente: '0.108800' },
+      ],
+      comprobacion_insumo: {
+        uuid: 'B7E1A2F4-9C3D-4E10-8B2A-6F5D9C1E4A70', fecha_inicial_pago: '2026-07-01', fecha_final_pago: '2026-07-15',
+        num_empleado: '014', dias_pagados: '15', gravado: '4500.00', isr_timbrado: '331.00',
+        advertencias: ['El CFDI no desglosa el subsidio para el empleo aplicado en el periodo; una diferencia de unos pesos frente al cálculo con la tarifa es normal.'],
+      },
+    },
+    {
+      ejercicio: 2026, periodicidad: 'MENSUAL', periodicidad_cfdi: '05', origen: 'IMPORTADA',
+      fuente: 'Anexo 8 de la Resolución Miscelánea Fiscal para 2026, DOF 27-12-2025 — https://www.dof.gob.mx/',
+      documento_sha256: 'a3f1c9d8e2b47650f9a1c3d5e7b9f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6',
+      encabezado: 'TARIFA APLICABLE PARA EL CÁLCULO DE LOS PAGOS PROVISIONALES MENSUALES CORRESPONDIENTES A 2026, PERSONAS FÍSICAS QUE OBTENGAN INGRESOS POR SALARIOS',
+      importado_en: '2026-08-01 09:00:00', confirmado_por: null, confirmado_en: null,
+      aplica_a_la_nomina: false,
+      renglones: [
+        { renglon: 1, limite_inferior: '0.01', limite_superior: '746.04', cuota_fija: '0.00', tasa_excedente: '0.019200' },
+        { renglon: 2, limite_inferior: '746.05', limite_superior: '6332.05', cuota_fija: '14.32', tasa_excedente: '0.064000' },
+        { renglon: 3, limite_inferior: '6332.06', limite_superior: null, cuota_fija: '371.82', tasa_excedente: '0.108800' },
+      ],
+      // `null`: ningún CFDI de nómina mensual elegible en este universo de prueba — el tercer
+      // estado que la pantalla tiene que poder mostrar además de "hay comprobación".
+      comprobacion_insumo: null,
+    },
+  ] as DbTarifaIsr[],
 };
 
 const CONFIG_DESC: Record<string, string> = {
@@ -702,20 +769,25 @@ function normalizaNota(nota: string | null): string | null {
   return nota === null ? null : nota.trim() || null;
 }
 
-/** La huella de la duda declarada. El servidor real usa SHA-256; aquí basta con que sea
- * **estable, opaca y distinta para textos distintos**, porque el contrato dice justo eso: el
- * cliente la copia del `GET` y la devuelve tal cual, sin calcularla ni interpretarla. Si el mock
- * emitiera algo que el cliente pudiera reproducir, la pantalla se diseñaría contra una garantía
- * que el backend real no da. */
-function huellaDeNotaMock(nota: string | null): string | null {
-  if (nota === null) return null;
+/** Huella **estable, opaca y distinta para textos distintos** de un texto cualquiera. El
+ * servidor real usa SHA-256; para lo que el contrato promete —el cliente la copia de un `GET` y
+ * la devuelve tal cual, sin calcularla ni interpretarla— basta con esto. Si el mock emitiera algo
+ * que el cliente pudiera reproducir, la pantalla se diseñaría contra una garantía que el backend
+ * real no da. Comparte algoritmo `huellaDeNotaMock` (nota de percepción) y `huellaDeTarifaMock`
+ * (renglones de tarifa) para que las dos usen la misma promesa de opacidad. */
+function huellaTextoMock(texto: string): string {
   let h1 = 0x811c9dc5;
   let h2 = 0x01000193;
-  for (let i = 0; i < nota.length; i++) {
-    h1 = Math.imul(h1 ^ nota.charCodeAt(i), 0x01000193) >>> 0;
-    h2 = Math.imul(h2 + nota.charCodeAt(i), 0x85ebca6b) >>> 0;
+  for (let i = 0; i < texto.length; i++) {
+    h1 = Math.imul(h1 ^ texto.charCodeAt(i), 0x01000193) >>> 0;
+    h2 = Math.imul(h2 + texto.charCodeAt(i), 0x85ebca6b) >>> 0;
   }
-  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}${nota.length.toString(16)}`;
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}${texto.length.toString(16)}`;
+}
+
+/** La huella de la duda declarada. Ver `huellaTextoMock`. */
+function huellaDeNotaMock(nota: string | null): string | null {
+  return nota === null ? null : huellaTextoMock(nota);
 }
 
 /** `_duda_no_vista` del backend, **asimétrica igual que `dudaNuevaMock`**: si la marca tiene hoy
@@ -756,6 +828,157 @@ function escalaFactor(valor: string | null): string | null {
   if (n === null) return valor;
   const [enteros, decimales = ''] = n.split('.');
   return `${enteros}.${decimales.padEnd(DECIMALES_FACTOR, '0').slice(0, DECIMALES_FACTOR)}`;
+}
+
+// --- tarifa del ISR (doc 05 §8bis, tarifa ISR): las MISMAS reglas estructurales del Anexo I.1,
+// no una versión relajada — mismo criterio que la configuración fiscal de arriba. -------------
+
+const ETIQUETAS_PERIODICIDAD_TARIFA: Record<PeriodicidadTarifaIsr, string> = {
+  DIARIA: 'Diaria',
+  DIAS_7: 'Cada 7 días',
+  DIAS_10: 'Cada 10 días',
+  DIAS_15: 'Quincenal (15 días)',
+  MENSUAL: 'Mensual',
+  EJERCICIO: 'Anual (del ejercicio)',
+};
+
+/** Claves de `c_PeriodicidadPago` que la nómina real usa y para las que el Anexo 8 no publica
+ * tarifa: catorcenal y bimestral. */
+const PERIODICIDADES_SIN_TARIFA_MOCK = ['03', '06'];
+
+/** El mismo número como lo publica el SAT ("21.36"), calculado a partir de la fracción que se
+ * guarda ("0.213600") — igual que `(tasa_excedente * 100).quantize(Decimal("0.01"))` en
+ * `app/api/v1/configuracion.py`. Nunca al revés: la pantalla no multiplica por su cuenta. */
+function tasaPorcentajeTarifaMock(tasaExcedente: string): string {
+  return (Number(tasaExcedente) * 100).toFixed(2);
+}
+
+/** Forma canónica de los renglones para la huella: ordenados por número de renglón y con los
+ * importes normalizados, para que "7.07" y "7.070000" produzcan la misma huella — igual que en
+ * el servidor, donde la huella se calcula sobre el `Decimal` exacto, no sobre el texto tecleado. */
+function huellaDeTarifaMock(renglones: TarifaIsrRenglonIn[]): string {
+  const canonico = [...renglones]
+    .sort((a, b) => a.renglon - b.renglon)
+    .map((r) =>
+      [
+        r.renglon,
+        importeNormalizado(r.limite_inferior) ?? r.limite_inferior,
+        r.limite_superior === null ? '' : (importeNormalizado(r.limite_superior) ?? r.limite_superior),
+        importeNormalizado(r.cuota_fija) ?? r.cuota_fija,
+        importeNormalizado(r.tasa_excedente) ?? r.tasa_excedente,
+      ].join('|'),
+    )
+    .join(';');
+  return huellaTextoMock(canonico);
+}
+
+/** Las cinco pruebas de continuidad/monotonía del Anexo I.1 que un renglón capturado a mano
+ * puede romper (las otras del Anexo I.1 —máscara de campos, escala de columna— ya las cubren los
+ * tipos). Mismo espíritu que `app.services.tarifa_isr.validar`, no una copia byte a byte: aquí
+ * solo hace falta que el mock no deje pasar una tarifa que el backend real rechazaría. */
+function exigeTarifaValidaMock(renglones: TarifaIsrRenglonIn[]): void {
+  if (renglones.length === 0) {
+    throw new ApiError(422, 'TARIFA_INVALIDA', 'la tarifa necesita al menos un renglón.');
+  }
+  const ordenados = [...renglones].sort((a, b) => a.renglon - b.renglon);
+  const primero = ordenados[0];
+  if (importeNormalizado(primero.limite_inferior) !== '0.01') {
+    throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${primero.renglon}: el límite inferior tiene que empezar en 0.01, llegó ${primero.limite_inferior}.`);
+  }
+  if (importeNormalizado(primero.cuota_fija) !== '0') {
+    throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${primero.renglon}: la cuota fija del primer renglón tiene que ser 0.00, llegó ${primero.cuota_fija}.`);
+  }
+  let tasaAnterior = -1;
+  ordenados.forEach((r, i) => {
+    const esUltimo = i === ordenados.length - 1;
+    if (esUltimo && r.limite_superior !== null) {
+      throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${r.renglon}: el último renglón tiene que quedar sin límite superior ("en adelante").`);
+    }
+    if (!esUltimo && r.limite_superior === null) {
+      throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${r.renglon}: solo el último renglón puede quedar sin límite superior.`);
+    }
+    if (i > 0) {
+      const anterior = ordenados[i - 1];
+      const esperado = Number(anterior.limite_superior) + 0.01;
+      if (Math.abs(Number(r.limite_inferior) - esperado) > 0.001) {
+        throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${r.renglon}: el límite inferior tiene que empezar un centavo después del límite superior del renglón anterior (esperado ${esperado.toFixed(2)}, llegó ${r.limite_inferior}).`);
+      }
+    }
+    const tasa = Number(r.tasa_excedente);
+    if (tasa <= tasaAnterior) {
+      throw new ApiError(422, 'TARIFA_INVALIDA', `renglón ${r.renglon}: la tasa (${r.tasa_excedente}) tiene que ser mayor que la del renglón anterior.`);
+    }
+    tasaAnterior = tasa;
+  });
+}
+
+function renglonTarifaASalida(r: TarifaIsrRenglonIn): TarifaIsrRenglon {
+  return {
+    renglon: r.renglon,
+    limite_inferior: r.limite_inferior,
+    limite_superior: r.limite_superior,
+    cuota_fija: r.cuota_fija,
+    tasa_excedente: r.tasa_excedente,
+    tasa_porcentaje: tasaPorcentajeTarifaMock(r.tasa_excedente),
+  };
+}
+
+/** El renglón que aplica a un ingreso gravado y el ISR que resulta, contra los renglones
+ * **vigentes ahora mismo** — no un valor guardado en el insumo. Así, corregir una tarifa cambia
+ * de inmediato lo que la comprobación enseña, igual que en `app.services.comprobacion_tarifa`. */
+function calcularIsrTarifaMock(
+  renglones: TarifaIsrRenglonIn[],
+  gravado: string,
+): { renglon: number; limite_inferior: string; tasa_excedente: string; isr_calculado: string } {
+  const g = Number(gravado);
+  const ordenados = [...renglones].sort((a, b) => a.renglon - b.renglon);
+  const fila = ordenados.find((r) => g >= Number(r.limite_inferior) && (r.limite_superior === null || g <= Number(r.limite_superior))) ?? ordenados[ordenados.length - 1];
+  const excedente = g - Number(fila.limite_inferior);
+  const isr = Number(fila.cuota_fija) + excedente * Number(fila.tasa_excedente);
+  return { renglon: fila.renglon, limite_inferior: fila.limite_inferior, tasa_excedente: fila.tasa_excedente, isr_calculado: isr.toFixed(2) };
+}
+
+function comprobacionTarifaASalida(insumo: DbComprobacionInsumo | null, renglones: TarifaIsrRenglonIn[]): ComprobacionTarifa | null {
+  if (!insumo) return null;
+  const { renglon, limite_inferior, tasa_excedente, isr_calculado } = calcularIsrTarifaMock(renglones, insumo.gravado);
+  return {
+    uuid: insumo.uuid,
+    fecha_inicial_pago: insumo.fecha_inicial_pago,
+    fecha_final_pago: insumo.fecha_final_pago,
+    num_empleado: insumo.num_empleado,
+    dias_pagados: insumo.dias_pagados,
+    gravado: insumo.gravado,
+    renglon,
+    limite_inferior,
+    tasa_excedente,
+    isr_calculado,
+    isr_timbrado: insumo.isr_timbrado,
+    diferencia: (Number(isr_calculado) - Number(insumo.isr_timbrado)).toFixed(2),
+    advertencias: insumo.advertencias,
+  };
+}
+
+function tarifaIsrASalida(fila: DbTarifaIsr): TarifaIsr {
+  const renglones = [...fila.renglones].sort((a, b) => a.renglon - b.renglon);
+  return {
+    ejercicio: fila.ejercicio,
+    periodicidad: fila.periodicidad,
+    etiqueta: ETIQUETAS_PERIODICIDAD_TARIFA[fila.periodicidad],
+    periodicidad_cfdi: fila.periodicidad_cfdi,
+    origen: fila.origen,
+    fuente: fila.fuente,
+    documento_sha256: fila.documento_sha256,
+    encabezado: fila.encabezado,
+    importado_en: fila.importado_en,
+    confirmado_por: fila.confirmado_por,
+    confirmado_en: fila.confirmado_en,
+    confirmada: fila.confirmado_en !== null,
+    difiere_del_documento: fila.origen === 'MANUAL',
+    aplica_a_la_nomina: fila.aplica_a_la_nomina,
+    huella: huellaDeTarifaMock(renglones),
+    renglones: renglones.map(renglonTarifaASalida),
+    comprobacion: comprobacionTarifaASalida(fila.comprobacion_insumo, renglones),
+  };
 }
 
 function requireAdminMock(accion: string): DbUsuario {
@@ -1417,6 +1640,74 @@ export const apiMock: ApiClient = {
       sin_clasificar: conceptos.filter((c) => c.naturaleza === 'P' && c.categoria === null && c.clave !== null).length,
       sin_mapear: departamentos.filter((d) => d.centro_costo === null).length,
     };
+  },
+
+  // --- Tarifa del ISR (doc 05 §8bis, tarifa ISR) -----------------------------------------------
+
+  async listarTarifasIsr(): Promise<ImportacionTarifas> {
+    requireAdminMock('ver las tarifas del ISR');
+    return {
+      tarifas: [...db.tarifa_isr]
+        .sort((a, b) => a.ejercicio - b.ejercicio || a.periodicidad.localeCompare(b.periodicidad))
+        .map(tarifaIsrASalida),
+      periodicidades_sin_tarifa: PERIODICIDADES_SIN_TARIFA_MOCK,
+    };
+  },
+
+  // El mock **no simula el PDF**: no hay extractor de Anexo 8 en el cliente, así que
+  // `importarTarifaIsr` devuelve siempre la misma lista fija — lo que el PDF real produciría es
+  // exactamente lo que `listarTarifasIsr` ya expone, por diseño del propio recurso (§8bis: los
+  // dos endpoints comparten helper del lado del servidor).
+  async importarTarifaIsr(): Promise<ImportacionTarifas> {
+    requireAdminMock('importar el Anexo 8');
+    return apiMock.listarTarifasIsr();
+  },
+
+  async corregirTarifaIsr(ejercicio, periodicidad, renglones): Promise<TarifaIsr> {
+    const u = requireAdminMock('corregir una tarifa del ISR');
+    const fila = db.tarifa_isr.find((t) => t.ejercicio === ejercicio && t.periodicidad === periodicidad);
+    if (!fila) throw new ApiError(404, 'TARIFA_NO_ENCONTRADA', `No hay tarifa ${ejercicio}/${periodicidad}.`);
+    exigeTarifaValidaMock(renglones);
+    fila.renglones = renglones.map((r) => ({ ...r }));
+    fila.origen = 'MANUAL';
+    // Corregir siempre limpia la confirmación previa, incluso si la hizo el mismo administrador.
+    fila.confirmado_por = null;
+    fila.confirmado_en = null;
+    logBitacora(u.correo, 'corregir_tarifa_isr', `tarifa_isr:${ejercicio}/${periodicidad}`, { ejercicio, periodicidad });
+    return tarifaIsrASalida(fila);
+  },
+
+  async confirmarTarifaIsr(ejercicio, periodicidad, huella): Promise<TarifaIsr> {
+    const u = requireAdminMock('confirmar una tarifa del ISR');
+    const fila = db.tarifa_isr.find((t) => t.ejercicio === ejercicio && t.periodicidad === periodicidad);
+    if (!fila) throw new ApiError(404, 'TARIFA_NO_ENCONTRADA', `No hay tarifa ${ejercicio}/${periodicidad}.`);
+    if (huellaDeTarifaMock(fila.renglones) !== huella) {
+      throw new ApiError(409, 'TARIFA_CAMBIO', `La tarifa ${ejercicio}/${periodicidad} cambió mientras la revisabas. Vuelve a cargarla y revísala otra vez antes de confirmar.`);
+    }
+    // Idempotente: reconfirmar no reescribe quién la confirmó.
+    if (fila.confirmado_en === null) {
+      fila.confirmado_por = u.correo;
+      fila.confirmado_en = stamp();
+      logBitacora(u.correo, 'confirmar_tarifa_isr', `tarifa_isr:${ejercicio}/${periodicidad}`, { ejercicio, periodicidad });
+    }
+    return tarifaIsrASalida(fila);
+  },
+
+  async descartarTarifaIsr(ejercicio, periodicidad): Promise<void> {
+    const u = requireAdminMock('descartar una tarifa del ISR');
+    const idx = db.tarifa_isr.findIndex((t) => t.ejercicio === ejercicio && t.periodicidad === periodicidad);
+    if (idx === -1) throw new ApiError(404, 'TARIFA_NO_ENCONTRADA', `No hay tarifa ${ejercicio}/${periodicidad}.`);
+    if (db.tarifa_isr[idx].confirmado_en !== null) {
+      throw new ApiError(409, 'TARIFA_CONFIRMADA', `La tarifa ${ejercicio}/${periodicidad} ya está confirmada. Para reemplazarla corrígela a mano o reimporta encima; no se borra una tarifa activa.`);
+    }
+    db.tarifa_isr.splice(idx, 1);
+    logBitacora(u.correo, 'descartar_tarifa_isr', `tarifa_isr:${ejercicio}/${periodicidad}`, { ejercicio, periodicidad });
+  },
+
+  // Sin llamada de red que simular: en el mock, igual que en la implementación HTTP, es una
+  // función pura que arma una URL — el endpoint real es de la Task 11 (hoja de revisión en PDF).
+  urlHojaDeRevisionTarifa(ejercicio, periodicidad): string {
+    return `/mock/tarifa-isr/${ejercicio}-${periodicidad}-hoja-revision.pdf`;
   },
 };
 

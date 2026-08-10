@@ -567,6 +567,7 @@ export interface ObservadosEmpresa { conceptos: ConceptoObservado[]; departament
 // en las dos direcciones, por el mismo motivo que el resto del recurso: la huella se calcula sobre
 // el valor exacto y un número JSON que pasó por `float` no coincidiría nunca al confirmar.
 export type PeriodicidadTarifaIsr = 'DIARIA' | 'DIAS_7' | 'DIAS_10' | 'DIAS_15' | 'MENSUAL' | 'EJERCICIO';
+export type OrigenTarifaIsr = 'IMPORTADA' | 'MANUAL';
 export interface TarifaIsrRenglonIn { renglon: number; limite_inferior: string; limite_superior: string | null;
                                       cuota_fija: string; tasa_excedente: string }
 // `tasa_porcentaje` la calcula el SERVIDOR a partir de la fracción almacenada: no multiplicar por
@@ -578,14 +579,14 @@ export interface ComprobacionTarifa { uuid: string; fecha_inicial_pago: string |
                                       isr_calculado: string; isr_timbrado: string; diferencia: string;
                                       advertencias: string[] }
 export interface TarifaIsr { ejercicio: number; periodicidad: PeriodicidadTarifaIsr; etiqueta: string;
-                             periodicidad_cfdi: string | null; origen: 'IMPORTADA' | 'MANUAL'; fuente: string;
+                             periodicidad_cfdi: string | null; origen: OrigenTarifaIsr; fuente: string;
                              documento_sha256: string | null; encabezado: string; importado_en: string;
                              confirmado_por: string | null; confirmado_en: string | null; confirmada: boolean;
                              difiere_del_documento: boolean; aplica_a_la_nomina: boolean; huella: string;
                              renglones: TarifaIsrRenglon[]; comprobacion: ComprobacionTarifa | null }
 // `GET` y `POST .../importar` devuelven la misma forma (mismo helper del lado del servidor), para
 // que la lista y la importación no puedan mostrar cosas distintas.
-export interface TarifasIsr { tarifas: TarifaIsr[]; periodicidades_sin_tarifa: string[] }
+export interface ImportacionTarifas { tarifas: TarifaIsr[]; periodicidades_sin_tarifa: string[] }
 
 export interface ApiClient {
   // Sesión (prioridad 1)
@@ -649,15 +650,18 @@ export interface ApiClient {
    * ARCHIVO_DEMASIADO_GRANDE, 422 DOCUMENTO_INVALIDO / TARIFA_INVALIDA, 409 CORRECCION_MANUAL
    * si el documento choca con una tarifa ya corregida a mano (no se pisa, hay que descartarla o
    * corregirla de nuevo). Todo o nada por documento: si una tabla falla, no se guarda ninguna. */
-  importarTarifaIsr(archivo: File): Promise<TarifasIsr>;
-  listarTarifaIsr(): Promise<TarifasIsr>;
+  importarTarifaIsr(archivo: File): Promise<ImportacionTarifas>;
+  listarTarifasIsr(): Promise<ImportacionTarifas>;
   /** Reemplaza los renglones completos (no un diff). 422 TARIFA_INVALIDA si no pasa las seis
    * pruebas del Anexo I.1 sobre la tarifa entera. Limpia la confirmación previa. */
   corregirTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, renglones: TarifaIsrRenglonIn[]): Promise<TarifaIsr>;
   confirmarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, huella: string): Promise<TarifaIsr>;
   /** Solo sobre una tarifa sin confirmar: 409 TARIFA_CONFIRMADA si ya se confirmó — para
    * reemplazar una confirmada se corrige a mano o se reimporta encima, no se borra primero. */
-  borrarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
+  descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
+  /** URL de la hoja de revisión en PDF (Task 11 de este mismo plan, todavía no construida en el
+   * backend al cerrar la Task 9): no hace la petición, solo arma la URL para un `<a href>`. */
+  urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
 }
 ```
 

@@ -419,6 +419,115 @@ export interface ObservadosEmpresa {
   sin_mapear: number;
 }
 
+/* ------------------------------------------------------------------------------------------
+ * Tarifa del ISR (Anexo 8 de la RMF) — añadido post-freeze (2026-08-10, tarifa ISR). Solo
+ * administrador: la tarifa es política federal, igual que `param_fiscal`, no política de una
+ * empresa. Mismo invariante que el resto del recurso: **una tarifa sin confirmar no calcula**;
+ * importar y corregir *proponen*, solo confirmar la activa.
+ *
+ * Los importes de los renglones viajan como **cadena**, en las dos direcciones: la huella se
+ * calcula sobre el valor exacto y un número JSON que perdió precisión al pasar por `float` no
+ * coincidiría nunca al confirmar, lo que produciría un 409 imposible de explicar.
+ * ---------------------------------------------------------------------------------------- */
+
+/** Periodicidades **como las publica el Anexo 8**, no como las nombra el CFDI: el catálogo
+ * `c_PeriodicidadPago` del SAT tiene periodicidades para las que el Anexo no publica tarifa
+ * (`03` catorcenal, `06` bimestral) y admitirlas aquí sugeriría que existen. */
+export type PeriodicidadTarifaIsr = 'DIARIA' | 'DIAS_7' | 'DIAS_10' | 'DIAS_15' | 'MENSUAL' | 'EJERCICIO';
+
+/** Procedencia de una tarifa. `IMPORTADA` no es una semilla: viene del documento oficial que
+ * alguien subió, y su huella queda en `TarifaIsr.documento_sha256`. */
+export type OrigenTarifaIsr = 'IMPORTADA' | 'MANUAL';
+
+/** Cuerpo para corregir un renglón a mano. **Sin `tasa_porcentaje`**: ese lo calcula siempre el
+ * servidor, nunca se manda. */
+export interface TarifaIsrRenglonIn {
+  renglon: number;
+  limite_inferior: string;
+  limite_superior: string | null;
+  cuota_fija: string;
+  /** Fracción decimal, que es como se guarda y como calcula: "0.213600". */
+  tasa_excedente: string;
+}
+
+/** Un renglón de una tarifa del ISR, ya calculado. `limite_superior` nulo es el último renglón
+ * ("En adelante"). */
+export interface TarifaIsrRenglon {
+  renglon: number;
+  limite_inferior: string;
+  limite_superior: string | null;
+  cuota_fija: string;
+  /** Fracción decimal, que es como se guarda y como calcula: "0.213600". */
+  tasa_excedente: string;
+  /** El mismo número como lo publica el SAT y como lo lee un contador: "21.36". Lo calcula el
+   *  servidor a propósito: es el único número donde equivocar la escala cambia el resultado por
+   *  cien — la pantalla **nunca** debe multiplicar `tasa_excedente` por 100 por su cuenta. */
+  tasa_porcentaje: string;
+}
+
+/** Comparación de la tarifa contra un recibo real. **No es un dictamen fiscal**: sirve para detectar
+ *  un error de carga (una tabla de otro año o de otra periodicidad pasa las validaciones
+ *  estructurales pero aquí da una diferencia enorme). Los campos del recibo son nulos cuando el
+ *  CFDI no los trae — eso no es un error de carga, es un complemento incompleto. */
+export interface ComprobacionTarifa {
+  uuid: string;
+  fecha_inicial_pago: string | null;
+  fecha_final_pago: string | null;
+  num_empleado: string | null;
+  dias_pagados: string | null;
+  gravado: string;
+  renglon: number;
+  limite_inferior: string;
+  /** Fracción decimal del renglón que aplicó, no el porcentaje — igual que en `TarifaIsrRenglon`. */
+  tasa_excedente: string;
+  isr_calculado: string;
+  isr_timbrado: string;
+  diferencia: string;
+  /** Razones por las que la diferencia puede ser esperada, en español y listas para mostrar. */
+  advertencias: string[];
+}
+
+/** Una tarifa completa del ISR, con su procedencia, su estado de confirmación y sus renglones. */
+export interface TarifaIsr {
+  ejercicio: number;
+  periodicidad: PeriodicidadTarifaIsr;
+  /** En el idioma de un recibo de nómina ("Quincenal (15 días)"), ya traducida por el servidor
+   * — nunca el nombre del enum (`DIAS_15`). El frontend no traduce nombres de enum. */
+  etiqueta: string;
+  /** La clave de `c_PeriodicidadPago` a la que corresponde esta tarifa, o `null` para
+   * `EJERCICIO`: el Anexo la publica para el ingreso de todo un año, no para un recibo. */
+  periodicidad_cfdi: string | null;
+  origen: OrigenTarifaIsr;
+  fuente: string;
+  documento_sha256: string | null;
+  encabezado: string;
+  importado_en: string;
+  confirmado_por: string | null;
+  confirmado_en: string | null;
+  confirmada: boolean;
+  /** `true` si `origen: MANUAL`: una tarifa corregida a mano ya no es, por definición, lo que
+   * dice el último documento importado. */
+  difiere_del_documento: boolean;
+  /** `true` solo en la tarifa cuya periodicidad es la que de verdad timbra la nómina observada
+   * (regla B-09.R1: la moda de `nomina_receptor.periodicidad_pago`), no una preferencia de la
+   * pantalla. */
+  aplica_a_la_nomina: boolean;
+  /** Huella (SHA-256) de los renglones vigentes: se manda tal cual a `confirmarTarifaIsr`. */
+  huella: string;
+  renglones: TarifaIsrRenglon[];
+  comprobacion: ComprobacionTarifa | null;
+}
+
+/** El `GET` y el `POST .../importar` devuelven la misma forma (mismo helper del lado del
+ * servidor), para que la lista y la importación nunca puedan mostrar cosas distintas. */
+export interface ImportacionTarifas {
+  tarifas: TarifaIsr[];
+  /** Claves de `c_PeriodicidadPago` que la nómina real usa y para las que el Anexo 8 no publica
+   * tarifa (`03` catorcenal, `06` bimestral): enterarse aquí es mejor que enterarse cuando el
+   * informe de nómina salga rotulado. */
+  periodicidades_sin_tarifa: string[];
+}
+
 /** Entrada del catálogo de informes (doc: spec §7.2). `parametros` es un JSON Schema — la pantalla
  * de Informes construye el formulario a partir de `parametros.properties`/`required`, sin conocer
  * de antemano qué informe es (B-02 hoy, ocho más en fases 2-3, ninguno hardcodeado en la UI). */
@@ -543,4 +652,30 @@ export interface ApiClient {
   /** Reemplaza las dos listas completas: hay que mandar también la que no se está editando. */
   guardarMapeosEmpresa(empresaId: number, input: MapeosEmpresa): Promise<MapeosEmpresa>;
   obtenerConceptosObservados(empresaId: number): Promise<ObservadosEmpresa>;
+  /* Tarifa del ISR (Anexo 8 de la RMF), solo administrador — añadido post-freeze (2026-08-10,
+   * tarifa ISR). Importar y corregir PROPONEN (`confirmada: false`); solo `confirmarTarifaIsr`
+   * la activa, y exige la huella de los renglones que se revisó (`TarifaIsr.huella`), igual que
+   * `confirmarParametroFiscal`: 409 `TARIFA_CAMBIO` si no coincide con la almacenada. */
+  listarTarifasIsr(): Promise<ImportacionTarifas>;
+  /** Multipart, no JSON: `archivo` es el PDF del Anexo 8 tal como lo publica el SAT (mismo
+   * patrón que `subirEfirma`). Las tarifas quedan **sin confirmar** (`origen: IMPORTADA`). Todo
+   * o nada por documento: si una tabla del PDF no pasa las seis pruebas del Anexo I.1, no se
+   * guarda ninguna. */
+  importarTarifaIsr(archivo: File): Promise<ImportacionTarifas>;
+  /** Corrección manual: la lista **completa** de renglones, no un diff — se revalidan las seis
+   * pruebas del Anexo I.1 sobre la tarifa entera, porque cambiar un límite puede romper la
+   * continuidad con su vecino. Limpia la confirmación previa, incluso si la hizo el mismo
+   * administrador que corrige. */
+  corregirTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, renglones: TarifaIsrRenglonIn[]): Promise<TarifaIsr>;
+  /** El cliente manda la huella de **lo que revisó**; 409 `TARIFA_CAMBIO` si no coincide con la
+   * almacenada — la tarifa cambió entre que se pintó la pantalla y que se hizo clic.
+   * Idempotente: reconfirmar no reescribe quién la confirmó. */
+  confirmarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, huella: string): Promise<TarifaIsr>;
+  /** Solo sobre una tarifa **sin confirmar**: 409 `TARIFA_CONFIRMADA` si ya se confirmó — para
+   * reemplazar una confirmada se corrige a mano o se reimporta encima, nunca se borra primero. */
+  descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
+  /** URL de la hoja de revisión en PDF, para abrir o descargar (Task 11 de este mismo plan). Es
+   * la única función de este bloque que no es asíncrona: no hace la petición, solo construye la
+   * URL para un `<a href>`. */
+  urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
 }

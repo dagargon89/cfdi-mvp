@@ -4,7 +4,7 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, Automatizaciones, BitacoraEntrada, CatalogoPercepciones, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, UsuarioAdmin } from './api';
+import type { ApiClient, Automatizaciones, BitacoraEntrada, CatalogoPercepciones, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, ImportacionTarifas, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, TarifaIsr, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -135,6 +135,12 @@ type ApiClientHttpSubset = Pick<
   | 'obtenerMapeosEmpresa'
   | 'guardarMapeosEmpresa'
   | 'obtenerConceptosObservados'
+  | 'listarTarifasIsr'
+  | 'importarTarifaIsr'
+  | 'corregirTarifaIsr'
+  | 'confirmarTarifaIsr'
+  | 'descartarTarifaIsr'
+  | 'urlHojaDeRevisionTarifa'
 >;
 
 export const apiHttp: ApiClientHttpSubset = {
@@ -307,4 +313,37 @@ export const apiHttp: ApiClientHttpSubset = {
     request<MapeosEmpresa>(`/v1/empresas/${empresaId}/configuracion/mapeos`, { method: 'PUT', body: JSON.stringify(input) }),
 
   obtenerConceptosObservados: (empresaId) => request<ObservadosEmpresa>(`/v1/empresas/${empresaId}/configuracion/conceptos-observados`),
+
+  // Tarifa del ISR (Anexo 8 de la RMF), solo admin — añadido post-freeze (2026-08-10, tarifa
+  // ISR). `GET` y `POST .../importar` devuelven la misma forma (`ImportacionTarifas`).
+  listarTarifasIsr: () => request<ImportacionTarifas>('/v1/configuracion/tarifa-isr'),
+
+  // Multipart, igual que `subirEfirma`: **no** se fija `Content-Type` a mano, el navegador pone
+  // el `boundary` al construir el cuerpo con `FormData`.
+  importarTarifaIsr: (archivo) => {
+    const form = new FormData();
+    form.set('archivo', archivo);
+    return request<ImportacionTarifas>('/v1/configuracion/tarifa-isr/importar', { method: 'POST', body: form });
+  },
+
+  corregirTarifaIsr: (ejercicio, periodicidad, renglones) =>
+    request<TarifaIsr>(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}`, {
+      method: 'PUT',
+      body: JSON.stringify({ renglones }),
+    }),
+
+  confirmarTarifaIsr: (ejercicio, periodicidad, huella) =>
+    request<TarifaIsr>(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}/confirmar`, {
+      method: 'POST',
+      body: JSON.stringify({ huella }),
+    }),
+
+  descartarTarifaIsr: (ejercicio, periodicidad) =>
+    request<void>(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}`, { method: 'DELETE' }),
+
+  // Construye la URL, no la pide: el endpoint es de la Task 11 (hoja de revisión en PDF), que
+  // todavía no existe en el backend al escribir esto — verificar la ruta contra esa tarea antes
+  // de usarla en producción.
+  urlHojaDeRevisionTarifa: (ejercicio, periodicidad) =>
+    `${BASE_URL}/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}/hoja-revision`,
 };
