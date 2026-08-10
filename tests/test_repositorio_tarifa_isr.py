@@ -9,8 +9,9 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.models.configuracion_fiscal import TarifaIsr
 from app.models.enums import OrigenTarifa, PeriodicidadTarifa
 from app.repositories import tarifa_isr as repo
 from app.services import anexo8
@@ -292,6 +293,63 @@ async def test_escribir_reverifica_la_proteccion_bajo_candado(db: AsyncSession) 
     assert fila is not None
     assert fila.origen is OrigenTarifa.MANUAL
     assert fila.renglones[1].cuota_fija == Decimal("8.95")
+
+
+async def test_la_reverificacion_bajo_candado_ve_el_ultimo_estado_no_uno_cacheado(
+    db: AsyncSession, engine: AsyncEngine
+) -> None:
+    """El `FOR UPDATE` de `_escribir` sí toma el candado a nivel de fila y sí lee el último
+    committeado *a nivel de SQL* — eso nunca falló. El riesgo está una capa arriba, en el mapa de
+    identidad de SQLAlchemy: si el objeto `TarifaIsr` de esa clave primaria **sigue vivo en algún
+    lado de la sesión**, `db.scalar(select(TarifaIsr)...)` devuelve ese mismo objeto Python tal cual
+    —con los atributos de cuando se cargó— y no lo actualiza con la fila fresca, a menos que la
+    consulta lleve `populate_existing=True`.
+
+    Importante sobre esta prueba: **no basta con reproducir la secuencia de `guardar_importadas`
+    tal cual** (`obtener()` en la pre-comprobación, seguido de `_escribir`) porque `obtener()`
+    siempre convierte la fila a `TarifaGuardada` y suelta el objeto ORM — sin ninguna otra
+    referencia, Python lo recolecta antes de que `_escribir` vuelva a consultar esa clave primaria,
+    y entonces la consulta posterior de todos modos construye un objeto nuevo con datos frescos,
+    con o sin `populate_existing` (se verificó empíricamente: dos llamadas sucesivas a `obtener()`
+    en la misma sesión, sin retener nada entre medias, devuelven objetos Python con `id()`
+    distintos). El caso real que `populate_existing` cierra es el de **cualquier código que sí
+    retenga el objeto ORM** —`db.get(TarifaIsr, ...)` en vez de pasar por `obtener()`, un endpoint
+    que lo guarda para otra cosa en el mismo request— y por eso se reproduce aquí cargándolo así
+    directamente y reteniéndolo vivo en `cabecera_viva` durante toda la prueba.
+    """
+    await repo.guardar_importadas(db, [_extraida()], fuente="f", sha256=SHA_A)
+    await db.commit()
+
+    # Carga el ORM crudo y lo retiene vivo — a propósito, es lo que `obtener()` nunca hace (siempre
+    # lo convierte a `TarifaGuardada` y lo suelta). Simula cualquier ruta futura que sí lo haga.
+    cabecera_viva = await db.get(TarifaIsr, (2026, PeriodicidadTarifa.DIAS_15))
+    assert cabecera_viva is not None
+    assert cabecera_viva.origen is OrigenTarifa.IMPORTADA
+
+    # Otra sesión corrige la tarifa a mano con otros renglones, y confirma su transacción.
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as otra:
+        await repo.guardar_manual(
+            otra, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones("8.95"),
+            fuente="corregido por otro proceso",
+        )
+        await otra.commit()
+
+    # `db` reimporta el mismo documento de siempre. Sin `populate_existing=True` en el `FOR UPDATE`
+    # de `_escribir`, éste devolvería el mismo objeto que `cabecera_viva` referencia —origen todavía
+    # IMPORTADA— y la protección nunca se dispararía.
+    with pytest.raises(repo.CorreccionManualProtegida):
+        await repo.guardar_importadas(db, [_extraida()], fuente="f", sha256=SHA_B)
+    await db.rollback()
+
+    fila = await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15)
+    assert fila is not None
+    assert fila.origen is OrigenTarifa.MANUAL
+    assert fila.renglones[1].cuota_fija == Decimal("8.95")
+
+    # `cabecera_viva` se sigue referenciando aquí a propósito, para que quede claro que su vida útil
+    # cubre toda la prueba: si Python la recolectara antes, esto dejaría de reproducir el caso.
+    assert cabecera_viva is not None
 
 
 async def test_reimportar_con_la_misma_huella_que_la_correccion_manual_actualiza_el_origen(

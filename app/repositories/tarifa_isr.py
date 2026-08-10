@@ -93,19 +93,46 @@ def _ahora() -> datetime:
 
 
 async def _leer_renglones(
-    db: AsyncSession, *, ejercicio: int, periodicidad: PeriodicidadTarifa
+    db: AsyncSession, *, ejercicio: int, periodicidad: PeriodicidadTarifa, bajo_candado: bool = False
 ) -> list[reglas.Renglon]:
-    """Los renglones de una tarifa, ordenados por `renglon`. Vacía si no hay ninguno."""
-    filas = (
-        await db.scalars(
-            select(TarifaIsrRenglon)
-            .where(
-                TarifaIsrRenglon.ejercicio == ejercicio,
-                TarifaIsrRenglon.periodicidad == periodicidad,
-            )
-            .order_by(TarifaIsrRenglon.renglon)
+    """Los renglones de una tarifa, ordenados por `renglon`. Vacía si no hay ninguno.
+
+    `populate_existing=True` siempre: si esta clave ya tiene renglones cargados y **todavía vivos**
+    en el mapa de identidad de la sesión —no basta con haberlos leído antes; algo tiene que seguir
+    referenciando esos objetos ORM, porque el mapa de identidad es débil y Python los recolecta en
+    cuanto nada los referencia— SQLAlchemy devolvería esos objetos tal cual, sin actualizarlos con
+    la fila que la consulta acaba de traer. `obtener()`/`listar()` nunca dejan esa trampa puesta —
+    siempre convierten la fila a `Renglon` y sueltan el objeto ORM—, pero cualquier código que sí
+    retenga la entidad (p. ej. `db.get(TarifaIsrRenglon, ...)` usado directamente en otra parte, en
+    la misma sesión) sí la dejaría, y esta opción es la que evita que ese objeto viejo se cuele en
+    una comparación de huellas.
+
+    `bajo_candado=True` (lo usan `_escribir` y `confirmar`, nunca `obtener`/`listar`) añade además
+    `with_for_update()`, y hace falta la pareja completa: `populate_existing` por sí solo no basta.
+    Sin el candado, esta sigue siendo una lectura simple que en InnoDB usa el snapshot MVCC que la
+    transacción ya estableció con una lectura anterior — de cualquier tabla, no solo de esta— y
+    **no ve** una fila que otra transacción cambió y committeó después, sin importar si el objeto
+    Python está vivo o no: `populate_existing` evita que el mapa de identidad enmascare una fila
+    fresca, pero no hace fresca una fila que la base todavía no le mostró a esta consulta. `FOR
+    UPDATE` es lo que fuerza a leer el último committeado, igual que ya hace la cabecera. La huella
+    con la que se decide si limpiar la confirmación (`_escribir`) o si aceptar una confirmación
+    (`confirmar`) tiene que venir de ese estado real, no del snapshot ni del caché — verificado con
+    una prueba que retiene deliberadamente un objeto vivo y confirma que, sin cualquiera de las dos
+    piezas, la protección deja de dispararse (ver
+    `test_la_reverificacion_bajo_candado_ve_el_ultimo_estado_no_uno_cacheado`).
+    """
+    stmt = (
+        select(TarifaIsrRenglon)
+        .where(
+            TarifaIsrRenglon.ejercicio == ejercicio,
+            TarifaIsrRenglon.periodicidad == periodicidad,
         )
-    ).all()
+        .order_by(TarifaIsrRenglon.renglon)
+        .execution_options(populate_existing=True)
+    )
+    if bajo_candado:
+        stmt = stmt.with_for_update()
+    filas = (await db.scalars(stmt)).all()
     return [
         reglas.Renglon(
             renglon=f.renglon,
@@ -160,6 +187,29 @@ async def _escribir(
     transacción convirtió la tarifa en `MANUAL` con una huella distinta, la pre-comprobación no lo
     vería, y sin esta segunda comprobación **bajo candado** la importación la pisaría en silencio —
     justo el invariante que existe para impedirlo.
+
+    **`populate_existing=True` en la consulta, y no solo `with_for_update()`.** El candado a nivel
+    de fila lo toma MySQL y sí funciona sin esta opción: la fila se bloquea y `FOR UPDATE` sí lee el
+    último committeado *a nivel de SQL*. El problema está una capa arriba, en el mapa de identidad
+    de SQLAlchemy, y es sutil: **no** es que la pre-comprobación de `guardar_importadas` dentro de
+    esta misma llamada deje `cabecera` cacheada para cuando `_escribir` la vuelva a pedir —
+    `obtener()` siempre convierte la fila a `TarifaGuardada` y suelta el objeto ORM, así que sin
+    ninguna otra referencia Python lo recolecta antes de que se llegue aquí, y la siguiente consulta
+    de todos modos construye un objeto nuevo con datos frescos (verificado empíricamente: dos
+    lecturas sucesivas sin retener nada entre medias devuelven objetos con `id()` distintos). El
+    riesgo real es que **algo más**, en la misma sesión, sí retenga viva la entidad ORM de esta
+    misma clave primaria —`db.get(TarifaIsr, ...)` usado directamente en vez de pasar por
+    `obtener()`, un endpoint que la guarda para otra cosa dentro del mismo request—: en ese caso,
+    `db.scalar(...)` devolvería ese objeto vivo tal cual, con los atributos de cuando se cargó, y
+    **no lo actualizaría** con la fila fresca que la consulta acaba de traer. `populate_existing=True`
+    fuerza esa actualización siempre, sin depender de que nada quede vivo por accidente ni de que el
+    recolector de basura de CPython haga la limpieza a tiempo — apoyar una garantía de corrección en
+    un detalle de implementación del recolector sería exactamente el tipo de fragilidad silenciosa
+    que este módulo existe para evitar en otras partes. Sin esta opción, el
+    `if ... cabecera.origen is OrigenTarifa.MANUAL` de abajo podría comparar contra un valor leído
+    antes de tomar el candado — exactamente el hueco que esta comprobación existe para cerrar.
+    Verificado con `test_la_reverificacion_bajo_candado_ve_el_ultimo_estado_no_uno_cacheado`, que
+    retiene deliberadamente el objeto vivo (con `db.get`) para reproducir el caso.
     """
     reglas.validar(list(renglones))
 
@@ -167,6 +217,7 @@ async def _escribir(
         select(TarifaIsr)
         .where(TarifaIsr.ejercicio == ejercicio, TarifaIsr.periodicidad == periodicidad)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     huella_nueva = reglas.huella(list(renglones))
 
@@ -174,7 +225,7 @@ async def _escribir(
         cabecera = TarifaIsr(ejercicio=ejercicio, periodicidad=periodicidad)
         db.add(cabecera)
     else:
-        anteriores = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad)
+        anteriores = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad, bajo_candado=True)
         cambio = reglas.huella(anteriores) != huella_nueva
         if proteger_correccion_manual and cabecera.origen is OrigenTarifa.MANUAL and cambio:
             raise CorreccionManualProtegida(
@@ -339,7 +390,12 @@ async def confirmar(
 
     El `FOR UPDATE` toma el mismo candado que `_escribir`, así que una escritura simultánea de la
     misma tarifa espera en vez de colarse entre la comparación de la huella y la escritura de la
-    confirmación.
+    confirmación. Lleva también `populate_existing=True`, por el mismo motivo que `_escribir` (ver su
+    docstring para el detalle completo): si **algo en la misma sesión retiene viva** la entidad ORM
+    de esta tarifa —no basta con haberla leído antes con `obtener()`, que suelta el objeto ORM al
+    convertirlo; hace falta que algo más la mantenga referenciada—, sin esta opción `db.scalar(...)`
+    devolvería ese objeto vivo tal cual, y la comparación de huella de abajo aceptaría una
+    confirmación contra datos viejos — precisamente lo que esta función existe para impedir.
 
     No escribe bitácora ni hace `commit`: quien llama lo hace en la misma transacción.
     """
@@ -347,13 +403,14 @@ async def confirmar(
         select(TarifaIsr)
         .where(TarifaIsr.ejercicio == ejercicio, TarifaIsr.periodicidad == periodicidad)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if cabecera is None:
         raise NoEncontrada(
             f"No hay ninguna tarifa {periodicidad.value} de {ejercicio}. Impórtala o captúrala antes de confirmarla."
         )
 
-    renglones = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad)
+    renglones = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad, bajo_candado=True)
     if reglas.huella(renglones) != huella_revisada:
         raise ValorCambio(
             f"La tarifa {periodicidad.value} de {ejercicio} cambió mientras la revisabas. "
@@ -377,11 +434,18 @@ async def borrar(db: AsyncSession, *, ejercicio: int, periodicidad: Periodicidad
     **Se rechaza sobre una tarifa confirmada** (`YaConfirmada`): borrarla la haría desaparecer sin
     sustituto y convertiría un cálculo que funcionaba en un cálculo ausente, sin explicación. Para
     reemplazar una tarifa confirmada, se corrige a mano o se reimporta; no se borra primero.
+
+    `populate_existing=True` en la consulta, otra vez por el mapa de identidad (ver el docstring de
+    `_escribir` para el argumento completo): si algo en la misma sesión retiene viva la entidad ORM
+    de esta tarifa como no confirmada y alguien más la confirmó mientras tanto, sin esto
+    `cabecera.confirmado_en` seguiría viéndose `None` aquí y el borrado pasaría sobre una tarifa que
+    en la base ya está confirmada.
     """
     cabecera = await db.scalar(
         select(TarifaIsr)
         .where(TarifaIsr.ejercicio == ejercicio, TarifaIsr.periodicidad == periodicidad)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if cabecera is None:
         raise NoEncontrada(f"No hay ninguna tarifa {periodicidad.value} de {ejercicio} que borrar.")
