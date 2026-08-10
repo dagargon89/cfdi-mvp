@@ -68,6 +68,22 @@ def test_la_tarifa_quincenal_coincide_renglon_por_renglon_con_el_documento(
     )
 
 
+def test_la_tarifa_anual_2025_coincide_renglon_por_renglon_con_el_documento(
+    extraidas: list[anexo8.TarifaExtraida],
+) -> None:
+    """De las dos anuales, la 2025 es la única que distingue una extracción correcta de la trampa
+    del art. 126 (enajenación de inmuebles): esa tabla ajena tiene el mismo fundamento de ejercicio
+    que la anual 2026 y cifras muy parecidas en los primeros renglones, pero no comparte ninguna con
+    la 2025. Sin esta prueba, un ancla que enganchara la tabla equivocada podría pasar las otras seis
+    pruebas sin que ninguna lo note."""
+    a = next(x for x in extraidas if x.periodicidad is PeriodicidadTarifa.EJERCICIO and x.ejercicio == 2025)
+    assert len(a.renglones) == 11
+    assert a.renglones[0] == t.Renglon(1, Decimal("0.01"), Decimal("8952.49"), Decimal("0.00"), Decimal("0.0192"))
+    assert a.renglones[-1] == t.Renglon(
+        11, Decimal("4511707.38"), None, Decimal("1414947.85"), Decimal("0.3500")
+    )
+
+
 def test_el_pie_de_pagina_del_dof_no_corta_la_tabla(extraidas: list[anexo8.TarifaExtraida]) -> None:
     """'Domingo 28 de diciembre de 2025 DIARIO OFICIAL' aparece entre el renglón 5 y el 6 de la
     tarifa quincenal. Si el extractor se detuviera ahí, la tarifa saldría con 5 renglones, fallaría
@@ -122,11 +138,36 @@ def test_un_pdf_sin_texto_se_rechaza_diciendo_que_parece_escaneo() -> None:
         anexo8.extraer(vacio)
 
 
-def test_un_pdf_que_no_es_el_anexo_8_no_importa_nada_y_dice_que_esperaba() -> None:
-    """Se le pasa un PDF real del propio repositorio que no es el Anexo 8."""
+def test_un_archivo_que_no_es_un_pdf_se_rechaza_diciendo_que_no_pudo_abrirlo() -> None:
+    """Se le pasa un archivo real del propio repositorio que ni siquiera es un PDF (es Markdown).
+    Este es el camino de "no pude abrir el archivo", distinto del de "sí lo abrí, pero no es el
+    Anexo 8" que cubre la prueba siguiente."""
     otro = Path(__file__).parent.parent / "docs" / "superpowers" / "specs" / "2026-08-10-tarifa-isr-design.md"
-    with pytest.raises(anexo8.DocumentoInvalido, match="Anexo 8"):
+    with pytest.raises(anexo8.DocumentoInvalido, match="No pude abrir"):
         anexo8.extraer(otro.read_bytes())
+
+
+def test_un_pdf_legible_que_no_es_el_anexo_8_no_importa_nada_y_dice_que_esperaba() -> None:
+    """Un PDF real y legible (no un escaneo, no un archivo corrupto) pero que no trae ninguna tabla
+    de sueldos: el error de usuario más probable, y el único de los tres que antes no tenía
+    cobertura propia (los dos anteriores se distinguían de este solo porque su mensaje también
+    contiene la palabra "Anexo 8", no porque la prueba ejercitara este camino)."""
+    # PDF válido con texto de sobra (>500 caracteres) pero sin ninguna tarifa: cualquier documento
+    # legible que no sea el Anexo 8 cae aquí.
+    relleno = "Este documento no es el Anexo 8 de la Resolucion Miscelanea Fiscal. " * 10
+    pdf_sin_tarifas = (
+        b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 4 0 R>>>>"
+        b"/Contents 5 0 R>>endobj\n"
+        b"4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n"
+        b"5 0 obj<</Length " + str(len(relleno) + 40).encode() + b">>stream\n"
+        b"BT /F1 10 Tf 20 700 Td (" + relleno.encode("latin-1") + b") Tj ET\n"
+        b"endstream\nendobj\n"
+        b"trailer<</Root 1 0 R>>\n%%EOF\n"
+    )
+    with pytest.raises(anexo8.DocumentoInvalido, match="No encontré ninguna tarifa"):
+        anexo8.extraer(pdf_sin_tarifas)
 
 
 def test_un_archivo_mas_grande_que_el_limite_se_rechaza_antes_de_abrirlo() -> None:

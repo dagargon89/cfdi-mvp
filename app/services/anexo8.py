@@ -31,13 +31,17 @@ Las tres trampas del documento real, verificadas contra el Anexo 8 de 2026
 
 Y dos más, encontradas al correr el extractor contra el documento completo en vez de un fragmento:
 
-4. **El margen entre el fundamento y las columnas no puede ser generoso.** En el índice, la mención
-   del rubro C.I ("... ejercicio de 2025 ...") queda a varios cientos de caracteres de las columnas
-   de la tabla del art. 126 (enajenación de inmuebles), que no es la tabla anual. Un margen amplio
-   la cuela como si fuera la tabla correcta; ver `_MARGEN_HASTA_COLUMNAS`.
-5. **El primer renglón de las dos tablas anuales (rubro C.I) publica su cuota fija como "0" a
-   secas, sin los dos decimales que trae el resto de las tablas** ("0.01 10,135.11 0 1.92", no
-   "... 0.00 1.92"). Es así en el documento oficial, no un defecto de la extracción; ver `_RENGLON`.
+4. **La mención del índice de una tabla puede tener otra tabla —ajena— cerca.** En el índice, la
+   mención del rubro C.I. ("... ejercicio de 2025 ...") queda, más adelante en ese mismo párrafo del
+   índice, a algunos cientos de caracteres de las columnas de la tabla del art. 126 (enajenación de
+   inmuebles), que no es la tabla anual. Buscar el símbolo `$ $ $ %` sin exigir el resto del
+   encabezado ("Limite inferior Limite superior Cuota fija...") y sin acotar la distancia lo
+   suficiente cuela esa tabla ajena como si fuera la correcta; ver el docstring de `_COLUMNAS`.
+5. **El primer renglón de la tabla anual del ejercicio 2026 (rubro C.I) publica su cuota fija como
+   "0" a secas, sin los dos decimales que trae el resto de las tablas** ("0.01 10,135.11 0 1.92",
+   no "... 0.00 1.92"). La tabla anual del ejercicio 2025 sí usa "0.00" como todas las demás; es
+   solo la de 2026 la que lo hace distinto. Es así en el documento oficial, no un defecto de la
+   extracción; ver `_RENGLON`.
 
 Y una última, que es la más peligrosa porque las pruebas de validación no la ven: **un Anexo 8
 contiene tarifas de dos ejercicios**. El de 2026 trae la anual del ejercicio 2025 en su rubro C.I.
@@ -48,7 +52,6 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
@@ -60,15 +63,6 @@ from app.services import tarifa_isr
 
 MAXIMO_BYTES: Final = 10 * 1024 * 1024
 MAXIMO_PAGINAS: Final = 100
-
-# Cuánto texto puede haber entre el fundamento citado y su bloque de columnas. Toda tabla real del
-# Anexo deja exactamente el renglón "Limite inferior Limite superior Cuota fija Por ciento..." de
-# por medio: ~136 caracteres. Un margen amplio (se probó con 600) es la trampa: en el índice, la
-# mención del rubro C.I ("ejercicio de 2025") queda a 567 caracteres de las columnas de la tabla
-# de enajenación de inmuebles del art. 126 —una tarifa que no es de nómina—, y un margen generoso
-# la cuela como si fuera la tabla anual. 200 deja holgura sobre el caso real (136) sin alcanzar
-# esas columnas ajenas.
-_MARGEN_HASTA_COLUMNAS: Final = 200
 
 
 class DocumentoInvalido(ValueError):
@@ -159,9 +153,30 @@ _ANCLAS: Final[tuple[_Ancla, ...]] = (
     ),
 )
 
-# Encabezado de columnas de cualquier tabla del Anexo. Marca dónde empiezan los renglones y, sobre
-# todo, distingue una tabla de verdad de su mención en el índice.
-_COLUMNAS: Final = re.compile(r"\$ \$ \$ %")
+# Encabezado de columnas de una tabla real. No es solo el símbolo "$ $ $ %" —aparece 31 veces en el
+# documento, delante de tablas de nómina y de las que no lo son, y por sí solo no dice de cuál
+# tabla es—, sino la fila completa que lo antecede: "Limite inferior Limite superior Cuota fija Por
+# ciento para aplicarse sobre el excedente del limite inferior", verificada como idéntica delante
+# de las 31 tablas del documento. Esa frase completa es la que distingue una tabla de verdad de su
+# mención en el índice, no la distancia a la que aparece.
+#
+# Sigue habiendo un límite de caracteres antes de la frase (no puede haber ninguno: una búsqueda
+# sin cota siempre encuentra ALGUNA tabla más adelante en el documento, sea la que sea —comprobado:
+# desde la mención del índice de la tarifa diaria, sin cota, la primera coincidencia está a 11,160
+# caracteres—). Pero ya no es la única defensa ni una cuestión de calibrarlo fino: medido contra
+# las 7 tablas reales, entre el fundamento y esta frase solo cabe la cola de la cita legal (", asi
+# como la regla 3.12.2.", 28 caracteres) y, si el salto de página cae ahí, el pie del DOF ("Domingo
+# 28 de diciembre de 2025 DIARIO OFICIAL", 47 caracteres) — nunca los dos a la vez en este
+# documento, pero 100 cubre ambos con holgura. Las dos coincidencias falsas del índice (rubro C.I.)
+# quedan a 296 y 459 caracteres de la tabla ajena del art. 126 que las sigue: casi tres veces el
+# límite, no 18 caracteres de por medio como con el margen anterior (200 contra un real de 136 y un
+# falso de 404).
+_MAX_PREFIJO_ANTES_DE_COLUMNAS: Final = 100
+_COLUMNAS: Final = re.compile(
+    r".{0," + str(_MAX_PREFIJO_ANTES_DE_COLUMNAS) + r"}?Limite inferior Limite superior Cuota fija "
+    r"Por ciento para aplicarse sobre el excedente del limite inferior \$ \$ \$ %",
+    re.S,
+)
 
 # Un renglón: límite inferior, límite superior (o "En adelante"), cuota fija y porcentaje.
 #
@@ -235,29 +250,46 @@ def _renglones_desde(texto: str, inicio: int) -> tuple[tarifa_isr.Renglon, ...]:
 
 
 def extraer(pdf: bytes) -> list[TarifaExtraida]:
-    """Las tarifas de sueldos del documento. Lanza `DocumentoInvalido` si no hay ninguna.
+    """Las tarifas de sueldos del documento. Lanza `DocumentoInvalido` si no hay ninguna, o si dos
+    tarifas salieron con la misma clave (ejercicio, periodicidad).
 
     Cada tarifa extraída pasa `tarifa_isr.validar` aquí mismo: si una falla, **no se devuelve
     ninguna**. Un Anexo 8 a medio cargar deja un estado que después nadie sabe interpretar, porque
     no se distingue de un documento que legítimamente traía menos tablas.
+
+    La comprobación de clave repetida no es una precaución de más: es la red que atrapa ruidosamente
+    un fallo del ancla que, de otro modo, sería silencioso. Si `_COLUMNAS` alguna vez enganchara la
+    tabla de otro rubro (ver su docstring), esa tabla ajena sale con el ejercicio y la periodicidad
+    correctos —los toma del propio fundamento que sí matcheó— pero con los renglones de otra tarifa,
+    y esa combinación ya existe en la lista: dos tarifas con la misma clave.
     """
     texto = _texto_plano(pdf)
     encontradas: list[TarifaExtraida] = []
+    vistas: set[tuple[int, PeriodicidadTarifa]] = set()
 
     for ancla in _ANCLAS:
         for m in ancla.patron.finditer(texto):
-            ventana = texto[m.end() : m.end() + _MARGEN_HASTA_COLUMNAS]
-            columnas = _COLUMNAS.search(ventana)
+            columnas = _COLUMNAS.match(texto, m.end())
             if columnas is None:
-                # La mención del índice: no tiene tabla detrás. No es un error del documento.
+                # La mención del índice: no tiene su propia tabla inmediatamente detrás. No es un
+                # error del documento, es su índice.
                 continue
-            renglones = _renglones_desde(texto, m.end() + columnas.end())
+            renglones = _renglones_desde(texto, columnas.end())
             if not renglones:
                 continue
             tarifa_isr.validar(list(renglones))
+            ejercicio = int(m.group("ejercicio"))
+            clave = (ejercicio, ancla.periodicidad)
+            if clave in vistas:
+                raise DocumentoInvalido(
+                    f"Encontré más de una tarifa {ancla.periodicidad.value.lower()} del ejercicio "
+                    f"{ejercicio} en este archivo. Un Anexo 8 no trae dos veces la misma tabla; revisa "
+                    "que el PDF no esté dañado, duplicado o mezclado con otro documento."
+                )
+            vistas.add(clave)
             encontradas.append(
                 TarifaExtraida(
-                    ejercicio=int(m.group("ejercicio")),
+                    ejercicio=ejercicio,
                     periodicidad=ancla.periodicidad,
                     encabezado=" ".join(m.group(0).split())[:1000],
                     renglones=renglones,

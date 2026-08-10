@@ -19,7 +19,7 @@ dependencies = [
     "python-multipart>=0.0.12,<1",
     "satcfdi>=26,<27",
     "openpyxl>=3.1,<4",
-    "pypdfium2>=4,<6",
+    "pypdfium2>=5,<6",
     # `app/services/configuracion_fiscal.py` importa `yaml` directamente. Ya venía
     # instalado como dependencia transitiva, pero una transitiva desaparece sin aviso
     # cuando cambia el paquete que la arrastraba, y el cargador de semillas se rompería.
