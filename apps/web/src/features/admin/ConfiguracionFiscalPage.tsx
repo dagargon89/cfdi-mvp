@@ -113,6 +113,19 @@ const CATALOGO: Record<string, FichaClave> = {
     deDondeSale: 'Decreto del subsidio para el empleo, publicado en el Diario Oficial de la Federación.',
     siFalta: 'No se puede saber si un subsidio de cero en un recibo es correcto o es un error.',
   },
+  // Clave sintética de la alarma de vigencia (`CLAVE_TARIFA_ISR` en
+  // `app/services/sincronizacion_fiscal.py`), no una fila de `param_fiscal` — por eso nunca
+  // aparece en `claves`/`clavesSinValor` (esas solo traen claves reales del catálogo de la
+  // pantalla de arriba) y esta entrada solo la usa `FilaAlerta` para no dejar el chip de la
+  // alarma con el nombre crudo `TARIFA_ISR` junto al texto genérico del motivo.
+  TARIFA_ISR: {
+    nombre: 'Tarifa del ISR de sueldos y salarios',
+    grupo: 'Otros valores',
+    queEs: 'La tabla de rangos, cuota fija y tasa con la que se calcula el ISR de cada recibo de nómina (Anexo I.1 de la LISR).',
+    cuandoCambia: 'Cada año, en el Anexo 8 de la Resolución Miscelánea Fiscal, publicado en el Diario Oficial de la Federación a finales de diciembre.',
+    deDondeSale: 'El PDF del Anexo 8 se importa desde esta misma pantalla, en la sección "Tarifa del ISR de sueldos y salarios" más abajo.',
+    siFalta: 'Los recibos de nómina no se pueden comprobar contra la tarifa vigente ni calcular con ella hasta que se importe y se confirme.',
+  },
 };
 
 const ORDEN_GRUPOS = [GRUPO_UMA, GRUPO_SM, GRUPO_TC, GRUPO_SUBSIDIO];

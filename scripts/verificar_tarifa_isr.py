@@ -328,9 +328,9 @@ async def _paso_6_y_7_descartar_reimportar_confirmar(
     if len(resultado.tarifas) != 7:
         fallas.append(f"Tras descartar y reimportar se obtuvieron {len(resultado.tarifas)} tarifas, se esperaban 7")
 
-    ausente_antes = await repo.vigente(db, ejercicio=EJERCICIO, periodicidad=PeriodicidadTarifa.DIAS_15)
-    print(f"`repo.vigente()` antes de confirmar: {'presente (defecto)' if ausente_antes is not None else 'ausente'}")
-    if ausente_antes is not None:
+    vigente_antes = await repo.vigente(db, ejercicio=EJERCICIO, periodicidad=PeriodicidadTarifa.DIAS_15)
+    print(f"`repo.vigente()` antes de confirmar: {'presente (defecto)' if vigente_antes is not None else 'ausente'}")
+    if vigente_antes is not None:
         fallas.append("`repo.vigente` devolvió una tarifa antes de confirmarla; debería devolver None")
 
     quincenal = next(
@@ -577,6 +577,13 @@ async def main() -> int:
         alertas_antes = await sincronizacion.alertas_de_vigencia(db, date.today())
     fallas = _paso_9a_alerta_antes(alertas_antes)
 
+    # Todo lo que crea datos de prueba (pasos 1-8 y 10, más la lectura de la alarma "después") va
+    # en este `try`, y la limpieza del paso 11 va en su `finally` — no después del bloque, sino
+    # *dentro* de él. La diferencia importa: si algo de aquí lanza una excepción no prevista (un
+    # bug real, un corte transitorio de MySQL), el `finally` corre de todos modos y las 7
+    # cabeceras con sus 77 renglones no quedan abandonadas en la base real sin ningún aviso.
+    # Comprobado inyectando un `raise` temporal justo antes de la limpieza y confirmando por SQL
+    # que la base queda igual de limpia (ver el reporte de la Task 12).
     listado_final: ImportacionTarifasOut | None = None
     try:
         async with SessionLocal() as db:
@@ -596,16 +603,16 @@ async def main() -> int:
                 fallas += _paso_8_comprobacion(listado_final)
 
             fallas += await _paso_10_hoja_pdf(db)
+
+        async with SessionLocal() as db:
+            alertas_despues = await sincronizacion.alertas_de_vigencia(db, date.today())
+        fallas += _paso_9b_alerta_despues(alertas_despues)
     except Exception as exc:  # noqa: BLE001 - cualquier excepción no prevista es un defecto que reportar, no esconder
         traceback.print_exc()
         fallas.append(f"Excepción no manejada durante la verificación: {type(exc).__name__}: {exc}")
-
-    async with SessionLocal() as db:
-        alertas_despues = await sincronizacion.alertas_de_vigencia(db, date.today())
-    fallas += _paso_9b_alerta_despues(alertas_despues)
-
-    async with SessionLocal() as db:
-        fallas += await _paso_11_revertir(db, fotografia_antes)
+    finally:
+        async with SessionLocal() as db:
+            fallas += await _paso_11_revertir(db, fotografia_antes)
 
     if fallas:
         print("\nFALLAS:")
