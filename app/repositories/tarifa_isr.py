@@ -6,19 +6,29 @@
 
 Ninguna función hace `commit`: quien llama escribe la bitácora en la misma transacción (regla 8).
 
-Los cinco casos de reimportación (§5.5 del diseño), que las pruebas de este módulo fijan:
+Los cinco casos de reimportación (§5.5 del diseño), que las pruebas de este módulo fijan, más un
+sexto que la práctica exige:
 
 1. Reimportar el mismo documento (mismos renglones) es idempotente: no hay tarifa previa, o la
    hay y la huella no cambió.
 2. Reimportar con renglones distintos sobre una tarifa **confirmada** limpia la confirmación:
    un valor distinto es un valor nuevo y necesita que alguien lo vuelva a mirar.
 3. Reimportar sobre una tarifa **corregida a mano** que dice algo distinto se rechaza entero
-   (`CorreccionManualProtegida`): no se pisa una corrección con un documento.
+   (`CorreccionManualProtegida`): no se pisa una corrección con un documento. Se comprueba dos
+   veces: antes de escribir nada (para que el mensaje nombre la tarifa protegida, no la que se
+   estaba escribiendo) y otra vez dentro de `_escribir`, ya bajo el candado `FOR UPDATE` — la
+   primera es una lectura simple que puede quedarse con un snapshot viejo; la segunda es la que
+   de verdad protege contra una carrera.
 4. Corregir a mano marca `origen: MANUAL` y limpia la confirmación, siempre — no solo cuando
    los renglones cambian, porque el acto de corregir ya es una afirmación de que el dato
    anterior no era el bueno.
 5. Reimportar con los mismos renglones sobre una tarifa confirmada conserva la confirmación:
    nada que revisar de nuevo.
+6. Reimportar sobre una corrección manual **con la misma huella** (el documento coincide número
+   por número con lo que se corrigió a mano) no se rechaza: el `origen` pasa de `MANUAL` a
+   `IMPORTADA` en silencio. Es intencional — ya no hay nada que proteger, los renglones son
+   idénticos — y a partir de ahí el documento vuelve a ser la fuente. Si los dos difieren, gana
+   el caso 3.
 """
 
 from __future__ import annotations
@@ -133,6 +143,7 @@ async def _escribir(
     fuente: str,
     sha256: str | None,
     encabezado: str,
+    proteger_correccion_manual: bool = False,
 ) -> TarifaGuardada:
     """Única puerta de escritura. Valida, decide si la confirmación sobrevive, reemplaza los
     renglones.
@@ -140,6 +151,15 @@ async def _escribir(
     **Se valida la tarifa completa**, no el renglón que cambió: editar un `limite_superior` rompe la
     continuidad con su vecino, y validar solo lo editado dejaría pasar justo el hueco que ese cambio
     abrió.
+
+    Con `proteger_correccion_manual=True` (lo pone `guardar_importadas`, nunca `guardar_manual`;
+    mismo nombre y semántica que en `configuracion_fiscal.guardar_param_fiscal`) **vuelve a
+    comprobar el origen aquí, después de tomar el candado**, y no solo antes de llamar. La
+    pre-comprobación de `guardar_importadas` es una lectura simple: en InnoDB lee el snapshot de la
+    transacción, no el último committeado. Si entre esa lectura y este `FOR UPDATE` otra
+    transacción convirtió la tarifa en `MANUAL` con una huella distinta, la pre-comprobación no lo
+    vería, y sin esta segunda comprobación **bajo candado** la importación la pisaría en silencio —
+    justo el invariante que existe para impedirlo.
     """
     reglas.validar(list(renglones))
 
@@ -155,7 +175,14 @@ async def _escribir(
         db.add(cabecera)
     else:
         anteriores = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad)
-        if reglas.huella(anteriores) != huella_nueva:
+        cambio = reglas.huella(anteriores) != huella_nueva
+        if proteger_correccion_manual and cabecera.origen is OrigenTarifa.MANUAL and cambio:
+            raise CorreccionManualProtegida(
+                f"Corregiste a mano la tarifa {periodicidad.value} de {ejercicio} y el documento dice "
+                "otra cosa. No la sobreescribí. Si el documento nuevo es el bueno, descarta la tarifa "
+                "y vuelve a importar."
+            )
+        if cambio:
             # Una cifra distinta es una tarifa nueva y necesita que alguien la vuelva a mirar. Sin
             # esto, una resolución posterior del SAT activaría cifras que nadie revisó.
             cabecera.confirmado_por = None
@@ -221,6 +248,7 @@ async def guardar_importadas(
             fuente=fuente,
             sha256=sha256,
             encabezado=e.encabezado,
+            proteger_correccion_manual=True,
         )
         for e in extraidas
     ]

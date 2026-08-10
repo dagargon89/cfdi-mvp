@@ -246,7 +246,77 @@ async def test_guardar_importadas_es_todo_o_nada(db: AsyncSession) -> None:
 
     with pytest.raises(repo.CorreccionManualProtegida):
         await repo.guardar_importadas(db, [buena, protegida], fuente="f", sha256=SHA_A)
+
+    # Se comprueba ANTES del `rollback`, dentro de la misma transacción: los `flush()` pendientes
+    # ya son visibles aquí. Una implementación entrelazada (comprobar y escribir cada tarifa en el
+    # mismo bucle, en vez de comprobarlas todas antes de escribir la primera) habría escrito
+    # `buena` — que va primero en la lista — antes de llegar a `protegida` y descubrir el choque.
+    # Comprobar solo después del `rollback` no distinguiría los dos diseños: los flushes de una
+    # transacción no comprometida se revierten sin importar en qué orden se hicieron.
+    assert await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15) is None
+
     await db.rollback()
 
-    # La buena tampoco quedó.
+    # Y después del rollback, tampoco: por si acaso.
     assert await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15) is None
+
+
+async def test_escribir_reverifica_la_proteccion_bajo_candado(db: AsyncSession) -> None:
+    """Cierra el hueco entre la pre-comprobación de `guardar_importadas` (una lectura simple, que en
+    InnoDB ve el snapshot de la transacción) y la escritura real bajo `FOR UPDATE` (que siempre lee
+    el último committeado). Si el origen se volviera `MANUAL` con una huella distinta entre esos dos
+    momentos, solo la comprobación de dentro de `_escribir` la vería. No hace falta simular
+    concurrencia real: basta con que la protección siga aplicando al llegar a `_escribir` con
+    `proteger_correccion_manual=True` sobre una fila `MANUAL` que ya está ahí con otra huella."""
+    await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones("8.95"),
+        fuente="corregido a mano",
+    )
+    await db.commit()
+
+    with pytest.raises(repo.CorreccionManualProtegida):
+        await repo._escribir(
+            db,
+            ejercicio=2026,
+            periodicidad=PeriodicidadTarifa.DIAS_15,
+            renglones=_renglones(),
+            origen=OrigenTarifa.IMPORTADA,
+            fuente="f",
+            sha256=SHA_A,
+            encabezado="x",
+            proteger_correccion_manual=True,
+        )
+    await db.rollback()
+
+    fila = await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15)
+    assert fila is not None
+    assert fila.origen is OrigenTarifa.MANUAL
+    assert fila.renglones[1].cuota_fija == Decimal("8.95")
+
+
+async def test_reimportar_con_la_misma_huella_que_la_correccion_manual_actualiza_el_origen(
+    db: AsyncSession,
+) -> None:
+    """Sexto caso (ver el docstring del módulo): el documento reimportado coincide número por número
+    con lo que se corrigió a mano. Ya no hay nada que proteger, así que el origen pasa de `MANUAL` a
+    `IMPORTADA`: de ahora en adelante el documento vuelve a ser la fuente."""
+    await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones(), fuente="mano",
+    )
+    await db.commit()
+
+    guardadas = await repo.guardar_importadas(db, [_extraida()], fuente="f", sha256=SHA_A)
+    await db.commit()
+    assert guardadas[0].origen is OrigenTarifa.IMPORTADA
+
+
+async def test_confirmar_una_tarifa_inexistente_se_rechaza(db: AsyncSession) -> None:
+    with pytest.raises(repo.NoEncontrada):
+        await repo.confirmar(
+            db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, huella_revisada="0" * 64, actor="quien",
+        )
+
+
+async def test_borrar_una_tarifa_inexistente_se_rechaza(db: AsyncSession) -> None:
+    with pytest.raises(repo.NoEncontrada):
+        await repo.borrar(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15)
