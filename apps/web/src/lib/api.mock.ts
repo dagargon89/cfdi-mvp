@@ -833,13 +833,16 @@ function escalaFactor(valor: string | null): string | null {
 // --- tarifa del ISR (doc 05 §8bis, tarifa ISR): las MISMAS reglas estructurales del Anexo I.1,
 // no una versión relajada — mismo criterio que la configuración fiscal de arriba. -------------
 
+// Copiadas literalmente de `_ETIQUETAS_TARIFA` en `app/api/v1/configuracion.py`: el servidor es
+// la autoridad de este texto (la etiqueta viaja ya traducida en `TarifaIsr.etiqueta`, el
+// frontend no la construye), así que el doble no puede mejorarlas ni acortarlas por su cuenta.
 const ETIQUETAS_PERIODICIDAD_TARIFA: Record<PeriodicidadTarifaIsr, string> = {
-  DIARIA: 'Diaria',
-  DIAS_7: 'Cada 7 días',
-  DIAS_10: 'Cada 10 días',
+  DIARIA: 'Diaria (por día trabajado)',
+  DIAS_7: 'Semanal (7 días)',
+  DIAS_10: 'Decenal (10 días)',
   DIAS_15: 'Quincenal (15 días)',
   MENSUAL: 'Mensual',
-  EJERCICIO: 'Anual (del ejercicio)',
+  EJERCICIO: 'Anual (cálculo del ejercicio)',
 };
 
 /** Claves de `c_PeriodicidadPago` que la nómina real usa y para las que el Anexo 8 no publica
