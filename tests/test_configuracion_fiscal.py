@@ -515,3 +515,38 @@ async def test_una_duda_nueva_en_la_semilla_devuelve_la_marca_a_la_cola(db: Asyn
     await _confirmar()
     marca = await _recargar(base + duda)
     assert marca.confirmado_en is not None, "recargar sin cambios es idempotente"
+
+
+# --------------------------------------------------------------------------------------
+# Tarea 7: subsidio al empleo y UMA de 2025
+# --------------------------------------------------------------------------------------
+
+
+async def test_las_claves_del_subsidio_se_pueden_guardar(db: AsyncSession) -> None:
+    """Sin estar en `CLAVES_PARAM_FISCAL` se rechazan, y el subsidio no se podría configurar."""
+    fila = await cfg.guardar_param_fiscal(
+        db, clave="SUBSIDIO_FACTOR_UMA", valor=Decimal("0.1502"), vigencia_desde=date(2026, 2, 1),
+        origen=OrigenValor.SEMILLA, fuente="DOF 31-12-2025",
+    )
+    assert fila.confirmado_en is None
+
+
+async def test_el_subsidio_de_enero_usa_el_tramo_de_enero(db: AsyncSession) -> None:
+    """El factor cambia junto con la UMA, así que enero de 2026 tiene su propio tramo. Es lo que hace
+    que un recibo de enero no se calcule con el factor de febrero."""
+    db.add(_param("SUBSIDIO_FACTOR_UMA", "0.1559", date(2026, 1, 1), hasta=date(2026, 1, 31), confirmado=True))
+    db.add(_param("SUBSIDIO_FACTOR_UMA", "0.1502", date(2026, 2, 1), confirmado=True))
+    await db.commit()
+    assert await cfg.valor_vigente(db, "SUBSIDIO_FACTOR_UMA", date(2026, 1, 20)) == Decimal("0.155900")
+    assert await cfg.valor_vigente(db, "SUBSIDIO_FACTOR_UMA", date(2026, 2, 1)) == Decimal("0.150200")
+
+
+async def test_la_uma_mensual_de_enero_de_2026_existe_tras_cargar_la_semilla(db: AsyncSession) -> None:
+    """Sin la UMA de 2025 el subsidio de enero de 2026 no es calculable: `UMA_MENSUAL` solo arranca el
+    1-feb-2026. Declararlo como limitación era una trampa para quien tiene que explicar por qué los
+    recibos de enero no salen."""
+    await cfg.cargar_desde_yaml(db, Path("config/fiscal/param_fiscal.yaml"))
+    await db.commit()
+    # Hay un tramo cuya vigencia cubre enero de 2026 (arranca en feb-2025 y cierra en ene-2026).
+    tramo = await cfg._tramo(db, "UMA_MENSUAL", date(2026, 1, 15), confirmado=False)
+    assert tramo is not None

@@ -103,12 +103,17 @@ MotivoAlerta = Literal[
 # leer ninguna página para saber que el 6 de agosto de 2026 la UMA tuvo que haber cambiado el 1
 # de febrero. Solo entran valores que cambian por decreto en fecha fija (ver el docstring: el
 # tipo de cambio queda fuera a propósito).
+#
+# El subsidio al empleo entra con (1, 1): el decreto se publica en el DOF a fines de diciembre
+# y aplica desde el 1 de enero del año siguiente, igual que el salario mínimo.
 FECHAS_DE_ACTUALIZACION: Final[dict[str, tuple[int, int]]] = {
     "UMA_DIARIA": (2, 1),
     "UMA_MENSUAL": (2, 1),
     "UMA_ANUAL": (2, 1),
     "SALARIO_MINIMO_GENERAL": (1, 1),
     "SALARIO_MINIMO_ZLFN": (1, 1),
+    "SUBSIDIO_FACTOR_UMA": (1, 1),
+    "SUBSIDIO_TOPE_INGRESO": (1, 1),
 }
 
 # Claves sintéticas de las alertas de maquinaria: no son claves de `param_fiscal` y no colisionan

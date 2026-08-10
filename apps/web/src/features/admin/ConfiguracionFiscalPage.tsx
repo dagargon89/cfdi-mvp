@@ -44,6 +44,7 @@ interface FichaClave {
 const GRUPO_UMA = 'Unidad de Medida y Actualización (UMA)';
 const GRUPO_SM = 'Salarios mínimos';
 const GRUPO_TC = 'Tipo de cambio';
+const GRUPO_SUBSIDIO = 'Subsidio al empleo';
 
 const CATALOGO: Record<string, FichaClave> = {
   UMA_DIARIA: {
@@ -94,9 +95,26 @@ const CATALOGO: Record<string, FichaClave> = {
     deDondeSale: 'Serie SF43718 del Banco de México (se puede sincronizar automáticamente).',
     siFalta: 'Los comprobantes en dólares no se pueden convertir a pesos y quedan fuera de los importes comparables.',
   },
+  SUBSIDIO_FACTOR_UMA: {
+    nombre: 'Subsidio al empleo — porcentaje de la UMA mensual',
+    grupo: GRUPO_SUBSIDIO,
+    queEs: 'El subsidio mensual es este porcentaje de la UMA mensual, para quien tiene derecho a él.',
+    cuandoCambia:
+      'Cada año, el 1 de enero, por decreto. El valor de enero es distinto porque la UMA con la que se calcula cambia después, el 1 de febrero.',
+    deDondeSale: 'Decreto del subsidio para el empleo, publicado en el Diario Oficial de la Federación.',
+    siFalta: 'Los recibos de nómina no pueden calcular el subsidio al empleo y esa columna queda vacía.',
+  },
+  SUBSIDIO_TOPE_INGRESO: {
+    nombre: 'Ingreso mensual máximo para tener derecho al subsidio',
+    grupo: GRUPO_SUBSIDIO,
+    queEs: 'Quien gana más de esta cantidad al mes no tiene subsidio al empleo.',
+    cuandoCambia: 'Cada año, el 1 de enero, junto con el factor del subsidio.',
+    deDondeSale: 'Decreto del subsidio para el empleo, publicado en el Diario Oficial de la Federación.',
+    siFalta: 'No se puede saber si un subsidio de cero en un recibo es correcto o es un error.',
+  },
 };
 
-const ORDEN_GRUPOS = [GRUPO_UMA, GRUPO_SM, GRUPO_TC];
+const ORDEN_GRUPOS = [GRUPO_UMA, GRUPO_SM, GRUPO_TC, GRUPO_SUBSIDIO];
 
 function ficha(clave: string): FichaClave {
   return (

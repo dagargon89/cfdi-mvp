@@ -20,6 +20,11 @@
 #   SALARIO_MINIMO_ZLFN     idem, Zona Libre de la Frontera Norte (aplica a Ciudad Juárez).
 #   TIPO_CAMBIO_USD         DOF, tipo de cambio para solventar obligaciones en moneda
 #                           extranjera. Cambia todos los días hábiles.
+#   SUBSIDIO_FACTOR_UMA     DOF, decreto del subsidio al empleo. Porcentaje de la UMA mensual
+#                           que se paga a quien tiene derecho al subsidio. Cambia el 1 de
+#                           enero, y el tramo de enero suele llevar su propio valor porque la
+#                           UMA con la que se calcula cambia después, el 1 de febrero.
+#   SUBSIDIO_TOPE_INGRESO   idem, ingreso mensual máximo para tener derecho al subsidio.
 #
 # Dos reglas que el cargador hace cumplir y conviene tener presentes al editar este archivo:
 #
@@ -34,13 +39,13 @@
 # La confirmación se hace desde la pantalla de configuración, con nombre y fecha.
 #
 # LO QUE FALTA Y POR QUÉ IMPORTA (detallado en el README):
-#   - Los valores de 2025. La UMA cambia el 1 de febrero, así que del 1 al 31 de enero de
-#     2026 aplica todavía la UMA 2025. Con esta semilla, `valor_vigente('UMA_DIARIA',
-#     2026-01-15)` devuelve `None` y el informe reporta el hueco. Es correcto que lo reporte;
-#     lo que falta es capturar el tramo 2025 (con su `vigencia_hasta: 2026-01-31`).
 #   - `TIPO_CAMBIO_USD`. Cambia todos los días hábiles: no es una semilla, lo llena la
 #     sincronización con el DOF. No se siembra un valor "de ejemplo" a propósito — un tipo de
 #     cambio viejo confirmado es peor que la ausencia del dato.
+#
+# Los tramos de la UMA 2025 y del subsidio al empleo (tarea 7) ya están sembrados, PERO SIGUEN
+# PENDIENTES DE CONFIRMACIÓN como todo lo demás de este archivo: las cifras las valida el dueño
+# del repo contra su fuente antes de confirmarlas desde la pantalla.
 
 param_fiscal:
   # ---------------------------------------------------------------------------------------
@@ -98,3 +103,60 @@ param_fiscal:
     vigencia_desde: 2026-01-01
     vigencia_hasta: null
     fuente: 'DOF 09-12-2025, resolución del CONASAMI (Zona Libre de la Frontera Norte 2026) — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025'
+
+  # ---------------------------------------------------------------------------------------
+  # UMA 2025 — INEGI. Vigente del 1 de febrero de 2025 al 31 de enero de 2026, CERRADA aquí
+  # a propósito (tarea 7): sin cerrar, el cargador rechazaría el solapamiento con el tramo
+  # 2026 de arriba. Sin este tramo, `valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None`
+  # y el subsidio al empleo de enero de 2026 no se puede calcular (depende de la UMA vigente
+  # ese mes, que es la de 2025, no la de 2026).
+  # Misma comprobación de coherencia que la UMA 2026: 113.14 x 30.4 = 3439.456 ~ 3439.46;
+  # 3439.46 x 12 = 41273.52 (exacto).
+  # ---------------------------------------------------------------------------------------
+  - ejercicio: 2025
+    clave: UMA_DIARIA
+    valor: '113.14'
+    vigencia_desde: 2025-02-01
+    vigencia_hasta: 2026-01-31
+    fuente: 'INEGI, comunicado 1/25, publicado en el DOF el 10-01-2025 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2025/uma/uma2025.pdf'
+
+  - ejercicio: 2025
+    clave: UMA_MENSUAL
+    valor: '3439.46'
+    vigencia_desde: 2025-02-01
+    vigencia_hasta: 2026-01-31
+    fuente: 'INEGI, comunicado 1/25, publicado en el DOF el 10-01-2025 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2025/uma/uma2025.pdf (113.14 x 30.4)'
+
+  - ejercicio: 2025
+    clave: UMA_ANUAL
+    valor: '41273.52'
+    vigencia_desde: 2025-02-01
+    vigencia_hasta: 2026-01-31
+    fuente: 'INEGI, comunicado 1/25, publicado en el DOF el 10-01-2025 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2025/uma/uma2025.pdf (3439.46 x 12)'
+
+  # ---------------------------------------------------------------------------------------
+  # Subsidio al empleo (tarea 7). Modelo de monto fijo vigente desde la reforma de 2024: el
+  # subsidio mensual es un porcentaje de la UMA mensual, y solo lo tiene quien no excede un
+  # tope de ingreso.
+  # REVISAR: las dos cifras y las dos vigencias las valida un contador contra el decreto. El
+  # factor cambia junto con la UMA, así que enero lleva su propio tramo (la UMA de enero de
+  # 2026 sigue siendo la de 2025; la de febrero en adelante ya es la de 2026).
+  # ---------------------------------------------------------------------------------------
+  - clave: SUBSIDIO_FACTOR_UMA
+    valor: '0.1559'
+    vigencia_desde: 2026-01-01
+    vigencia_hasta: 2026-01-31
+    ejercicio: 2026
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor aplicable en enero de 2026 (sobre la UMA de 2025). https://www.dof.gob.mx/'
+
+  - clave: SUBSIDIO_FACTOR_UMA
+    valor: '0.1502'
+    vigencia_desde: 2026-02-01
+    ejercicio: 2026
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor sobre la UMA mensual desde el 1-feb-2026. https://www.dof.gob.mx/'
+
+  - clave: SUBSIDIO_TOPE_INGRESO
+    valor: '11492.66'
+    vigencia_desde: 2026-01-01
+    ejercicio: 2026
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — ingreso mensual máximo para tener derecho al subsidio. https://www.dof.gob.mx/'

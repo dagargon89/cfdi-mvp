@@ -101,6 +101,12 @@ _CLAVE_SALARIO_MINIMO: dict[ZonaSalarial, str] = {
 # alguien lo confirma de buena fe, y `valor_vigente(db, "UMA_DIARIA", ...)` devuelve `None`
 # para siempre: el informe reporta "falta la UMA" mientras el valor está capturado y
 # confirmado dos letras más allá. Agregar una clave nueva es agregarla aquí, a propósito.
+#
+#   SUBSIDIO_FACTOR_UMA     Subsidio al empleo, modelo de monto fijo vigente desde la reforma
+#                           de 2024: porcentaje de la UMA mensual que se paga a quien tiene
+#                           derecho al subsidio. Decreto en el DOF, normalmente a fin de año.
+#   SUBSIDIO_TOPE_INGRESO   Ingreso mensual máximo para tener derecho al subsidio al empleo.
+#                           Mismo decreto que el factor.
 CLAVES_PARAM_FISCAL: frozenset[str] = frozenset(
     {
         "UMA_DIARIA",
@@ -109,6 +115,8 @@ CLAVES_PARAM_FISCAL: frozenset[str] = frozenset(
         "SALARIO_MINIMO_GENERAL",
         "SALARIO_MINIMO_ZLFN",
         "TIPO_CAMBIO_USD",
+        "SUBSIDIO_FACTOR_UMA",
+        "SUBSIDIO_TOPE_INGRESO",
     }
 )
 
