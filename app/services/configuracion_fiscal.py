@@ -84,7 +84,7 @@ from app.models.configuracion_fiscal import (
     TablaVacaciones,
 )
 from app.models.empresa import Empresa
-from app.models.enums import BaseExencion, CategoriaProvision, OrigenValor, ZonaSalarial
+from app.models.enums import BaseExencion, CategoriaProvision, EstatusCfdi, OrigenValor, ZonaSalarial
 from app.models.nomina import NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor
 
 _E = TypeVar("_E", bound=Enum)
@@ -377,6 +377,52 @@ async def categorias_de_provision(db: AsyncSession, empresa_id: int) -> dict[tup
         )
     ).all()
     return {(naturaleza, tipo, clave): categoria for naturaleza, tipo, clave, categoria in filas}
+
+
+# --------------------------------------------------------------------------------------
+# Qué periodicidades de CFDI están timbradas de verdad
+# --------------------------------------------------------------------------------------
+
+
+async def periodicidades_pago_observadas(db: AsyncSession) -> list[tuple[str, int]]:
+    """Las claves de `c_PeriodicidadPago` que aparecen de verdad en la nómina timbrada, con
+    cuántos comprobantes trae cada una. Global, no por empresa: a diferencia de
+    `observados_de_empresa`, lo que consume esto (el router de tarifas del ISR y la alarma de
+    vigencia) decide sobre una tabla del Anexo 8 que es política federal, la misma para todas
+    las empresas del Hub.
+
+    Única consulta agregada (regla 11: nunca una por tarifa ni una por recibo), y **única
+    copia** de ella. Antes había dos: la Task 6 la escribió como `_periodicidad_observada`
+    en `app/api/v1/configuracion.py` para elegir qué tarifa es "la que aplica", y su revisión
+    marcó como hallazgo que una tercera lectura (la alarma de vigencia que exige esta tarea)
+    iba a necesitar el mismo universo. Si el criterio de "qué cuenta como timbrada" cambiara
+    en un lado y no en el otro —por ejemplo, si un día se decide excluir también los CFDI de
+    prueba— dos lecturas del mismo dato marcarían tarifas distintas como la vigente, y nadie
+    lo notaría hasta que dos pantallas dijeran cosas distintas. Cada llamador decide qué hacer
+    con el conteo (el router elige la dominante con un desempate; la alarma exige todas las
+    que aparecen), pero los dos parten de la misma fila.
+
+    Vive aquí y no en `app.repositories.tarifa_isr` porque ahí se guardan y leen tarifas por
+    `(ejercicio, periodicidad)`, sin ninguna noción de qué CFDI las respalda; y no en
+    `app.services.tarifa_isr` porque ese módulo es puro (nada de SQLAlchemy) y esta consulta
+    toca la base. Vive aquí, junto a `observados_de_empresa`, porque es la misma familia de
+    pregunta —"qué timbró de verdad la nómina, no qué se podría timbrar"— aunque el alcance
+    sea distinto (global aquí, por empresa allá).
+    """
+    filas = (
+        await db.execute(
+            select(NominaReceptor.periodicidad_pago, func.count())
+            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+            .where(
+                Comprobante.estatus != EstatusCfdi.CANCELADO,
+                NominaReceptor.periodicidad_pago.is_not(None),
+            )
+            .group_by(NominaReceptor.periodicidad_pago)
+        )
+    ).all()
+    # El `WHERE ... is_not(None)` ya lo garantiza en tiempo de ejecución; el filtro es para que
+    # `mypy --strict` sepa que `clave` no es opcional.
+    return [(clave, n) for clave, n in filas if clave is not None]
 
 
 # --------------------------------------------------------------------------------------

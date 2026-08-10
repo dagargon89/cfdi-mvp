@@ -58,7 +58,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
@@ -90,7 +90,6 @@ from app.api.v1.schemas import (
     TarifaIsrRenglonOut,
 )
 from app.informes import catalogos
-from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
     CatalogoPercepcionMarca,
     ConfiguracionEmpresa,
@@ -99,8 +98,7 @@ from app.models.configuracion_fiscal import (
     ParamFiscal,
 )
 from app.models.empresa import Empresa
-from app.models.enums import EstatusCfdi, OrigenTarifa, OrigenValor, PeriodicidadTarifa, RolEmpresa
-from app.models.nomina import NominaReceptor
+from app.models.enums import OrigenTarifa, OrigenValor, PeriodicidadTarifa, RolEmpresa
 from app.models.usuario import Usuario
 from app.repositories import tarifa_isr as repo
 from app.services import anexo8
@@ -903,25 +901,17 @@ async def _periodicidad_observada(db: AsyncSession) -> tuple[PeriodicidadTarifa 
     """La periodicidad que de verdad timbra la nómina, y las claves de `c_PeriodicidadPago`
     para las que el Anexo 8 no publica tarifa (B-09.R1: catorcenal `03`, bimestral `06`).
 
-    Una sola consulta agregada (regla 11: nunca una por tarifa ni una por recibo). La
-    "dominante" es la más frecuente, con el mismo desempate que
+    La "dominante" es la más frecuente, con el mismo desempate que
     `app.informes.periodos.periodicidad_dominante` (la clave menor como texto): dos lecturas
     sobre el mismo universo tienen que marcar la misma tarifa como la que aplica.
+
+    El conteo por clave sale de `cfg.periodicidades_pago_observadas`, compartida con la alarma
+    de vigencia de `app.services.sincronizacion_fiscal` (Task 8): antes esta consulta agregada
+    vivía solo aquí, y la alarma iba a necesitar exactamente el mismo universo para decidir qué
+    periodicidades exigir. Una sola consulta, un solo lugar donde se define qué cuenta como
+    "timbrada".
     """
-    filas = (
-        await db.execute(
-            select(NominaReceptor.periodicidad_pago, func.count())
-            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
-            .where(
-                Comprobante.estatus != EstatusCfdi.CANCELADO,
-                NominaReceptor.periodicidad_pago.is_not(None),
-            )
-            .group_by(NominaReceptor.periodicidad_pago)
-        )
-    ).all()
-    # El `WHERE ... is_not(None)` ya lo garantiza en tiempo de ejecución; el filtro es para que
-    # `mypy --strict` sepa que `clave` no es opcional al usarla como llave de `PARA_CFDI`.
-    conteo: list[tuple[str, int]] = [(clave, n) for clave, n in filas if clave is not None]
+    conteo = await cfg.periodicidades_pago_observadas(db)
     sin_tarifa = sorted({clave for clave, _n in conteo if reglas.PARA_CFDI.get(clave) is None})
     soportadas = [(clave, n) for clave, n in conteo if reglas.PARA_CFDI.get(clave) is not None]
     if not soportadas:

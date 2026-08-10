@@ -84,9 +84,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.configuracion_fiscal import ParamFiscal
-from app.models.enums import OrigenValor
+from app.models.enums import OrigenValor, PeriodicidadTarifa
 from app.repositories import configuracion as config_repo
+from app.repositories import tarifa_isr as repo_tarifa
 from app.services import configuracion_fiscal as cfg
+from app.services import tarifa_isr as reglas_tarifa
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,28 @@ FECHAS_DE_ACTUALIZACION: Final[dict[str, tuple[int, int]]] = {
 CLAVE_CATALOGO_SAT: Final = "CATALOGO_SAT_PERCEPCIONES"
 CLAVE_VERSION_SATCFDI: Final = "VERSION_SATCFDI"
 CLAVE_BANXICO: Final = "SINCRONIZACION_BANXICO"
+
+# Otra clave sintética de la misma familia: la tarifa del ISR tampoco vive en `param_fiscal`
+# (vive en `tarifa_isr`/`tarifa_isr_renglon`, con su propio repositorio), y su alarma no cabe en
+# `FECHAS_DE_ACTUALIZACION` porque no es "una fecha fija en la que un solo valor cambia" — son
+# hasta cinco tarifas (una por periodicidad que la nómina timbre) y la fecha que importa es
+# cuándo empieza el ejercicio, no un día puntual dentro de él. Una sola clave para las cinco: la
+# pantalla no necesita distinguir "falta la quincenal" de "falta la mensual" por clave, el
+# `detalle` ya lo dice.
+CLAVE_TARIFA_ISR: Final = "TARIFA_ISR"
+
+# Etiqueta breve para meter la periodicidad dentro de una frase ("la tarifa del ISR {etiqueta}
+# de 2026"). No es la misma lista que `_ETIQUETAS_TARIFA` de `app/api/v1/configuracion.py`: esa
+# es para una columna de pantalla y lleva una aclaración entre paréntesis ("Quincenal (15
+# días)"); aquí basta con el adjetivo. Solo cubre las periodicidades que `PARA_CFDI` puede
+# producir — `EJERCICIO` nunca sale de traducir una clave de CFDI, así que no hace falta aquí.
+_ETIQUETAS_PERIODICIDAD_TARIFA: Final[dict[PeriodicidadTarifa, str]] = {
+    PeriodicidadTarifa.DIARIA: "diaria",
+    PeriodicidadTarifa.DIAS_7: "semanal (7 días)",
+    PeriodicidadTarifa.DIAS_10: "decenal (10 días)",
+    PeriodicidadTarifa.DIAS_15: "quincenal (15 días)",
+    PeriodicidadTarifa.MENSUAL: "mensual",
+}
 
 # Clave de `configuracion` donde la tarea del beat deja el resultado del último intento de
 # sincronización. Vive en la base y no en memoria porque quien tiene que ver el fallo es el
@@ -481,12 +505,80 @@ async def _alerta_de_sincronizacion(db: AsyncSession) -> AlertaVigencia | None:
     )
 
 
+async def _alertas_de_tarifa(db: AsyncSession, hoy: date) -> list[AlertaVigencia]:
+    """Falta la tarifa del ejercicio en curso para alguna periodicidad **que la nómina
+    realmente timbra**.
+
+    Solo las observadas, no las cinco que `PARA_CFDI` sabe traducir. Exigir la tarifa de 10
+    días que ninguna empresa usa dejaría la alarma permanentemente encendida, que es el
+    argumento que este módulo ya tiene escrito para dejar el tipo de cambio fuera de
+    `FECHAS_DE_ACTUALIZACION`: *"una alarma siempre encendida es una alarma que se aprende a
+    ignorar"*.
+
+    Si no hay nómina normalizada no hay nada que recalcular, y por eso el conjunto vacío no
+    alerta: la ausencia de datos no es una configuración pendiente. Lo mismo si toda la nómina
+    observada cae en periodicidades que el Anexo no publica (catorcenal, bimestral, etc.): no
+    hay ninguna tarifa que exigir.
+
+    A diferencia de `_alerta_de_clave`, no hay motivo `CADUCADO`: la tarifa del ISR no tiene
+    tramos de vigencia dentro del año (es una tabla por `(ejercicio, periodicidad)`, no un
+    valor con `vigencia_desde`/`vigencia_hasta`), así que "vieja" y "ausente" son la misma
+    cosa aquí — o existe la del ejercicio en curso, o no existe.
+
+    Usa `repo_tarifa.obtener` (confirmada o propuesta) y no `repo_tarifa.vigente` (solo
+    confirmada): la alarma necesita distinguir `AUSENTE` de `SIN_CONFIRMAR`, y `vigente`
+    colapsa las dos en `None`.
+    """
+    observadas = await cfg.periodicidades_pago_observadas(db)
+    periodicidades = sorted(
+        {p for clave, _n in observadas if (p := reglas_tarifa.PARA_CFDI.get(clave)) is not None},
+        key=lambda p: p.value,
+    )
+    esperada = date(hoy.year, 1, 1)
+    alertas: list[AlertaVigencia] = []
+    for periodicidad in periodicidades:
+        # Acotado a como mucho cinco periodicidades (regla 11): nunca una consulta por CFDI ni
+        # por empresa, la misma proporción que ya acepta `_tarifa_a_salida` en la API.
+        tarifa = await repo_tarifa.obtener(db, ejercicio=hoy.year, periodicidad=periodicidad)
+        etiqueta = _ETIQUETAS_PERIODICIDAD_TARIFA[periodicidad]
+        if tarifa is None:
+            alertas.append(
+                AlertaVigencia(
+                    clave=CLAVE_TARIFA_ISR,
+                    motivo="AUSENTE",
+                    vigencia_desde=None,
+                    fecha_esperada=esperada,
+                    detalle=(
+                        f"Falta la tarifa del ISR {etiqueta} de {hoy.year}. Descarga el Anexo 8 de la "
+                        "Resolución Miscelánea Fiscal del portal del SAT (sat.gob.mx → Normatividad → "
+                        "RMF → Anexos) y súbelo en Configuración → Fiscal."
+                    ),
+                )
+            )
+        elif not tarifa.confirmada:
+            alertas.append(
+                AlertaVigencia(
+                    clave=CLAVE_TARIFA_ISR,
+                    motivo="SIN_CONFIRMAR",
+                    vigencia_desde=None,
+                    fecha_esperada=esperada,
+                    detalle=(
+                        f"La tarifa del ISR {etiqueta} de {hoy.year} ya está cargada pero nadie la ha "
+                        "confirmado. Revísala en Configuración → Fiscal y confírmala con un clic; hasta "
+                        "entonces no entra a ningún cálculo."
+                    ),
+                )
+            )
+    return alertas
+
+
 async def alertas_de_vigencia(db: AsyncSession, hoy: date) -> list[AlertaVigencia]:
     """Todo lo que necesita atención hoy: valores caducados, propuestas esperando un clic,
-    claves sin capturar, y la maquinaria averiada.
+    claves sin capturar, tarifas del ISR que faltan, y la maquinaria averiada.
 
-    Una sola consulta para los valores (regla 11) y ninguna llamada de red: la alarma tiene que
-    funcionar exactamente igual con el cable desconectado.
+    Una sola consulta para los valores del calendario (regla 11), una más (acotada) para la
+    tarifa del ISR, y ninguna llamada de red: la alarma tiene que funcionar exactamente igual
+    con el cable desconectado.
     """
     filas = list(
         (await db.scalars(select(ParamFiscal).where(ParamFiscal.clave.in_(FECHAS_DE_ACTUALIZACION)))).all()
@@ -500,6 +592,7 @@ async def alertas_de_vigencia(db: AsyncSession, hoy: date) -> list[AlertaVigenci
         for clave in sorted(FECHAS_DE_ACTUALIZACION)
         if (alerta := _alerta_de_clave(clave, por_clave.get(clave, []), hoy)) is not None
     ]
+    alertas.extend(await _alertas_de_tarifa(db, hoy))
     for alerta_maquinaria in (_alerta_del_catalogo(), _alerta_de_la_libreria(hoy), await _alerta_de_sincronizacion(db)):
         if alerta_maquinaria is not None:
             alertas.append(alerta_maquinaria)

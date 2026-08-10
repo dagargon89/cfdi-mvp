@@ -15,8 +15,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.configuracion_fiscal import ParamFiscal
-from app.models.enums import OrigenValor
+from app.models.enums import OrigenValor, PeriodicidadTarifa
+from app.repositories import tarifa_isr as repo_tarifa
 from app.services import sincronizacion_fiscal as sync
+from app.services import tarifa_isr as reglas_tarifa
+from tests import factories, helpers_nomina
 
 
 def _param(
@@ -420,3 +423,75 @@ async def test_un_tramo_futuro_confirmado_por_adelantado_no_da_alarma_falsa(db: 
     alertas = await sync.alertas_de_vigencia(db, date(2026, 1, 15))
 
     assert not [a for a in alertas if a.clave == "UMA_DIARIA"]
+
+
+# --------------------------------------------------------------------------------------
+# La alarma de la tarifa del ISR (Task 8): solo las periodicidades que la nómina timbra
+# --------------------------------------------------------------------------------------
+
+
+def _renglones_isr(cuota_segundo: str = "7.95") -> list[reglas_tarifa.Renglon]:
+    return [
+        reglas_tarifa.Renglon(1, Decimal("0.01"), Decimal("416.70"), Decimal("0.00"), Decimal("0.0192")),
+        reglas_tarifa.Renglon(2, Decimal("416.71"), Decimal("3537.15"), Decimal(cuota_segundo), Decimal("0.0640")),
+        reglas_tarifa.Renglon(3, Decimal("3537.16"), None, Decimal("207.75"), Decimal("0.3500")),
+    ]
+
+
+async def test_alerta_cuando_el_ejercicio_en_curso_no_tiene_tarifa_confirmada(db: AsyncSession) -> None:
+    """Con nómina quincenal en la BD y sin tarifa de 15 días confirmada, la alarma tiene que
+    sonar, y su `detalle` tiene que decirle a alguien que no es contador dónde conseguir el
+    Anexo 8 y qué hacer con él."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="11111111-1111-1111-1111-111111111111", periodicidad="04")
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    tarifa = [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
+    assert len(tarifa) == 1
+    assert tarifa[0].motivo == "AUSENTE"
+    assert "Anexo 8" in (tarifa[0].detalle or "")
+    assert "Configuración" in (tarifa[0].detalle or "")
+
+
+async def test_la_alerta_dice_sin_confirmar_cuando_hay_propuesta(db: AsyncSession) -> None:
+    """Distinguir `AUSENTE` de `SIN_CONFIRMAR` es lo que separa "ve a descargar el Anexo 8" de
+    "ya está, solo falta un clic"."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="22222222-2222-2222-2222-222222222222", periodicidad="04")
+    await repo_tarifa.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones_isr(), fuente="Anexo 8 DOF",
+    )
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    assert [a.motivo for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR] == ["SIN_CONFIRMAR"]
+
+
+async def test_no_alerta_por_periodicidades_que_nadie_usa(db: AsyncSession) -> None:
+    """Con solo nómina quincenal y la tarifa de 15 días confirmada, no hay alerta — aunque
+    falten las otras cuatro que `PARA_CFDI` sabe traducir. Una alarma siempre encendida es una
+    alarma que se aprende a ignorar."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await helpers_nomina.insertar_nomina(db, empresa_id=empresa.empresa_id, uuid="33333333-3333-3333-3333-333333333333", periodicidad="04")
+    tarifa = await repo_tarifa.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones_isr(), fuente="Anexo 8 DOF",
+    )
+    await db.commit()
+    await repo_tarifa.confirmar(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, huella_revisada=tarifa.huella, actor="quien",
+    )
+    await db.commit()
+
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    assert not [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
+
+
+async def test_sin_nomina_no_hay_alerta_de_tarifa(db: AsyncSession) -> None:
+    """No hay nada que recalcular, así que no hay nada que exigir: la ausencia de datos no es
+    una configuración pendiente."""
+    alertas = await sync.alertas_de_vigencia(db, date(2026, 8, 10))
+
+    assert not [a for a in alertas if a.clave == sync.CLAVE_TARIFA_ISR]
