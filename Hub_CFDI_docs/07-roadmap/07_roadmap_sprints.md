@@ -175,6 +175,48 @@ Entregables: `demo-ux/09_demo_ux_guia.md` (ya en este paquete) → prototipo en 
      para no volver a pedirle al SAT la misma ventana mientras el anterior sigue en curso — otro
      rechazo documentado, `CodEstatus=5005` "solicitud duplicada").
 
+### Addendum post-Sprint 4 — Informes de nómina (Grupo B) y tarifa del ISR ✅ Cerrado (2026-08-10)
+**Objetivo:** convertir el índice delgado de CFDI en informes de nómina reales, y la configuración
+fiscal que esos informes necesitan en algo administrable desde la aplicación en vez de una cifra
+en el código — trabajo que no estaba en el alcance original de ningún sprint y que un stakeholder
+real (el contador de la organización, vía D2 en Sprint 3) hizo evidente que hacía falta.
+
+- **Fase 1 (2026-08-05) — capa normalizada + B-02:** 15 tablas normalizadas a partir de los XML ya
+  resguardados (percepciones, deducciones, otros pagos, totales, receptor) y el primer informe del
+  Grupo B ("Nómina agrupada por conceptos del patrón"), como libro de Excel descargable por la
+  misma tubería de tareas/enlaces firmados que ya existía. Verificado en vivo contra los 8 CFDI de
+  nómina reales de la empresa 11. Plan: `docs/superpowers/plans/2026-08-05-informes-cfdi-fase-1.md`.
+- **Fase 2 (2026-08-06) — B-01, B-04, B-05, B-07 y B-10:** cinco informes más sobre la misma capa y
+  el mismo motor (registro de informes, libro de cuatro hojas, enmascaramiento de datos personales),
+  sin tocar la tubería de entrega. Plan: `docs/superpowers/plans/2026-08-06-informes-cfdi-fase-2.md`.
+- **Fase 3 (2026-08-06/07) — configuración fiscal administrable + B-03, B-06, B-08:** los valores
+  fiscales (UMA, salario mínimo, marcas de exención del art. 93) pasan a vivir en tablas con
+  vigencia, procedencia y confirmación humana — **un valor sin confirmar no calcula** — con su
+  alarma de caducidad y los tres informes que dependían de ellos. `scripts/verificar_informes.py`
+  corre las nueve identidades de B-00 y los nueve informes del catálogo contra los datos reales en
+  cada verificación en vivo. Plan: `docs/superpowers/plans/2026-08-06-informes-cfdi-fase-3.md`.
+- **Tarifa del ISR (2026-08-10) — este plan, 12 tareas:** la tarifa de sueldos y salarios del
+  Anexo 8 de la RMF, hasta entonces "deuda declarada" en `config/fiscal/README.md`, pasa a ser
+  configuración administrable con el mismo invariante que el resto de la fase 3: se **importa**
+  del PDF oficial (extractor propio, sin OCR), queda **propuesta**, se puede **corregir a mano** o
+  **descartar**, y solo calcula una vez **confirmada** — con una comprobación automática contra un
+  recibo real de nómina (detecta una tarifa de otra periodicidad o ejercicio cargada por error),
+  el subsidio al empleo y la UMA 2025 como tramos de `param_fiscal`, una alarma de vigencia propia
+  (`TARIFA_ISR`) y una hoja de revisión en PDF pensada para el contador, que no tiene cuenta en el
+  sistema. **No construye** el informe B-09 (queda como el siguiente consumidor natural de esta
+  configuración) ni un rol `fiscal` — decisiones razonadas, no un olvido (§3 del documento de
+  diseño). Verificado en vivo el 2026-08-10 con `scripts/verificar_tarifa_isr.py` (importa el
+  Anexo 8 real, corrige, reimporta sobre una corrección protegida, confirma y comprueba contra un
+  recibo real de la empresa 11, dejando la base como la encontró). Spec y plan:
+  `docs/superpowers/specs/2026-08-10-tarifa-isr-design.md`,
+  `docs/superpowers/plans/2026-08-10-tarifa-isr.md`.
+
+Las cuatro entregas comparten el mismo spec de diseño para los informes
+(`docs/superpowers/specs/2026-08-05-informes-cfdi-nomina-design.md`, que la tarea de subsidio/UMA
+2025 y tarifa del ISR extiende en su propio documento) y el mismo criterio de cierre del proyecto:
+ninguna se da por terminada solo porque las pruebas contra dobles pasen — cada una se verificó
+contra la base de datos real y, cuando aplica, contra un documento oficial real.
+
 ### Sprint 5 — Endurecimiento y cierre de Fase 2
 **Objetivo:** DoD verificada, no declarada (Gobernanza v3 mejora 3).
 - Checklist de hardening (doc 04 §4.2) sobre el entorno real; re-verificación OWASP contra código final; pruebas de rendimiento con volumen realista (RNF-03/08).

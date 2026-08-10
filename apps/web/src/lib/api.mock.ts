@@ -833,7 +833,7 @@ function escalaFactor(valor: string | null): string | null {
 // --- tarifa del ISR (doc 05 §8bis, tarifa ISR): las MISMAS reglas estructurales del Anexo I.1,
 // no una versión relajada — mismo criterio que la configuración fiscal de arriba. -------------
 
-// Copiadas literalmente de `_ETIQUETAS_TARIFA` en `app/api/v1/configuracion.py`: el servidor es
+// Copiadas literalmente de `ETIQUETAS_TARIFA` en `app/services/tarifa_isr.py`: el servidor es
 // la autoridad de este texto (la etiqueta viaja ya traducida en `TarifaIsr.etiqueta`, el
 // frontend no la construye), así que el doble no puede mejorarlas ni acortarlas por su cuenta.
 const ETIQUETAS_PERIODICIDAD_TARIFA: Record<PeriodicidadTarifaIsr, string> = {

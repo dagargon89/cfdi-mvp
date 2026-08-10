@@ -147,10 +147,10 @@ CLAVE_BANXICO: Final = "SINCRONIZACION_BANXICO"
 CLAVE_TARIFA_ISR: Final = "TARIFA_ISR"
 
 # Etiqueta breve para meter la periodicidad dentro de una frase ("la tarifa del ISR {etiqueta}
-# de 2026"). No es la misma lista que `_ETIQUETAS_TARIFA` de `app/api/v1/configuracion.py`: esa
-# es para una columna de pantalla y lleva una aclaración entre paréntesis ("Quincenal (15
-# días)"); aquí basta con el adjetivo. Solo cubre las periodicidades que `PARA_CFDI` puede
-# producir — `EJERCICIO` nunca sale de traducir una clave de CFDI, así que no hace falta aquí.
+# de 2026"). No es la misma lista que `ETIQUETAS_TARIFA` de `app.services.tarifa_isr`: esa es
+# para una columna de pantalla y lleva una aclaración entre paréntesis ("Quincenal (15 días)");
+# aquí basta con el adjetivo. Solo cubre las periodicidades que `PARA_CFDI` puede producir —
+# `EJERCICIO` nunca sale de traducir una clave de CFDI, así que no hace falta aquí.
 _ETIQUETAS_PERIODICIDAD_TARIFA: Final[dict[PeriodicidadTarifa, str]] = {
     PeriodicidadTarifa.DIARIA: "diaria",
     PeriodicidadTarifa.DIAS_7: "semanal (7 días)",

@@ -84,6 +84,11 @@ Cada cifra se revisa abriendo la liga y comparándola. Nada más.
 | `SALARIO_MINIMO_GENERAL` | 315.04 | 2026-01-01 | DOF 09-12-2025, resolución del CONASAMI — https://www.dof.gob.mx/nota_detalle.php?codigo=5775534&fecha=09%2F12%2F2025 |
 | `SALARIO_MINIMO_ZLFN` | 440.87 | 2026-01-01 | idem |
 
+Estos cinco son los que están **confirmados** en la base real (ver §7.1). Los seis tramos de la
+tabla de §3.1 —la UMA 2025 y el subsidio al empleo, sembrados por la fase 3— siguen **sin
+confirmar** y no aparecían en esta hoja de revisión hasta ahora: quedan agregados abajo para que
+la sesión de revisión los cubra también.
+
 **Dos comprobaciones que se pueden hacer sin abrir nada.** La primera es la relación entre las
 tres UMA, **con su redondeo**, que es donde está el detalle:
 
@@ -102,6 +107,32 @@ correcto, no un error de captura.
 (`configuracion_empresa.zona_salarial`) y el servicio se niega a adivinarla. Ciudad Juárez
 está en la Zona Libre de la Frontera Norte, donde el mínimo es ~40 % mayor: suponer "GENERAL"
 convertiría en "cumple" a empleados que están por debajo del mínimo.
+
+### 3.1 Los seis tramos nuevos — UMA 2025 y subsidio al empleo, sin confirmar
+
+Sembrados por la fase 3 (Task 7 de este plan) y ausentes de la tabla de arriba hasta ahora. La
+misma regla del §0 aplica: `param_fiscal.yaml` **no se aplica solo**, así que estos seis tramos
+existen en la base pero no calculan hasta que alguien los revise y confirme.
+
+| Clave | Valor | Vigencia | Fuente |
+|---|---|---|---|
+| `UMA_DIARIA` | 113.14 | 2025-02-01 a 2026-01-31 | INEGI, comunicado 1/25, DOF 10-01-2025 — https://www.inegi.org.mx/contenidos/saladeprensa/boletines/2025/uma/uma2025.pdf |
+| `UMA_MENSUAL` | 3 439.46 | 2025-02-01 a 2026-01-31 | idem (113.14 × 30.4, redondeado a centavos) |
+| `UMA_ANUAL` | 41 273.52 | 2025-02-01 a 2026-01-31 | idem (= 3 439.46 × 12) |
+| `SUBSIDIO_FACTOR_UMA` | 0.1559 | 2026-01-01 a 2026-01-31 | DOF 31-12-2025, decreto del subsidio para el empleo — factor de enero, calculado sobre la UMA **2025** — https://www.dof.gob.mx/nota_detalle.php?codigo=5777649&fecha=31/12/2025 |
+| `SUBSIDIO_FACTOR_UMA` | 0.1502 | 2026-02-01 en adelante | idem — factor desde el 1 de febrero, sobre la UMA **mensual 2026** |
+| `SUBSIDIO_TOPE_INGRESO` | 11 492.66 | 2026-01-01 en adelante | idem — ingreso mensual máximo para tener derecho al subsidio |
+
+**Por qué la UMA 2025 importa con datos de 2026.** La UMA cambia el 1 de febrero, no el 1 de
+enero: del 1 al 31 de enero de 2026 sigue vigente la UMA **2025**. Sin este tramo,
+`valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None` aunque la UMA 2026 ya esté sembrada y
+confirmada — el hueco es real en cuanto se descargue nómina de enero, no una previsión sobrante.
+
+**Por qué el subsidio trae dos tramos de `SUBSIDIO_FACTOR_UMA`, no uno.** El decreto fija un
+factor distinto para enero (calculado sobre la UMA que estaba vigente ese mes, la de 2025) y
+otro desde febrero (sobre la UMA mensual 2026, ya vigente ese mes): la vigencia de cada tramo
+sigue exactamente el mismo cambio de UMA que ya obliga a la fecha del `2026-02-01` en la tabla
+de arriba. No es un error de captura ver dos valores distintos con un mes de diferencia.
 
 ---
 
@@ -367,9 +398,9 @@ visible es mejor que un default plausible.
 |---|---|---|
 | **Revisar y confirmar las 44 marcas de percepción** (0 confirmadas hoy; 39 traen `nota_revision`), empezando por el grupo A (`024`) y el grupo D (el tope conjunto). **De la nómina real solo dos aplican:** `001` Sueldos —sin duda declarada, se puede confirmar sin criterio de nadie— y `005` Fondo de Ahorro, cuya duda es si integra el SBC | Mientras no se confirmen, **B-03** emite `MARCA_SIN_CONFIRMAR` por tipo y deja vacías «Base de exención», «Tope de exención» y «Exceso sobre el tope»; **B-05** emite `MARCA_SIN_CONFIRMAR` y deja vacía «Gravado ordinario». Confirmadas las dos, las cuatro columnas se llenan y las banderas desaparecen (comprobado en una transacción revertida, tarea 11) | dueño del repo, desde la pantalla |
 | **`map_departamento`** — 0 renglones | **Decisión tomada, no olvido:** B-06 agrupa por el texto crudo del departamento (`EDIFICIOS`, `SOCIAL`) y lo declara con `DEPARTAMENTO_SIN_MAPEO` y `RESOLUCION_DE_CENTRO_DE_COSTO`. El agrupamiento es correcto; lo que falta es la constancia de que alguien revisó que esos dos textos son los dos centros de costo | dueño del repo, si quiere la constancia |
-| **Los valores 2025 de `param_fiscal`** | La UMA cambia el 1 de febrero: del **1 al 31 de enero de 2026** aplica todavía la UMA 2025. Hoy `valor_vigente('UMA_DIARIA', 2026-01-15)` devuelve `None` y el informe reporta el hueco. No muerde con los datos actuales (el primer CFDI descargado se pagó en junio de 2026), y morderá en cuanto se descargue enero. Al capturarlos hay que **cerrar** el tramo 2025 con `vigencia_hasta: 2026-01-31`, o el cargador rechazará el solapamiento | dueño del repo, con el boletín INEGI 2025 y el DOF del salario mínimo 2025 |
+| **Los seis tramos de la UMA 2025 y el subsidio al empleo** — ya **sembrados** (§3.1), 0 confirmados hoy | La UMA cambia el 1 de febrero: del **1 al 31 de enero de 2026** aplica todavía la UMA 2025, y ya está capturada con `vigencia_hasta: 2026-01-31` para que el cargador no la confunda con la 2026. No muerde con los datos actuales (el primer CFDI descargado se pagó en junio de 2026), y morderá en cuanto se descargue enero. Falta el clic de confirmación, no la captura | dueño del repo, desde la pantalla (revisado por el contador, ver la nota de abajo) |
 | **`TIPO_CAMBIO_USD`** | Cambia todos los días hábiles: no es una semilla. Lo llena la sincronización con el DOF, que necesita `BANXICO_TOKEN` (gratuito); sin él la alerta `SINCRONIZACION_FALLIDA` es permanente. **No se sembró un valor "de ejemplo" a propósito**: un tipo de cambio viejo y confirmado es peor que la ausencia del dato | la sincronización automática |
-| **`tarifa_isr` y el subsidio al empleo** | Deuda declarada de la fase 3, y con ella **B-09**. Es el Anexo 8 de la RMF, en PDF; B-09.R2 advierte de errores de dos órdenes de magnitud por una tasa mal capturada | fase posterior |
+| **`tarifa_isr`** — 0 tarifas cargadas hoy en esta base | Ya **no** es deuda: la fase 3 (este plan, tareas 1-11) construyó la importación del Anexo 8, su corrección manual, su confirmación y la hoja de revisión en PDF para el contador — verificado en vivo el 2026-08-10 (`scripts/verificar_tarifa_isr.py`) importando el documento real, confirmando una tarifa y comprobándola contra un recibo real. Lo que falta en **esta instalación** es el acto de importar el Anexo 8 vigente desde la pantalla y confirmarlo; el informe **B-09** que la va a consumir sigue sin construirse (§3 del documento de diseño, decisión razonada, no un olvido) | dueño del repo, desde Configuración → Fiscal, con el contador revisando la hoja de revisión antes del clic |
 | **Un `empresa-*.yaml` por cada organización nueva** | Sin `zona_salarial` no hay validación de salario mínimo en B-10; sin `map_concepto_provision` completo, B-08 no se genera | quien administra cada organización |
 
 **Un aviso sobre los nombres de bandera:** la versión anterior de esta sección decía que sin
@@ -378,6 +409,14 @@ sí existen son `MARCA_SIN_CONFIRMAR` (la marca está capturada y solo falta el 
 (no hay marca capturada), y la diferencia es justo lo que separa un aviso accionable de uno que
 manda a capturar lo que ya está capturado. `scripts/verificar_informes.py` comprueba que la que
 salga sea la de la causa real.
+
+**Quién revisa qué se confirma.** Cada valor de esta sección —cada tramo de `param_fiscal`, cada
+marca de `catalogo_percepcion_marca`, cada tarifa del ISR— es un criterio fiscal, no un dato
+técnico. **La revisión fiscal la hace un contador**, con la LISR, la LFT y la LSS al lado (o, para
+la tarifa del ISR, con la hoja de revisión en PDF que genera el sistema); el dueño del Hub da el
+clic de confirmar después de esa revisión, pero no la sustituye. Hoy no existe un rol `fiscal` en
+el sistema (decisión razonada, no un olvido — §3 del documento de diseño de la fase 3): el
+contador revisa fuera de la aplicación y le dice al dueño del Hub qué confirmar.
 
 ---
 
