@@ -142,21 +142,23 @@ param_fiscal:
   # factor cambia junto con la UMA, así que enero lleva su propio tramo (la UMA de enero de
   # 2026 sigue siendo la de 2025; la de febrero en adelante ya es la de 2026).
   # ---------------------------------------------------------------------------------------
-  - clave: SUBSIDIO_FACTOR_UMA
+  - ejercicio: 2026
+    clave: SUBSIDIO_FACTOR_UMA
     valor: '0.1559'
     vigencia_desde: 2026-01-01
     vigencia_hasta: 2026-01-31
-    ejercicio: 2026
-    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor aplicable en enero de 2026 (sobre la UMA de 2025). https://www.dof.gob.mx/'
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor aplicable en enero de 2026 (sobre la UMA de 2025). https://www.dof.gob.mx/nota_detalle.php?codigo=5777649&fecha=31/12/2025'
 
-  - clave: SUBSIDIO_FACTOR_UMA
+  - ejercicio: 2026
+    clave: SUBSIDIO_FACTOR_UMA
     valor: '0.1502'
     vigencia_desde: 2026-02-01
-    ejercicio: 2026
-    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor sobre la UMA mensual desde el 1-feb-2026. https://www.dof.gob.mx/'
+    vigencia_hasta: null
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — factor sobre la UMA mensual desde el 1-feb-2026. https://www.dof.gob.mx/nota_detalle.php?codigo=5777649&fecha=31/12/2025'
 
-  - clave: SUBSIDIO_TOPE_INGRESO
+  - ejercicio: 2026
+    clave: SUBSIDIO_TOPE_INGRESO
     valor: '11492.66'
     vigencia_desde: 2026-01-01
-    ejercicio: 2026
-    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — ingreso mensual máximo para tener derecho al subsidio. https://www.dof.gob.mx/'
+    vigencia_hasta: null
+    fuente: 'DOF 31-12-2025, decreto del subsidio para el empleo — ingreso mensual máximo para tener derecho al subsidio. https://www.dof.gob.mx/nota_detalle.php?codigo=5777649&fecha=31/12/2025'
