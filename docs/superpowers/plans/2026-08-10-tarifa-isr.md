@@ -941,6 +941,15 @@ class DocumentoInvalido(ValueError):
     esperaba y qué hacer, no qué falló por dentro."""
 
 
+class ArchivoDemasiadoGrande(DocumentoInvalido):
+    """El archivo excede el límite de tamaño o de páginas.
+
+    Subclase y no un `DocumentoInvalido` más porque el endpoint responde 413 en este caso y 422 en
+    los demás, y distinguirlos por el texto del mensaje sería una condición que se rompe la primera
+    vez que alguien mejora una redacción.
+    """
+
+
 @dataclass(frozen=True)
 class TarifaExtraida:
     ejercicio: int
@@ -1034,18 +1043,21 @@ def _texto_plano(pdf: bytes) -> str:
     por patrón, no por posición.
     """
     if len(pdf) > MAXIMO_BYTES:
-        raise DocumentoInvalido(
+        raise ArchivoDemasiadoGrande(
             f"El archivo es más grande de lo que debería ({len(pdf) // 1024 // 1024} MB; el Anexo 8 pesa "
             "menos de 1 MB). ¿Es el archivo correcto?"
         )
     try:
         documento = pypdfium2.PdfDocument(pdf)
-    except Exception as exc:  # pypdfium2 lanza tipos propios; cualquiera significa lo mismo aquí
+    except (pypdfium2.PdfiumError, ValueError, OSError) as exc:
+        # Los tres tipos que pypdfium2 puede lanzar ante un archivo que no es un PDF legible. No se
+        # captura `Exception` a secas: taparía un error de programación nuestro con un mensaje que le
+        # echa la culpa al archivo del usuario.
         raise DocumentoInvalido(
             "No pude abrir este archivo como PDF. Descarga el Anexo 8 del portal del SAT y súbelo tal cual."
         ) from exc
     if len(documento) > MAXIMO_PAGINAS:
-        raise DocumentoInvalido(
+        raise ArchivoDemasiadoGrande(
             f"El archivo trae {len(documento)} páginas y el Anexo 8 trae menos de {MAXIMO_PAGINAS}. "
             "¿Es el archivo correcto?"
         )
@@ -2061,8 +2073,8 @@ En `app/api/v1/configuracion.py`, después de los de `param_fiscal`. La traducci
 
 | Excepción | HTTP | `codigo` |
 |---|---|---|
-| `anexo8.DocumentoInvalido` (tamaño o páginas) | 413 | `ARCHIVO_DEMASIADO_GRANDE` |
-| `anexo8.DocumentoInvalido` (resto) | 422 | `DOCUMENTO_INVALIDO` |
+| `anexo8.ArchivoDemasiadoGrande` | 413 | `ARCHIVO_DEMASIADO_GRANDE` |
+| `anexo8.DocumentoInvalido` | 422 | `DOCUMENTO_INVALIDO` |
 | `tarifa_isr.TarifaInvalida` | 422 | `TARIFA_INVALIDA` |
 | `repo.CorreccionManualProtegida` | 409 | `CORRECCION_MANUAL` |
 | `repo.ValorCambio` | 409 | `TARIFA_CAMBIO` |
@@ -2091,14 +2103,18 @@ async def importar_tarifa_isr(
     sha256 = hashlib.sha256(contenido).hexdigest()
     try:
         extraidas = anexo8.extraer(contenido)
+    except anexo8.ArchivoDemasiadoGrande as exc:
+        # Antes que `DocumentoInvalido`, del que hereda: el orden de los `except` es lo que distingue
+        # los dos códigos HTTP.
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"codigo": "ARCHIVO_DEMASIADO_GRANDE", "mensaje": str(exc)},
+        ) from exc
     except anexo8.DocumentoInvalido as exc:
-        # 413 solo cuando el archivo no cabe; el resto es un archivo que sí se pudo leer y no sirve.
-        codigo, http = (
-            ("ARCHIVO_DEMASIADO_GRANDE", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
-            if "grande" in str(exc) or "páginas" in str(exc)
-            else ("DOCUMENTO_INVALIDO", status.HTTP_422_UNPROCESSABLE_ENTITY)
-        )
-        raise HTTPException(http, detail={"codigo": codigo, "mensaje": str(exc)}) from exc
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"codigo": "DOCUMENTO_INVALIDO", "mensaje": str(exc)},
+        ) from exc
     except reglas.TarifaInvalida as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"codigo": "TARIFA_INVALIDA", "mensaje": str(exc)}
@@ -2136,9 +2152,7 @@ async def importar_tarifa_isr(
 `periodicidades_sin_tarifa`. Existe una sola vez para que la lista y la importación no puedan divergir en
 lo que muestran.
 
-La distinción de 413 por el texto del mensaje es frágil por naturaleza; la alternativa —dos excepciones
-distintas en `anexo8`— es mejor si al implementar resulta incómoda. Lo importante es que el mensaje que
-llega a la pantalla sea el del módulo, no uno reescrito aquí.
+Lo importante es que el mensaje que llega a la pantalla sea el del módulo, no uno reescrito aquí.
 
 `fuente` se arma del nombre del archivo subido más la fecha de la petición: es la procedencia que verá
 quien revise, y el nombre oficial (`Anexo-8-RMF-2026_DOF-28122025.pdf`) ya trae la fecha del DOF.
