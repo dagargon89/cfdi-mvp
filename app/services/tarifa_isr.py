@@ -20,6 +20,20 @@ from typing import Final
 
 from app.models.enums import PeriodicidadTarifa
 
+# Etiquetas legibles de cada periodicidad (§7.2 del diseño: ninguna etiqueta visible es un nombre
+# de enum, ni siquiera uno tan descriptivo como `DIAS_15`). Vive aquí — módulo puro, sin
+# dependencias de la capa API ni de SQLAlchemy— porque tanto `app.api.v1.configuracion` (las
+# pantallas y los mensajes de error) como `app.services.revision_tarifa` (la hoja del contador)
+# la necesitan, y un módulo de servicios no puede depender de un router sin invertir las capas.
+ETIQUETAS_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
+    PeriodicidadTarifa.DIARIA: "Diaria (por día trabajado)",
+    PeriodicidadTarifa.DIAS_7: "Semanal (7 días)",
+    PeriodicidadTarifa.DIAS_10: "Decenal (10 días)",
+    PeriodicidadTarifa.DIAS_15: "Quincenal (15 días)",
+    PeriodicidadTarifa.MENSUAL: "Mensual",
+    PeriodicidadTarifa.EJERCICIO: "Anual (cálculo del ejercicio)",
+}
+
 _UN_CENTAVO: Final = Decimal("0.01")
 _DOS_DECIMALES: Final = Decimal("0.01")
 # Rango de la tasa marginal máxima publicada, prueba 5 del Anexo I.1. No es un margen de
@@ -159,6 +173,16 @@ def isr_de(renglones: Sequence[Renglon], base: Decimal) -> Decimal:
     r = renglon_para(renglones, base)
     marginal = ((base - r.limite_inferior) * r.tasa_excedente).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
     return r.cuota_fija + marginal
+
+
+def a_porcentaje(tasa: Decimal) -> Decimal:
+    """La tasa como número que un contador lee (`21.36`), no la fracción cruda que guarda la
+    columna (`0.2136`). Es el único número de toda la tarifa donde equivocar la escala cambia el
+    resultado por cien, así que es también el único punto del sistema que multiplica por 100:
+    tanto `app.api.v1.configuracion` (la tabla de renglones de la pantalla) como
+    `app.services.revision_tarifa` (la hoja del contador) importan esta función en vez de repetir
+    la conversión."""
+    return (tasa * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 # Traducción del catálogo `c_PeriodicidadPago` del CFDI a la tarifa que publica el Anexo 8.

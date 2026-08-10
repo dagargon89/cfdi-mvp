@@ -54,7 +54,6 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
@@ -836,17 +835,13 @@ async def conceptos_observados(
 # --------------------------------------------------------------------------------------
 
 
-_ETIQUETAS_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
-    PeriodicidadTarifa.DIARIA: "Diaria (por día trabajado)",
-    PeriodicidadTarifa.DIAS_7: "Semanal (7 días)",
-    PeriodicidadTarifa.DIAS_10: "Decenal (10 días)",
-    PeriodicidadTarifa.DIAS_15: "Quincenal (15 días)",
-    PeriodicidadTarifa.MENSUAL: "Mensual",
-    PeriodicidadTarifa.EJERCICIO: "Anual (cálculo del ejercicio)",
-}
+# `ETIQUETAS_TARIFA` y `a_porcentaje` viven en `app.services.tarifa_isr` (módulo puro, sin
+# dependencias de la capa API): tanto este router como `app.services.revision_tarifa` los
+# necesitan, y un servicio no puede importarlos de aquí sin invertir las capas (un servicio
+# dependiendo de un router). Se usan como `reglas.ETIQUETAS_TARIFA` / `reglas.a_porcentaje`.
 
 # Solo para el nombre de archivo de la hoja de revisión (Task 11): sin acentos ni espacios, y sin
-# ser el nombre del enum tal cual (mismo criterio que `_ETIQUETAS_TARIFA` — ninguna etiqueta
+# ser el nombre del enum tal cual (mismo criterio que `reglas.ETIQUETAS_TARIFA` — ninguna etiqueta
 # visible, ni siquiera la de un nombre de archivo, es un nombre de enum).
 _SLUG_ARCHIVO_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
     PeriodicidadTarifa.DIARIA: "diaria",
@@ -856,15 +851,6 @@ _SLUG_ARCHIVO_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
     PeriodicidadTarifa.MENSUAL: "mensual",
     PeriodicidadTarifa.EJERCICIO: "anual",
 }
-
-
-def _a_porcentaje(tasa: Decimal) -> Decimal:
-    """La tasa como número que un contador lee (`21.36`), no la fracción cruda que guarda la
-    columna (`0.2136`). Es el único número de toda la tarifa donde equivocar la escala cambia el
-    resultado por cien, así que es también el único punto del sistema que multiplica por 100:
-    `app.services.revision_tarifa` importa esta función (import diferido, para no cerrar un
-    ciclo — ver el docstring de `revision_tarifa.hoja_html`) en vez de repetir la conversión."""
-    return (tasa * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def _periodicidad_cfdi_de(periodicidad: PeriodicidadTarifa) -> str | None:
@@ -878,7 +864,7 @@ def _periodicidad_cfdi_de(periodicidad: PeriodicidadTarifa) -> str | None:
 
 
 def _renglon_a_salida(r: reglas.Renglon) -> TarifaIsrRenglonOut:
-    tasa_porcentaje = _a_porcentaje(r.tasa_excedente)
+    tasa_porcentaje = reglas.a_porcentaje(r.tasa_excedente)
     return TarifaIsrRenglonOut(
         renglon=r.renglon,
         limite_inferior=str(r.limite_inferior),
@@ -951,7 +937,7 @@ async def _tarifa_a_salida(
     return TarifaIsrOut(
         ejercicio=tarifa.ejercicio,
         periodicidad=tarifa.periodicidad,
-        etiqueta=_ETIQUETAS_TARIFA[tarifa.periodicidad],
+        etiqueta=reglas.ETIQUETAS_TARIFA[tarifa.periodicidad],
         periodicidad_cfdi=_periodicidad_cfdi_de(tarifa.periodicidad),
         origen=tarifa.origen,
         fuente=tarifa.fuente,
@@ -1085,7 +1071,10 @@ async def hoja_revision_tarifa_isr(
             status.HTTP_404_NOT_FOUND,
             detail={
                 "codigo": "TARIFA_NO_ENCONTRADA",
-                "mensaje": f"No hay ninguna tarifa {periodicidad.value} de {ejercicio}.",
+                # La etiqueta legible, no `periodicidad.value` (`DIAS_15`): ninguna etiqueta
+                # visible es un nombre de enum, y un mensaje de error es tan visible como una
+                # pantalla.
+                "mensaje": f"No hay ninguna tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio}.",
             },
         )
     comprobacion = await comprobacion_tarifa.comprobar(db, tarifa=tarifa)

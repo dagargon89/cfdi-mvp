@@ -129,8 +129,27 @@ def test_la_hoja_cita_el_documento_y_su_huella() -> None:
 
 
 def test_la_hoja_marca_los_renglones_corregidos_a_mano() -> None:
+    """El aviso es **a nivel de tarifa, no por renglón**: `_escribir` (Task 4) reemplaza los
+    renglones completos en cada corrección, así que no hay forma de saber cuál cambió de valor y
+    cuál no. Marcar cada fila afirmaría que las tres cambiaron, que puede ser falso — por eso el
+    aviso aparece una sola vez, no una por renglón (antes de este arreglo aparecía tres veces,
+    una por fila de `_RENGLONES`)."""
     html = revision_tarifa.hoja_html(_tarifa_manual(), None)
     assert "corregido a mano" in html.lower()
+    assert html.lower().count("corregido a mano") == 1
+
+
+def test_la_hoja_no_dice_corregido_a_mano_si_la_tarifa_es_importada() -> None:
+    html = revision_tarifa.hoja_html(_tarifa(), None)
+    assert "corregido a mano" not in html.lower()
+
+
+def test_la_hoja_muestra_la_fuente_y_la_fecha_de_importacion() -> None:
+    """Parte de la procedencia que el brief exige junto a la huella (§7.4 del diseño): de dónde
+    salió la tarifa y cuándo se cargó — nada que la prueba de la huella o el encabezado ya cubra."""
+    html = revision_tarifa.hoja_html(_tarifa(), None)
+    assert "Anexo 8 DOF 28-12-2025" in html
+    assert "10/08/2026 12:00" in html
 
 
 def test_la_hoja_dice_que_falta_confirmar_y_que_pasa_cuando_se_confirme() -> None:

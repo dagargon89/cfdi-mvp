@@ -49,21 +49,21 @@ def _fecha(dt: datetime | None) -> str:
     return escape(dt.strftime("%d/%m/%Y %H:%M")) if dt is not None else "—"
 
 
-def _renglon_html(r: reglas.Renglon, *, corregido_a_mano: bool) -> str:
+def _renglon_html(r: reglas.Renglon) -> str:
     """Una fila de la tabla de renglones. El **porcentaje es la columna principal** —como lo
     publica el SAT y como lo lee un contador—, con la fracción cruda al lado como dato
     secundario, nunca al revés.
 
-    La conversión a porcentaje reutiliza `app.api.v1.configuracion._a_porcentaje` (import
-    diferido, ver `hoja_html`): es el único número de toda la hoja donde equivocar la escala
-    cambia el resultado por cien, y no hay motivo para tener una segunda multiplicación por 100
-    en el sistema cuando ya existe una.
+    **Sin distintivo por renglón.** Antes esta fila marcaba "Corregido a mano" en las filas de
+    una tarifa de origen `MANUAL`, pero `_escribir` (Task 4) reemplaza los renglones **completos**
+    en cada corrección — no hay forma de saber, con lo que `TarifaGuardada` guarda hoy, cuál
+    renglón cambió de valor y cuál no. Marcarlos todos era una afirmación falsa ("se tocaron los
+    cinco") cuando puede que solo uno haya cambiado, en un documento cuyo propósito es que
+    alguien confíe en él sin entrar al sistema. El aviso de corrección manual va una sola vez, a
+    nivel de tarifa, en `_tabla_renglones` — ver esa función para la divergencia declarada.
     """
-    from app.api.v1.configuracion import _a_porcentaje
-
     limite_superior = str(r.limite_superior) if r.limite_superior is not None else "En adelante"
-    porcentaje = _a_porcentaje(r.tasa_excedente)
-    marca = ' <span class="badge-manual">Corregido a mano</span>' if corregido_a_mano else ""
+    porcentaje = reglas.a_porcentaje(r.tasa_excedente)
     return (
         "<tr>"
         f"<td>{r.renglon}</td>"
@@ -72,30 +72,45 @@ def _renglon_html(r: reglas.Renglon, *, corregido_a_mano: bool) -> str:
         f"<td>{escape(str(r.cuota_fija))}</td>"
         f'<td class="col-principal">{escape(str(porcentaje))} %</td>'
         f"<td>{escape(str(r.tasa_excedente))}</td>"
-        f"<td>{marca}</td>"
         "</tr>"
     )
 
 
 def _tabla_renglones(tarifa: TarifaGuardada) -> str:
-    corregida_a_mano = tarifa.origen is OrigenTarifa.MANUAL
+    """La tabla de renglones, con un aviso **a nivel de tarifa** —no por renglón— cuando el
+    origen es `MANUAL`.
+
+    **Divergencia declarada del §7.4 del diseño.** El diseño pedía los renglones corregidos
+    marcados "con lo que decía el documento al lado". Eso no se entrega: `TarifaGuardada` (Task 4,
+    interfaz congelada que esta tarea no puede tocar) no conserva el valor anterior renglón por
+    renglón, solo el conjunto vigente y el `origen`. El dato sí existe — la bitácora de
+    `corregir_tarifa_isr` guarda el `anterior`/`nuevo` completo de cada corrección (ver
+    `app/api/v1/configuracion.py`, acción `corregir_tarifa_isr`) — pero mostrarlo aquí exigiría
+    una consulta nueva a `Bitacora`, extender la firma de `hoja_html` (hoy fijada a
+    `(tarifa, comprobacion)`, sin acceso a la sesión) y sus pruebas; queda fuera de esta tarea a
+    propósito, para decidirse aparte.
+
+    Mientras tanto, marcar cada renglón como "corregido a mano" sería peor que no marcar nada:
+    una corrección reemplaza los renglones **completos** aunque solo uno haya cambiado de valor,
+    así que un distintivo por renglón afirmaría que los cinco cambiaron cuando pudo haber sido
+    uno solo — información falsa en un documento cuyo propósito es que el contador confíe en él
+    sin entrar al sistema. El aviso, en cambio, es honesto sobre lo que sí se sabe (que *algo* en
+    esta tarifa no es el documento) y dice qué hacer (comparar la tabla completa).
+    """
     aviso = (
-        '<p class="aviso-manual"><strong>Esta tarifa fue corregida a mano</strong> y ya no es, '
-        "por definición, lo que decía el último documento importado (si coincidiera número por "
-        "número con el documento, el sistema la habría regresado sola al origen «documento» — "
-        "ver el caso 6 de reimportación en <code>app.repositories.tarifa_isr</code>). El sistema "
-        "no conserva, renglón por renglón, el valor que traía el documento antes de la "
-        "corrección; si el contador necesita compararlos, hace falta también el documento "
-        "original citado abajo.</p>"
-        if corregida_a_mano
+        '<p class="aviso-manual"><strong>Origen: corregido a mano.</strong> Esta tarifa se '
+        "corrigió a mano después de importarla, así que uno o más de sus renglones ya no son "
+        "los del documento citado abajo — el sistema no conserva cuál renglón cambió y cuál no. "
+        "Compara la tabla completa contra el Anexo 8 antes de validarla.</p>"
+        if tarifa.origen is OrigenTarifa.MANUAL
         else ""
     )
-    filas = "".join(_renglon_html(r, corregido_a_mano=corregida_a_mano) for r in tarifa.renglones)
+    filas = "".join(_renglon_html(r) for r in tarifa.renglones)
     return (
         f"{aviso}"
         "<table class=\"tabla-renglones\"><thead><tr>"
         "<th>Renglón</th><th>Límite inferior</th><th>Límite superior</th><th>Cuota fija</th>"
-        '<th class="col-principal">Tasa (%)</th><th>Tasa (fracción)</th><th></th>'
+        '<th class="col-principal">Tasa (%)</th><th>Tasa (fracción)</th>'
         "</tr></thead><tbody>"
         f"{filas}"
         "</tbody></table>"
@@ -125,8 +140,6 @@ def _seccion_comprobacion(comprobacion: Comprobacion | None) -> str:
     """La comprobación de §7.3, rotulada como lo que es: una comprobación de que la tarifa se
     cargó bien, nunca un dictamen sobre si la tarifa en sí es correcta — eso lo decide el
     contador al leer el resto de la hoja, no este cálculo."""
-    from app.api.v1.configuracion import _a_porcentaje
-
     if comprobacion is None:
         return (
             '<div class="comprobacion">'
@@ -136,7 +149,7 @@ def _seccion_comprobacion(comprobacion: Comprobacion | None) -> str:
             "no dice nada sobre si la tarifa está bien o mal cargada.</p>"
             "</div>"
         )
-    porcentaje = _a_porcentaje(comprobacion.tasa_excedente)
+    porcentaje = reglas.a_porcentaje(comprobacion.tasa_excedente)
     advertencias = "".join(f"<li>{escape(a)}</li>" for a in comprobacion.advertencias)
     bloque_advertencias = f"<ul>{advertencias}</ul>" if advertencias else "<p>Sin advertencias.</p>"
     dias = str(comprobacion.dias_pagados) if comprobacion.dias_pagados is not None else "—"
@@ -183,20 +196,12 @@ def _pie_confirmacion(tarifa: TarifaGuardada) -> str:
 def hoja_html(tarifa: TarifaGuardada, comprobacion: Comprobacion | None) -> str:
     """El HTML completo de la hoja de revisión, en el orden que fija el brief de la Task 11:
     título con la etiqueta legible y el ejercicio; procedencia (fuente, huella SHA-256, fecha de
-    importación); la tabla de renglones con el porcentaje como columna principal y los
-    renglones corregidos a mano marcados; la comprobación rotulada como comprobación de carga
-    (no dictamen); y al pie qué falta o quién confirmó y cuándo.
-
-    **Import diferido de `app.api.v1.configuracion`** (`_ETIQUETAS_TARIFA`, `_a_porcentaje`): ese
-    módulo importa este (`from app.services import revision_tarifa`, para exponer el endpoint) al
-    nivel de módulo, así que un `import` de este módulo a nivel de módulo hacia `configuracion`
-    cerraría un ciclo. Aquí basta con la etiqueta legible y la conversión a porcentaje, y las dos
-    solo hacen falta cuando de verdad se genera la hoja — importarlas en el cuerpo de la función,
-    no arriba del archivo, evita el ciclo sin duplicar ninguna de las dos.
+    importación); la tabla de renglones con el porcentaje como columna principal y, si aplica,
+    un aviso de corrección manual a nivel de tarifa (ver `_tabla_renglones` para por qué no es
+    por renglón); la comprobación rotulada como comprobación de carga (no dictamen); y al pie qué
+    falta o quién confirmó y cuándo.
     """
-    from app.api.v1.configuracion import _ETIQUETAS_TARIFA
-
-    etiqueta = _ETIQUETAS_TARIFA[tarifa.periodicidad]
+    etiqueta = reglas.ETIQUETAS_TARIFA[tarifa.periodicidad]
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
         @page {{ size: letter portrait; margin: 40px 36px; }}
         body {{ margin: 0; font-family: Arial, "Liberation Sans", Helvetica, sans-serif; color: #000; font-size: 11px; }}
@@ -212,7 +217,6 @@ def hoja_html(tarifa: TarifaGuardada, comprobacion: Comprobacion | None) -> str:
         .tabla-comprobacion td:first-child {{ text-align: left; font-weight: bold; width: 220px; }}
         .tabla-comprobacion td {{ text-align: left; }}
         .col-principal {{ background: #EAF1FA; font-weight: bold; }}
-        .badge-manual {{ display: inline-block; background: #9A5B00; color: #fff; font-size: 9px; padding: 1px 5px; border-radius: 3px; }}
         .aviso-manual {{ background: #FFF4E5; border: 1px solid #9A5B00; padding: 6px 8px; margin: 6px 0; }}
         .comprobacion {{ margin-top: 6px; }}
         .pie-confirmacion {{ margin-top: 20px; padding-top: 8px; border-top: 1px solid #999; }}
