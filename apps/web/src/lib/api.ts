@@ -676,6 +676,6 @@ export interface ApiClient {
   descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
   /** URL de la hoja de revisión en PDF, para abrir o descargar (Task 11 de este mismo plan). Es
    * la única función de este bloque que no es asíncrona: no hace la petición, solo construye la
-   * URL para un `<a href>`. */
+   * URL para un `<a href>`. `require_admin`; no escribe bitácora, es una lectura. */
   urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
 }

@@ -57,7 +57,7 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,6 +105,7 @@ from app.services import anexo8
 from app.services import bitacora as bitacora_service
 from app.services import comprobacion_tarifa
 from app.services import configuracion_fiscal as cfg
+from app.services import revision_tarifa
 from app.services import sincronizacion_fiscal as sincronizacion
 from app.services import tarifa_isr as reglas
 
@@ -844,6 +845,27 @@ _ETIQUETAS_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
     PeriodicidadTarifa.EJERCICIO: "Anual (cálculo del ejercicio)",
 }
 
+# Solo para el nombre de archivo de la hoja de revisión (Task 11): sin acentos ni espacios, y sin
+# ser el nombre del enum tal cual (mismo criterio que `_ETIQUETAS_TARIFA` — ninguna etiqueta
+# visible, ni siquiera la de un nombre de archivo, es un nombre de enum).
+_SLUG_ARCHIVO_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
+    PeriodicidadTarifa.DIARIA: "diaria",
+    PeriodicidadTarifa.DIAS_7: "semanal",
+    PeriodicidadTarifa.DIAS_10: "decenal",
+    PeriodicidadTarifa.DIAS_15: "quincenal",
+    PeriodicidadTarifa.MENSUAL: "mensual",
+    PeriodicidadTarifa.EJERCICIO: "anual",
+}
+
+
+def _a_porcentaje(tasa: Decimal) -> Decimal:
+    """La tasa como número que un contador lee (`21.36`), no la fracción cruda que guarda la
+    columna (`0.2136`). Es el único número de toda la tarifa donde equivocar la escala cambia el
+    resultado por cien, así que es también el único punto del sistema que multiplica por 100:
+    `app.services.revision_tarifa` importa esta función (import diferido, para no cerrar un
+    ciclo — ver el docstring de `revision_tarifa.hoja_html`) en vez de repetir la conversión."""
+    return (tasa * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
 
 def _periodicidad_cfdi_de(periodicidad: PeriodicidadTarifa) -> str | None:
     """La clave de `c_PeriodicidadPago` que corresponde a esta tarifa, invirtiendo
@@ -856,7 +878,7 @@ def _periodicidad_cfdi_de(periodicidad: PeriodicidadTarifa) -> str | None:
 
 
 def _renglon_a_salida(r: reglas.Renglon) -> TarifaIsrRenglonOut:
-    tasa_porcentaje = (r.tasa_excedente * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    tasa_porcentaje = _a_porcentaje(r.tasa_excedente)
     return TarifaIsrRenglonOut(
         renglon=r.renglon,
         limite_inferior=str(r.limite_inferior),
@@ -1034,6 +1056,46 @@ async def listar_tarifa_isr(
     diseño) cuando hay uno disponible."""
     tarifas = await repo.listar(db)
     return await _importacion_a_salida(db, tarifas)
+
+
+@router.get("/tarifa-isr/{ejercicio}/{periodicidad}/hoja-revision")
+async def hoja_revision_tarifa_isr(
+    ejercicio: int,
+    periodicidad: PeriodicidadTarifa,
+    admin: Usuario = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """La hoja de revisión en PDF (Task 11, §7.4 del diseño): lo que el dueño del Hub le manda a
+    su contador —que no tiene cuenta en la aplicación— para que la revise fiscalmente antes de
+    que el dueño la confirme. Todo el contenido y el HTML del que sale viven en
+    `app.services.revision_tarifa`; aquí solo se resuelve la tarifa, su comprobación, y se
+    envuelve el PDF en la respuesta HTTP.
+
+    **Es una lectura y no escribe bitácora**, a diferencia de importar, corregir, confirmar o
+    borrar: generar esta hoja no cambia el estado de la tarifa, igual que el resto de los `GET`
+    de este recurso.
+
+    La ruta (`.../hoja-revision`, no `.../revision.pdf`) es la que la Task 9 ya declaró en
+    `apps/web/src/lib/api.http.ts` (`urlHojaDeRevisionTarifa`) por convención, a la espera de que
+    esta tarea la confirmara — queda confirmada tal cual.
+    """
+    tarifa = await repo.obtener(db, ejercicio=ejercicio, periodicidad=periodicidad)
+    if tarifa is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={
+                "codigo": "TARIFA_NO_ENCONTRADA",
+                "mensaje": f"No hay ninguna tarifa {periodicidad.value} de {ejercicio}.",
+            },
+        )
+    comprobacion = await comprobacion_tarifa.comprobar(db, tarifa=tarifa)
+    pdf = revision_tarifa.hoja_pdf(tarifa, comprobacion)
+    nombre = f"tarifa-isr-{ejercicio}-{_SLUG_ARCHIVO_TARIFA[periodicidad]}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{nombre}"'},
+    )
 
 
 @router.put("/tarifa-isr/{ejercicio}/{periodicidad}", response_model=TarifaIsrOut)

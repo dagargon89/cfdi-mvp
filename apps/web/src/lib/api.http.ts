@@ -341,9 +341,8 @@ export const apiHttp: ApiClientHttpSubset = {
   descartarTarifaIsr: (ejercicio, periodicidad) =>
     request<void>(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}`, { method: 'DELETE' }),
 
-  // Construye la URL, no la pide: el endpoint es de la Task 11 (hoja de revisión en PDF), que
-  // todavía no existe en el backend al escribir esto — verificar la ruta contra esa tarea antes
-  // de usarla en producción.
+  // Construye la URL, no la pide: el endpoint es de la Task 11 (hoja de revisión en PDF),
+  // `require_admin`, y no escribe bitácora (es una lectura). Ruta confirmada por esa tarea.
   urlHojaDeRevisionTarifa: (ejercicio, periodicidad) =>
     `${BASE_URL}/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}/hoja-revision`,
 };

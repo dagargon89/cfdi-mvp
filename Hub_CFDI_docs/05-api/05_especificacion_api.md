@@ -659,8 +659,9 @@ export interface ApiClient {
   /** Solo sobre una tarifa sin confirmar: 409 TARIFA_CONFIRMADA si ya se confirmó — para
    * reemplazar una confirmada se corrige a mano o se reimporta encima, no se borra primero. */
   descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
-  /** URL de la hoja de revisión en PDF (Task 11 de este mismo plan, todavía no construida en el
-   * backend al cerrar la Task 9): no hace la petición, solo arma la URL para un `<a href>`. */
+  /** URL de la hoja de revisión en PDF (Task 11 de este mismo plan): no hace la petición, solo
+   * arma la URL para un `<a href>`. `GET .../tarifa-isr/{ejercicio}/{periodicidad}/hoja-revision`,
+   * `require_admin`, no escribe bitácora (es una lectura). */
   urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
 }
 ```
