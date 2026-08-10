@@ -27,3 +27,22 @@ export function fechaHoraLegible(isoUtc: string): string {
   if (Number.isNaN(d.getTime())) return fechaLegible(isoUtc);
   return `${d.getDate()} de ${MESES[d.getMonth()]} de ${d.getFullYear()} a las ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
+
+/** Un número decimal tal como llega ("117.310000", "0.064000"), sin los ceros de relleno, que no
+ * son información — sirve tanto para importes como para fracciones (tasas, factores). Nunca pasa
+ * por `Number`: los contratos fiscales mandan estas cifras como cadena justamente para que no las
+ * toque un `float`, y esta función solo recorta texto. */
+export function importeLegible(valor: string): string {
+  if (!valor.includes('.')) return valor;
+  const recortado = valor.replace(/0+$/, '').replace(/\.$/, '');
+  return recortado === '' ? valor : recortado;
+}
+
+/** La fuente de un valor fiscal es texto libre que suele traer la URL del boletín o del DOF
+ * dentro. Se parte para poder ofrecerla como liga: revisar el valor contra su fuente es lo que se
+ * le pide a quien confirma, y obligarlo a copiar una URL a mano es pedirle que no lo haga. */
+export function partirFuente(fuente: string): { texto: string; url: string | null } {
+  const encontrado = /(https?:\/\/[^\s)]+)/.exec(fuente);
+  if (!encontrado) return { texto: fuente, url: null };
+  return { texto: fuente.replace(encontrado[1], '').replace(/[—–-]\s*$/, '').trim(), url: encontrado[1] };
+}

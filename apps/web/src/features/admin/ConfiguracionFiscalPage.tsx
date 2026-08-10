@@ -27,7 +27,8 @@ import type { AlertaVigencia, MotivoAlertaVigencia, ParametroFiscal } from '@/li
 import { api } from '@/lib/client';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
 import { MarcasPercepcionSection } from './MarcasPercepcionSection';
-import { fechaHoraLegible, fechaLegible, type EstadoFiscal } from './fiscalComun';
+import { TarifaIsrPanel } from './TarifaIsrPanel';
+import { fechaHoraLegible, fechaLegible, importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
 
 // --- catálogo de presentación ---------------------------------------------------------------
 // El backend manda la clave; el significado en español llano vive aquí. `siFalta` es lo que se
@@ -143,22 +144,9 @@ function hoyISO(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** La fuente es texto libre que suele traer la URL del boletín o del DOF dentro. Se parte para
- * poder ofrecerla como liga: revisar el valor contra su fuente es lo que se le pide a quien
- * confirma, y obligarlo a copiar una URL a mano es pedirle que no lo haga. */
-function partirFuente(fuente: string): { texto: string; url: string | null } {
-  const encontrado = /(https?:\/\/[^\s)]+)/.exec(fuente);
-  if (!encontrado) return { texto: fuente, url: null };
-  return { texto: fuente.replace(encontrado[1], '').replace(/[—–-]\s*$/, '').trim(), url: encontrado[1] };
-}
-
-/** El importe se muestra tal cual llega (cadena): `Number()` perdería la escala almacenada. Solo
- * se recortan los ceros decimales de relleno ("117.310000" → "117.31"), que no son información. */
-function importeLegible(valor: string): string {
-  if (!valor.includes('.')) return valor;
-  const recortado = valor.replace(/0+$/, '').replace(/\.$/, '');
-  return recortado === '' ? valor : recortado;
-}
+// `partirFuente` e `importeLegible` viven en `fiscalComun.ts`: la tarifa del ISR también necesita
+// citar una fuente y mostrar importes sin ceros de relleno, así que dejaron de ser exclusivos de
+// esta pantalla.
 
 // --- chip de estado ---------------------------------------------------------------------------
 // El chip vive en `ChipEstadoFiscal.tsx` (lo comparten las dos secciones). Aquí solo los textos:
@@ -432,6 +420,13 @@ export function ConfiguracionFiscalPage() {
           }}
         />
       )}
+
+      {/* La tarifa del ISR (Anexo 8 de la RMF), en su propio archivo: es un invariante hermano
+          ("una tarifa sin confirmar no calcula") pero con su propia entidad, sus propios
+          endpoints y su propia pantalla — no una sección más de esta página de 700 líneas. */}
+      <div className="border-t border-border pt-4 mt-2">
+        <TarifaIsrPanel />
+      </div>
 
       {/* La segunda mitad del mismo invariante: las marcas de exención del art. 93. Va debajo
           porque depende de la primera — las exenciones se calculan con la UMA y el salario mínimo
