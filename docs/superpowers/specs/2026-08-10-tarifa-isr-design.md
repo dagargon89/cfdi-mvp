@@ -81,8 +81,9 @@ problema**, así que la selección no puede depender de la forma.
 ## 3. Alcance
 
 **Dentro:** las tablas `tarifa_isr` y `tarifa_isr_renglon`; el importador del Anexo 8; la corrección
-manual de renglones; la confirmación por tarifa; las dos claves del subsidio al empleo en `param_fiscal`;
-la alarma de calendario; la pantalla y los endpoints.
+manual de renglones; la confirmación por tarifa; las dos claves del subsidio al empleo en `param_fiscal`
+y la UMA de 2025 como semilla; la alarma de calendario; la pantalla y los endpoints; la **comprobación
+contra un recibo real** (§7.3) y la **vista para revisión del contador** (§7.4).
 
 **Fuera, y por qué:**
 
@@ -92,7 +93,23 @@ la alarma de calendario; la pantalla y los endpoints.
 | Columnas 24-26 de **B-05** | Consumen esta tabla; se abordan con B-09 |
 | `tabla_subsidio` (modelo histórico de rangos) | Solo hace falta para recalcular ejercicios anteriores a 2025. Para 2026 el modelo de monto fijo es el único aplicable |
 | Descarga automática del PDF | Decisión explícita: alarma de calendario, la importación la dispara una persona |
-| Cargar la UMA de 2025 | Decisión aparte del dueño del repo (ver §7.2) |
+| Un rol nuevo para el contador | Se decidió que el dueño del Hub confirma y el contador revisa la vista de §7.4. Un rol `fiscal` acotado es lo correcto el día que haya contadores usando la app, y entonces se aborda con el RBAC completo, no de paso |
+
+## 3.1 Quién usa esto, y qué cambia por eso
+
+**El dueño del Hub no es contador.** Es quien importa, opera y confirma, y quien lee los mensajes de
+error. El contador es un revisor externo que no tiene cuenta en la aplicación.
+
+Eso tiene tres consecuencias que atraviesan el resto del diseño y no son cosmética:
+
+1. **La pantalla habla el idioma de un recibo de nómina, no el del Anexo 8.** El documento oficial dice
+   *"pagos que correspondan a un periodo de 15 días"*; la pantalla dice **"Quincenal (15 días)"** y
+   además *"es la que aplica a tu nómina"*.
+2. **Confirmar no puede exigir leer 77 números.** De ahí la comprobación contra un recibo real (§7.3):
+   es lo que permite que alguien decida con fundamento sin ser contador, y de paso cierra el único hueco
+   que las 6 pruebas no cubren (§7.3).
+3. **Todo mensaje dice qué hacer a continuación**, no solo qué pasó (§10). Un error que nombra una
+   excepción de Python no es un error reportado, es un error trasladado.
 
 ## 4. Esquema de datos
 
@@ -279,9 +296,86 @@ renglón, valor anterior → nuevo) y `CONFIRMAR`.
 
 En `/admin/config` → pestaña Fiscal, siguiendo los patrones que ya existen ahí (`ChipEstadoFiscal`,
 `ConfiguracionFiscalPage`): botón de importar, una tarjeta por tarifa con su chip de estado y su
-encabezado citado, y la rejilla de renglones editable. La tarjeta de la tarifa que aplica a la nómina
-observada se señala como tal, derivado de la periodicidad que los CFDI timbran realmente
-(`observados_de_empresa` ya resuelve ese tipo de pregunta).
+encabezado citado, y la rejilla de renglones editable.
+
+**Las etiquetas visibles no son los nombres del enum.** El enum de la columna conserva los nombres del
+Anexo (§4) porque es la fuente; la pantalla traduce:
+
+| En la columna | En la pantalla | Aplica a los CFDI con periodicidad |
+|---|---|---|
+| `DIARIA` | Diaria (por día trabajado) | `01` Diario |
+| `DIAS_7` | Semanal (7 días) | `02` Semanal |
+| `DIAS_10` | Decenal (10 días) | `10` Decenal |
+| `DIAS_15` | **Quincenal (15 días)** | `04` Quincenal |
+| `MENSUAL` | Mensual | `05` Mensual |
+| `EJERCICIO` | Anual (cálculo del ejercicio) | — se usa en el cálculo anual, no en un recibo |
+
+**La tarifa que aplica va primero y las demás van colapsadas**, derivado de la periodicidad que los CFDI
+timbran realmente (`observados_de_empresa` ya resuelve ese tipo de pregunta). Con la nómina actual, eso
+es la quincenal. Las otras cinco quedan disponibles pero no compiten por la atención de nadie.
+
+**Si la nómina timbra una periodicidad que el Anexo no publica** —`03` catorcenal, `06` bimestral— la
+pantalla lo dice explícitamente en vez de dejar un hueco: *"el Anexo 8 no publica tarifa catorcenal; con
+esa periodicidad el cálculo se hace proporcionando la mensual y queda rotulado"*. Es la regla B-09.R1, y
+enterarse aquí es mejor que enterarse cuando un informe salga marcado.
+
+**En la pantalla va la liga al portal del SAT y qué archivo buscar.** Quien tiene que subir el PDF no
+necesariamente sabe qué es el Anexo 8: la tarjeta vacía dice *"la tarifa del ISR se publica cada año en
+el Anexo 8 de la Resolución Miscelánea Fiscal, en el DOF de finales de diciembre"*, con la liga al
+minisitio de normatividad del SAT.
+
+### 7.3 La comprobación con un recibo real
+
+**Es lo que permite confirmar con fundamento sin ser contador, y cierra el único hueco que las 6 pruebas
+no pueden cubrir.** Las pruebas verifican que la tabla sea aritméticamente coherente; no pueden detectar
+que se cargó una tabla coherente **del ejercicio o de la periodicidad equivocada** (§2.1). Un cálculo
+sobre un recibo real sí: si la tarifa está mal elegida, el número sale visiblemente distinto del timbrado.
+
+Al confirmar, la pantalla toma **un recibo de nómina ya resguardado** de la periodicidad de esa tarifa y
+muestra:
+
+```
+Recibo del 1 al 15 de julio de 2026 · empleado 038 · 15 días pagados
+  Gravado del recibo (del propio CFDI)     $ 12,345.67
+  Renglón de la tarifa que le toca         4  (límite inferior 7,225.96 · 16.00 %)
+  ISR con la tarifa que estás confirmando  $  1,234.56
+  ISR que dice el CFDI                     $  1,230.00
+  Diferencia                               $      4.56
+```
+
+**Cuatro reglas para que esto ayude en vez de confundir:**
+
+1. **Usa el gravado que el propio CFDI declara** (`nomina_totales.total_gravado`), no una base recalculada
+   a partir de las marcas de percepción. Las 44 marcas están sin confirmar, así que una base derivada
+   saldría vacía y la comprobación no funcionaría justo cuando más se necesita: al cargar la tarifa por
+   primera vez.
+2. **Elige un recibo ordinario y sencillo**: `tipo_nomina = 'O'`, días pagados igual a los nominales de la
+   periodicidad, y sin percepciones extraordinarias. Si no existe ninguno así, lo dice y muestra el que
+   haya, advirtiendo por qué la diferencia es esperada.
+3. **Una diferencia no acusa a nadie.** El texto lo dice: *"una diferencia pequeña es normal — el ISR
+   timbrado puede incluir subsidio al empleo, ajustes del periodo o el procedimiento del art. 174. Lo que
+   esta comprobación detecta es un error de carga: si la tarifa estuviera en la escala equivocada o fuera
+   de otro año, la diferencia sería enorme, no de pesos."*
+4. **No es un dictamen fiscal y se rotula así**, con las mismas palabras en la pantalla. No es B-09: es un
+   cálculo sobre un recibo, sin universo, sin banderas y sin archivo de salida.
+
+`POST …/confirmar` **no exige** que la comprobación cuadre: exigirlo bloquearía una tarifa correcta cuando
+el patrón aplicó subsidio, que es el caso normal. La comprobación informa la decisión; no la toma.
+
+### 7.4 La vista para que la revise un contador
+
+El dueño del Hub confirma, pero la revisión fiscal es de alguien más, que no tiene cuenta. La pantalla
+genera una **vista imprimible** (y exportable a Excel, reutilizando el motor de informes que ya existe)
+con todo lo que un contador necesita para decir "sí, es correcta" sin entrar al sistema:
+
+- La tarifa completa, renglón por renglón, con las tasas en **porcentaje** —como las publica el SAT y como
+  las lee un contador— además de la fracción que guarda la columna.
+- El **encabezado del documento oficial citado literal**, su fecha de DOF y la huella SHA-256 del archivo.
+- Los renglones **corregidos a mano marcados**, con lo que decía el documento al lado.
+- La comprobación de §7.3 con el recibo real.
+- Qué queda pendiente: que alguien la confirme, y qué empieza a calcular cuando eso pase.
+
+Sale de un `GET` que ya devuelve todo eso; no hay endpoint nuevo, es presentación.
 
 ## 8. Subsidio al empleo
 
@@ -304,10 +398,18 @@ desde febrero) y el tope de ingreso (≈$11,492.66 mensuales) con su liga al dec
 no se cierran solos (regla 1 de `guardar_param_fiscal`), la semilla trae `vigencia_hasta` explícita en el
 tramo de enero.
 
-**Consecuencia declarada ahora, no descubierta después:** el subsidio de enero de 2026 no será
-calculable, porque `UMA_MENSUAL` solo tiene un tramo que arranca el 1-feb-2026 y la UMA de 2025 no está
-cargada. `valor_vigente` devolverá `None` y el faltante quedará visible como valor ausente, nunca como un
-cero silencioso. Cargar la UMA de 2025 es una decisión aparte del dueño del repo y no entra aquí.
+**Las etiquetas de estas dos claves también se traducen** (§7.2 aplica igual aquí). `SUBSIDIO_FACTOR_UMA`
+se muestra como **"Subsidio al empleo — porcentaje de la UMA mensual"** y `SUBSIDIO_TOPE_INGRESO` como
+**"Ingreso mensual máximo para tener derecho al subsidio"**, cada una con una línea de qué es y qué pasa
+si no se confirma. Una clave en mayúsculas con guiones bajos no le dice nada a quien tiene que decidir si
+el número está bien.
+
+**La UMA de 2025 entra como semilla, y esto cambia respecto de la primera versión de este diseño.** Sin
+ella, el subsidio de enero de 2026 no sería calculable: `UMA_MENSUAL` solo tiene un tramo que arranca el
+1-feb-2026, así que `valor_vigente` devolvería `None` para cualquier recibo de enero. Declararlo como
+limitación era defendible para un lector técnico; para quien tiene que explicar por qué los recibos de
+enero no salen, es una trampa. Son valores históricos, ya cerrados y públicos, y entran por el mismo
+camino que los demás: propuestos con su liga al boletín del INEGI, confirmados con un clic.
 
 ## 9. La alarma de calendario
 
@@ -324,20 +426,29 @@ usa es exactamente la alarma permanentemente encendida que el docstring del mód
 argumenta que no hay que construir: *"una alarma siempre encendida es una alarma que se aprende a
 ignorar"*. Si no hay nómina normalizada todavía, no hay nada que recalcular y no se alerta.
 
+**La alerta dice qué hacer, no solo qué falta.** No *"TARIFA_ISR: AUSENTE"*, sino: *"Falta la tarifa del
+ISR de 2027. Descarga el Anexo 8 de la Resolución Miscelánea Fiscal del portal del SAT (liga) y súbelo en
+Configuración → Fiscal."* Una alerta que solo nombra un estado obliga a quien la lee a saber de antemano
+qué hacer con ella.
+
 ## 10. Errores
 
-Cada mensaje dice qué documento, qué tarifa, qué renglón y qué se esperaba. Un fallo al cargar es
-barato; un cálculo incorrecto tres meses después no.
+Cada mensaje dice qué documento, qué tarifa, qué renglón, qué se esperaba **y qué hacer**. Un fallo al
+cargar es barato; un cálculo incorrecto tres meses después no.
 
-| Situación | Qué pasa |
+**El nombre de la excepción es para el log, nunca para la pantalla.** `CorreccionManualProtegida` es un
+tipo útil para el código y una pared para quien lo lee. La columna derecha es lo que se ve:
+
+| Situación (excepción interna) | Lo que lee la persona |
 |---|---|
-| PDF sin capa de texto (escaneo) | Rechazo explícito: *"el PDF no tiene texto extraíble; ¿es un escaneo?"* |
-| El archivo no es el Anexo 8 | Ancla no encontrada: dice qué encabezados esperaba y no importa nada |
-| Una tarifa falla una prueba | No se importa **ninguna**; se nombra la tarifa, la prueba y los valores |
-| Corrección que rompe la continuidad | Rechazo con el hueco exacto: *"`limite_inferior` del renglón 4 debía ser 6,216.16 y llegó 6,216.00"* |
-| Reimportar sobre una corrección manual | `CorreccionManualProtegida`, sin pisar nada |
-| Confirmar algo que cambió mientras se revisaba | `ValorCambio`, con la huella de renglones |
-| Tarifa sin renglones, o con uno solo | Rechazo: una tarifa de un renglón es una tabla que se extrajo a medias |
+| PDF sin capa de texto | *"Este PDF no tiene texto, parece un escaneo o una foto. Descarga el archivo del portal del SAT en vez de una copia escaneada."* |
+| El archivo no es el Anexo 8 | *"No encontré ninguna tarifa de sueldos en este archivo. Debe ser el Anexo 8 de la Resolución Miscelánea Fiscal (busca 'Anexo 8' y el año en el portal del SAT). No se cargó nada."* |
+| Una tarifa falla una prueba | *"La tarifa quincenal del documento no cuadra: entre el renglón 3 y el 4 falta un tramo (el 3 termina en 6,216.15 y el 4 empieza en 6,300.00). No se cargó ninguna tarifa; revisa que el PDF esté completo o corrige el renglón a mano."* |
+| Corrección que rompe la continuidad (`ErrorDeConfiguracion`) | *"El renglón 4 debe empezar exactamente un centavo después de donde termina el 3: 6,216.16, y capturaste 6,216.00. Así lo publica el SAT y así lo exige el cálculo."* |
+| Reimportar sobre una corrección manual (`CorreccionManualProtegida`) | *"Corregiste a mano el renglón 7 de esta tarifa y el documento dice otra cosa. No lo sobreescribí. Si el documento nuevo es el bueno, descarta la tarifa y vuelve a importar."* |
+| Confirmar algo que cambió mientras se revisaba (`ValorCambio`) | *"Esta tarifa cambió mientras la revisabas, así que no la confirmé. Vuelve a cargar la pantalla y revísala otra vez."* |
+| Tarifa con un solo renglón | *"Esta tarifa salió con un solo renglón, así que la extracción quedó incompleta. No se cargó."* |
+| El archivo pesa más de 10 MB o trae más de 100 páginas | *"El archivo es más grande de lo que debería (el Anexo 8 pesa menos de 1 MB). ¿Es el archivo correcto?"* |
 
 ## 11. Pruebas
 
@@ -356,6 +467,12 @@ como al corregir a mano**.
 10. **Por mutación:** si se quita el `/ 100`, la prueba 5 **debe fallar**. Se exige mirar el conteo de
     selección de `-k`, no el código de salida — un `-k` que no selecciona nada sale con código 5 y se ve
     igual que una prueba muerta (cuatro trampas documentadas en `tests/test_cli_configuracion.py`).
+
+**Una prueba de que la comprobación de §7.3 sirve para lo que se construyó.** Se le da al comprobador la
+tarifa **anual** aplicada a un recibo quincenal —tabla internamente coherente, periodicidad equivocada,
+el caso que las 6 pruebas no atrapan— y se verifica que la diferencia contra el ISR timbrado sale de un
+orden de magnitud, no de pesos. Si esa prueba pasara con una diferencia pequeña, la comprobación no
+estaría cerrando el hueco y sería adorno.
 
 **El PDF oficial se versiona como fixture** (`tests/fixtures/anexo8-2026.pdf`, 301 KB). La regla no
 negociable 12 lo permite: es un documento público del DOF, sin datos de terceros ni personales. Sin él,
@@ -380,10 +497,18 @@ Contra el sistema corriendo y la BD real, no contra dobles:
 5. Confirmar la tarifa de 15 días y comprobar que el resolutor por fecha la devuelve, y que antes de
    confirmarla devolvía ausencia.
 6. Comprobar que la alerta `TARIFA_ISR` pasa de `AUSENTE`/`SIN_CONFIRMAR` a apagada.
-7. Sembrar y confirmar las dos claves del subsidio; comprobar que enero de 2026 queda declarado como no
-   calculable por falta de UMA de enero.
-8. `.venv/bin/mypy --strict app` limpio; `config/fiscal/README.md` actualizado con el estado real de lo
-   confirmado y lo que falta.
+7. Ver la **comprobación con un recibo real** de la quincena de julio de 2026: que elija un recibo
+   ordinario, que resuelva el renglón correcto y que la diferencia contra el ISR timbrado sea de pesos, no
+   de órdenes de magnitud.
+8. Abrir la **vista para el contador** y comprobar que se puede imprimir y exportar, que trae las tasas en
+   porcentaje, la cita del documento con su huella, y los renglones corregidos marcados.
+9. Sembrar y confirmar las dos claves del subsidio **y la UMA de 2025**; comprobar que un recibo de enero
+   de 2026 resuelve subsidio en vez de quedar sin valor.
+10. Revisar la pantalla con ojos de quien no es contador: que ninguna etiqueta visible sea un nombre de
+    enum (`DIAS_15`) ni una clave en mayúsculas (`SUBSIDIO_FACTOR_UMA`), y que cada mensaje de error diga
+    qué hacer. Se revisa leyendo la pantalla, no el código.
+11. `.venv/bin/mypy --strict app` limpio; `config/fiscal/README.md` actualizado con el estado real de lo
+    confirmado y lo que falta, y con la nota de que la revisión fiscal la hace un contador.
 
 ## 13. Riesgos
 
@@ -393,6 +518,8 @@ Contra el sistema corriendo y la BD real, no contra dobles:
 | Una corrección manual introduce un error de transcripción | Las 6 pruebas se re-corren completas; la confirmación se limpia; la bitácora guarda el valor anterior |
 | Se importa el Anexo 8 de otro año por error | Las tarifas entran con el ejercicio de su propio encabezado, sin confirmar, y se pueden descartar con el `DELETE`; nada calcula mientras no se confirmen |
 | Un PDF enorme o malicioso subido al endpoint | Límites en la puerta, antes de pasarlo al extractor: **10 MB** y **100 páginas** (el Anexo 8 real pesa 301 KB y trae 19). Se rechaza con un mensaje que dice el límite, no con un 500 |
+| **La comprobación de §7.3 se lee como un dictamen fiscal** — que el sistema "dijo" que el patrón retuvo mal | Se rotula como comprobación de la carga en la propia pantalla y en la vista del contador; enumera las tres razones legítimas por las que el timbrado puede diferir; y **no bloquea** la confirmación. El riesgo inverso —no dar ninguna forma de verificar— es peor: deja la decisión en comparar 77 números a mano |
+| Quien confirma no es contador y confirma algo incorrecto | La vista de §7.4 existe para que un contador revise antes; `confirmado_por` deja registro de quién lo hizo; y la corrección manual permite enmendarlo sin rehacer nada |
 
 ## 14. Divergencias declaradas del documento fuente
 
