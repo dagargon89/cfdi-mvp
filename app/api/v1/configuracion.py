@@ -51,22 +51,27 @@ no protege nada y le deja un informe degradado que no puede explicarse.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Final
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ContextoEmpresa, get_db, require_admin, require_empresa
 from app.api.v1.schemas import (
     AlertaVigenciaOut,
     CatalogoPercepcionesOut,
+    ComprobacionOut,
     ConceptoObservadoOut,
     ConfiguracionEmpresaIn,
     ConfiguracionEmpresaOut,
     ConfiguracionFiscalOut,
     DepartamentoObservadoOut,
+    ImportacionTarifasOut,
     MapConceptoProvisionOut,
     MapDepartamentoOut,
     MapeosEmpresaIn,
@@ -79,8 +84,13 @@ from app.api.v1.schemas import (
     ParamFiscalConfirmarIn,
     ParamFiscalGuardarIn,
     ParamFiscalOut,
+    TarifaIsrConfirmarIn,
+    TarifaIsrCorregirIn,
+    TarifaIsrOut,
+    TarifaIsrRenglonOut,
 )
 from app.informes import catalogos
+from app.models.comprobante import Comprobante
 from app.models.configuracion_fiscal import (
     CatalogoPercepcionMarca,
     ConfiguracionEmpresa,
@@ -89,11 +99,16 @@ from app.models.configuracion_fiscal import (
     ParamFiscal,
 )
 from app.models.empresa import Empresa
-from app.models.enums import OrigenValor, RolEmpresa
+from app.models.enums import EstatusCfdi, OrigenTarifa, OrigenValor, PeriodicidadTarifa, RolEmpresa
+from app.models.nomina import NominaReceptor
 from app.models.usuario import Usuario
+from app.repositories import tarifa_isr as repo
+from app.services import anexo8
 from app.services import bitacora as bitacora_service
+from app.services import comprobacion_tarifa
 from app.services import configuracion_fiscal as cfg
 from app.services import sincronizacion_fiscal as sincronizacion
+from app.services import tarifa_isr as reglas
 
 router = APIRouter(prefix="/configuracion", tags=["configuracion-fiscal"])
 router_empresa = APIRouter(prefix="/empresas/{empresa_id}/configuracion", tags=["configuracion-fiscal"])
@@ -803,3 +818,362 @@ async def conceptos_observados(
         sin_clasificar=len(cfg.percepciones_sin_clasificar(observados)),
         sin_mapear=sum(1 for d in departamentos if d.centro_costo is None),
     )
+
+
+# --------------------------------------------------------------------------------------
+# Tarifa del ISR (Anexo 8 de la RMF) — Task 6, doc 05 §8bis
+#
+# Mismo invariante que el resto del recurso: **una tarifa sin confirmar no calcula.** Importar
+# y corregir *proponen*; solo `confirmar` la activa, y exige la huella de lo que se revisó —
+# mismo mecanismo que `confirmar_param_fiscal`. Toda la validación real —las seis pruebas del
+# Anexo I.1, los cinco casos de reimportación, el candado que serializa a dos escritores— vive
+# en `app.services.tarifa_isr` y `app.repositories.tarifa_isr`; aquí solo se traduce a HTTP y
+# se escribe la bitácora, en la misma transacción que la operación (regla 8).
+#
+# Los mensajes de las excepciones de esos dos módulos viajan **tal cual** en `detail.mensaje`:
+# los escribieron pensando en quien los va a leer —el dueño del Hub, que no es contador—, y
+# reescribirlos aquí los degradaría a un texto genérico. El nombre de la excepción
+# (`CorreccionManualProtegida`, `TarifaInvalida`...) no aparece nunca en la respuesta.
+# --------------------------------------------------------------------------------------
+
+
+_ETIQUETAS_TARIFA: Final[Mapping[PeriodicidadTarifa, str]] = {
+    PeriodicidadTarifa.DIARIA: "Diaria (por día trabajado)",
+    PeriodicidadTarifa.DIAS_7: "Semanal (7 días)",
+    PeriodicidadTarifa.DIAS_10: "Decenal (10 días)",
+    PeriodicidadTarifa.DIAS_15: "Quincenal (15 días)",
+    PeriodicidadTarifa.MENSUAL: "Mensual",
+    PeriodicidadTarifa.EJERCICIO: "Anual (cálculo del ejercicio)",
+}
+
+
+def _periodicidad_cfdi_de(periodicidad: PeriodicidadTarifa) -> str | None:
+    """La clave de `c_PeriodicidadPago` que corresponde a esta tarifa, invirtiendo
+    `reglas.PARA_CFDI`. `None` para `EJERCICIO`: el Anexo la publica para el ingreso de todo
+    un año, no para un recibo, así que ninguna clave del CFDI le corresponde."""
+    for clave, valor in reglas.PARA_CFDI.items():
+        if valor is periodicidad:
+            return clave
+    return None
+
+
+def _renglon_a_salida(r: reglas.Renglon) -> TarifaIsrRenglonOut:
+    tasa_porcentaje = (r.tasa_excedente * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return TarifaIsrRenglonOut(
+        renglon=r.renglon,
+        limite_inferior=str(r.limite_inferior),
+        limite_superior=str(r.limite_superior) if r.limite_superior is not None else None,
+        cuota_fija=str(r.cuota_fija),
+        tasa_excedente=str(r.tasa_excedente),
+        tasa_porcentaje=str(tasa_porcentaje),
+    )
+
+
+def _renglon_a_detalle(r: reglas.Renglon) -> dict[str, Any]:
+    """Un renglón en tipos que el `JSON` de `bitacora` sabe guardar sin perder precisión (el
+    `Decimal` va como texto — mismo argumento que `_marca_a_detalle`)."""
+    return {
+        "renglon": r.renglon,
+        "limite_inferior": str(r.limite_inferior),
+        "limite_superior": str(r.limite_superior) if r.limite_superior is not None else None,
+        "cuota_fija": str(r.cuota_fija),
+        "tasa_excedente": str(r.tasa_excedente),
+    }
+
+
+def _comprobacion_a_salida(c: comprobacion_tarifa.Comprobacion) -> ComprobacionOut:
+    return ComprobacionOut(
+        uuid=c.uuid,
+        fecha_inicial_pago=c.fecha_inicial_pago,
+        fecha_final_pago=c.fecha_final_pago,
+        num_empleado=c.num_empleado,
+        dias_pagados=str(c.dias_pagados) if c.dias_pagados is not None else None,
+        gravado=str(c.gravado),
+        renglon=c.renglon,
+        limite_inferior=str(c.limite_inferior),
+        tasa_excedente=str(c.tasa_excedente),
+        isr_calculado=str(c.isr_calculado),
+        isr_timbrado=str(c.isr_timbrado),
+        diferencia=str(c.diferencia),
+        advertencias=list(c.advertencias),
+    )
+
+
+async def _periodicidad_observada(db: AsyncSession) -> tuple[PeriodicidadTarifa | None, list[str]]:
+    """La periodicidad que de verdad timbra la nómina, y las claves de `c_PeriodicidadPago`
+    para las que el Anexo 8 no publica tarifa (B-09.R1: catorcenal `03`, bimestral `06`).
+
+    Una sola consulta agregada (regla 11: nunca una por tarifa ni una por recibo). La
+    "dominante" es la más frecuente, con el mismo desempate que
+    `app.informes.periodos.periodicidad_dominante` (la clave menor como texto): dos lecturas
+    sobre el mismo universo tienen que marcar la misma tarifa como la que aplica.
+    """
+    filas = (
+        await db.execute(
+            select(NominaReceptor.periodicidad_pago, func.count())
+            .join(Comprobante, Comprobante.comprobante_id == NominaReceptor.comprobante_id)
+            .where(
+                Comprobante.estatus != EstatusCfdi.CANCELADO,
+                NominaReceptor.periodicidad_pago.is_not(None),
+            )
+            .group_by(NominaReceptor.periodicidad_pago)
+        )
+    ).all()
+    # El `WHERE ... is_not(None)` ya lo garantiza en tiempo de ejecución; el filtro es para que
+    # `mypy --strict` sepa que `clave` no es opcional al usarla como llave de `PARA_CFDI`.
+    conteo: list[tuple[str, int]] = [(clave, n) for clave, n in filas if clave is not None]
+    sin_tarifa = sorted({clave for clave, _n in conteo if reglas.PARA_CFDI.get(clave) is None})
+    soportadas = [(clave, n) for clave, n in conteo if reglas.PARA_CFDI.get(clave) is not None]
+    if not soportadas:
+        return None, sin_tarifa
+    clave_dominante = min(soportadas, key=lambda kv: (-kv[1], kv[0]))[0]
+    return reglas.PARA_CFDI[clave_dominante], sin_tarifa
+
+
+async def _tarifa_a_salida(
+    db: AsyncSession, tarifa: repo.TarifaGuardada, *, dominante: PeriodicidadTarifa | None
+) -> TarifaIsrOut:
+    # Una consulta por tarifa (acotadas a ~7, nunca una por CFDI): la misma proporción que
+    # `_descripcion_percepcion` sobre las 44 marcas, no el N+1 que la regla 11 prohíbe.
+    comprobacion = await comprobacion_tarifa.comprobar(db, tarifa=tarifa)
+    return TarifaIsrOut(
+        ejercicio=tarifa.ejercicio,
+        periodicidad=tarifa.periodicidad,
+        etiqueta=_ETIQUETAS_TARIFA[tarifa.periodicidad],
+        periodicidad_cfdi=_periodicidad_cfdi_de(tarifa.periodicidad),
+        origen=tarifa.origen,
+        fuente=tarifa.fuente,
+        documento_sha256=tarifa.documento_sha256,
+        encabezado=tarifa.encabezado,
+        importado_en=tarifa.importado_en,
+        confirmado_por=tarifa.confirmado_por,
+        confirmado_en=tarifa.confirmado_en,
+        confirmada=tarifa.confirmada,
+        # Una tarifa corregida a mano ya no es, por definición, lo que dice el último
+        # documento importado (§6.4 del diseño): si coincidiera número por número con el
+        # documento, `guardar_importadas` la habría regresado a `IMPORTADA` en silencio (caso
+        # 6 del docstring del repositorio).
+        difiere_del_documento=tarifa.origen is OrigenTarifa.MANUAL,
+        aplica_a_la_nomina=dominante is not None and tarifa.periodicidad is dominante,
+        huella=tarifa.huella,
+        renglones=[_renglon_a_salida(r) for r in tarifa.renglones],
+        comprobacion=_comprobacion_a_salida(comprobacion) if comprobacion is not None else None,
+    )
+
+
+async def _importacion_a_salida(db: AsyncSession, tarifas: Sequence[repo.TarifaGuardada]) -> ImportacionTarifasOut:
+    """El helper que comparten el `GET` y el `POST` de importar: arma `TarifaIsrOut` por
+    tarifa —con la etiqueta legible, `aplica_a_la_nomina` y la comprobación de la Task 5— más
+    `periodicidades_sin_tarifa`. Existe una sola vez para que la lista y la importación no
+    puedan divergir en lo que muestran."""
+    dominante, sin_tarifa = await _periodicidad_observada(db)
+    return ImportacionTarifasOut(
+        tarifas=[await _tarifa_a_salida(db, t, dominante=dominante) for t in tarifas],
+        periodicidades_sin_tarifa=sin_tarifa,
+    )
+
+
+@router.post("/tarifa-isr/importar", response_model=ImportacionTarifasOut)
+async def importar_tarifa_isr(
+    archivo: UploadFile = File(..., description="PDF del Anexo 8 de la RMF, tal como lo publica el SAT."),
+    admin: Usuario = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ImportacionTarifasOut:
+    """Extrae las tarifas de sueldos del Anexo 8 y las deja **propuestas, sin confirmar**.
+
+    Si cualquier tarifa del documento falla una validación no se guarda ninguna: un Anexo 8 a
+    medio cargar no se distingue de uno que legítimamente traía menos tablas (§5.3 del diseño).
+    """
+    contenido = await archivo.read()
+    sha256 = hashlib.sha256(contenido).hexdigest()
+    try:
+        extraidas = anexo8.extraer(contenido)
+    except anexo8.ArchivoDemasiadoGrande as exc:
+        # Antes que `DocumentoInvalido`, del que hereda: el orden de los `except` es lo que
+        # distingue los dos códigos HTTP.
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"codigo": "ARCHIVO_DEMASIADO_GRANDE", "mensaje": str(exc)},
+        ) from exc
+    except anexo8.DocumentoInvalido as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"codigo": "DOCUMENTO_INVALIDO", "mensaje": str(exc)},
+        ) from exc
+    except reglas.TarifaInvalida as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"codigo": "TARIFA_INVALIDA", "mensaje": str(exc)}
+        ) from exc
+
+    # `fuente` se arma del nombre del archivo subido más la fecha de la petición: es la
+    # procedencia que verá quien revise, y el nombre oficial del Anexo ya trae la fecha del DOF.
+    fuente = f"{archivo.filename or 'Anexo 8'} (importado el {date.today().isoformat()})"
+    try:
+        guardadas = await repo.guardar_importadas(db, extraidas, fuente=fuente, sha256=sha256)
+    except repo.CorreccionManualProtegida as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "CORRECCION_MANUAL", "mensaje": str(exc)}
+        ) from exc
+
+    # Un renglón por tarifa: la entidad de la bitácora es la tarifa, que es la unidad que se
+    # confirma.
+    for tarifa in guardadas:
+        await bitacora_service.registrar(
+            db,
+            actor=admin.correo,
+            accion="importar_tarifa_isr",
+            entidad=f"tarifa_isr:{tarifa.ejercicio}/{tarifa.periodicidad.value}",
+            detalle={
+                "huella": tarifa.huella,
+                "renglones": len(tarifa.renglones),
+                "documento_sha256": sha256,
+                "encabezado": tarifa.encabezado,
+                "fuente": fuente,
+            },
+        )
+    await db.commit()
+    return await _importacion_a_salida(db, guardadas)
+
+
+@router.get("/tarifa-isr", response_model=ImportacionTarifasOut)
+async def listar_tarifa_isr(
+    admin: Usuario = Depends(require_admin), db: AsyncSession = Depends(get_db)
+) -> ImportacionTarifasOut:
+    """Todas las tarifas guardadas, confirmadas o no, con su encabezado citado, sus renglones,
+    la que aplica a la nómina real (B-09.R1) y la comprobación contra un recibo (§7.3 del
+    diseño) cuando hay uno disponible."""
+    tarifas = await repo.listar(db)
+    return await _importacion_a_salida(db, tarifas)
+
+
+@router.put("/tarifa-isr/{ejercicio}/{periodicidad}", response_model=TarifaIsrOut)
+async def corregir_tarifa_isr(
+    ejercicio: int,
+    periodicidad: PeriodicidadTarifa,
+    body: TarifaIsrCorregirIn,
+    admin: Usuario = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TarifaIsrOut:
+    """Corrección manual: reemplaza los renglones completos de una tarifa. Queda con
+    `origen: MANUAL` y **sin confirmar** — corregir tampoco confirma, ni siquiera cuando quien
+    corrige es la misma persona que confirmaría.
+
+    Toda la validación —las seis pruebas del Anexo I.1 sobre la tarifa **entera**, no solo el
+    renglón que cambió— vive en `tarifa_isr.validar` vía `repo.guardar_manual`; no se duplica
+    aquí.
+    """
+    anterior = await repo.obtener(db, ejercicio=ejercicio, periodicidad=periodicidad)
+    renglones = [
+        reglas.Renglon(
+            renglon=r.renglon,
+            limite_inferior=r.limite_inferior,
+            limite_superior=r.limite_superior,
+            cuota_fija=r.cuota_fija,
+            tasa_excedente=r.tasa_excedente,
+        )
+        for r in body.renglones
+    ]
+    fuente = f"Corrección manual de {admin.correo} el {date.today().isoformat()}"
+    try:
+        tarifa = await repo.guardar_manual(
+            db, ejercicio=ejercicio, periodicidad=periodicidad, renglones=renglones, fuente=fuente
+        )
+    except reglas.TarifaInvalida as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, detail={"codigo": "TARIFA_INVALIDA", "mensaje": str(exc)}
+        ) from exc
+
+    await bitacora_service.registrar(
+        db,
+        actor=admin.correo,
+        accion="corregir_tarifa_isr",
+        entidad=f"tarifa_isr:{ejercicio}/{periodicidad.value}",
+        detalle={
+            "anterior": [_renglon_a_detalle(r) for r in anterior.renglones] if anterior is not None else None,
+            "nuevo": [_renglon_a_detalle(r) for r in renglones],
+        },
+    )
+    await db.commit()
+    dominante, _sin_tarifa = await _periodicidad_observada(db)
+    return await _tarifa_a_salida(db, tarifa, dominante=dominante)
+
+
+@router.post("/tarifa-isr/{ejercicio}/{periodicidad}/confirmar", response_model=TarifaIsrOut)
+async def confirmar_tarifa_isr(
+    ejercicio: int,
+    periodicidad: PeriodicidadTarifa,
+    body: TarifaIsrConfirmarIn,
+    admin: Usuario = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TarifaIsrOut:
+    """Confirma una tarifa propuesta: a partir de aquí la puede usar el resolutor de B-09.
+
+    Exige la huella de los renglones que se revisaron (`repo.confirmar`) y responde `409` si
+    no coincide con la almacenada — el mismo mecanismo que `confirmar_param_fiscal`, para el
+    mismo escenario: una propuesta que cambió entre que se pintó la pantalla y que se hizo clic.
+    """
+    try:
+        tarifa, cambio = await repo.confirmar(
+            db, ejercicio=ejercicio, periodicidad=periodicidad, huella_revisada=body.huella, actor=admin.correo
+        )
+    except repo.NoEncontrada as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"codigo": "TARIFA_NO_ENCONTRADA", "mensaje": str(exc)}
+        ) from exc
+    except repo.ValorCambio as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "TARIFA_CAMBIO", "mensaje": str(exc)}
+        ) from exc
+
+    if cambio:
+        await bitacora_service.registrar(
+            db,
+            actor=admin.correo,
+            accion="confirmar_tarifa_isr",
+            entidad=f"tarifa_isr:{ejercicio}/{periodicidad.value}",
+            detalle={"huella": tarifa.huella, "confirmado_por": admin.correo},
+        )
+        await db.commit()
+    # Reconfirmar lo ya confirmado no cambia nada (idempotente) y no deja bitácora de un
+    # cambio que no ocurrió — mismo criterio que `confirmar_fiscal`.
+    dominante, _sin_tarifa = await _periodicidad_observada(db)
+    return await _tarifa_a_salida(db, tarifa, dominante=dominante)
+
+
+@router.delete("/tarifa-isr/{ejercicio}/{periodicidad}", status_code=status.HTTP_204_NO_CONTENT)
+async def borrar_tarifa_isr(
+    ejercicio: int,
+    periodicidad: PeriodicidadTarifa,
+    admin: Usuario = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Descarta una tarifa **sin confirmar**, para limpiar una importación equivocada.
+
+    Se rechaza sobre una tarifa confirmada (`repo.YaConfirmada`): borrarla la haría
+    desaparecer sin sustituto y convertiría un cálculo que funcionaba en uno ausente sin
+    explicación. Para reemplazar una confirmada, se corrige a mano o se reimporta; no se
+    borra primero.
+    """
+    anterior = await repo.obtener(db, ejercicio=ejercicio, periodicidad=periodicidad)
+    try:
+        await repo.borrar(db, ejercicio=ejercicio, periodicidad=periodicidad)
+    except repo.NoEncontrada as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail={"codigo": "TARIFA_NO_ENCONTRADA", "mensaje": str(exc)}
+        ) from exc
+    except repo.YaConfirmada as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "TARIFA_CONFIRMADA", "mensaje": str(exc)}
+        ) from exc
+
+    # `repo.borrar` ya habría lanzado `NoEncontrada` si `anterior` fuera `None`: si llegamos
+    # aquí, la tarifa existía.
+    assert anterior is not None
+    await bitacora_service.registrar(
+        db,
+        actor=admin.correo,
+        accion="borrar_tarifa_isr",
+        entidad=f"tarifa_isr:{ejercicio}/{periodicidad.value}",
+        detalle={"anterior": [_renglon_a_detalle(r) for r in anterior.renglones]},
+    )
+    await db.commit()

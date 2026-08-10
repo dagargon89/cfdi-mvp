@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -11,6 +11,8 @@ from pydantic import BaseModel, BeforeValidator, EmailStr, Field, field_validato
 from app.models.enums import (
     BaseExencion,
     CategoriaProvision,
+    OrigenTarifa,
+    PeriodicidadTarifa,
     RolEmpresa,
     RolGlobal,
     SolicitudTipo,
@@ -733,3 +735,117 @@ class ObservadosEmpresaOut(BaseModel):
     departamentos: list[DepartamentoObservadoOut]
     sin_clasificar: int
     sin_mapear: int
+
+
+# --------------------------------------------------------------------------------------
+# Tarifa del ISR (Anexo 8 de la RMF) — Task 6, doc 05 §8bis
+# --------------------------------------------------------------------------------------
+
+
+class TarifaIsrRenglonIn(BaseModel):
+    """Un renglón para corregir a mano. Mismos límites de escala que las columnas
+    `DECIMAL(14,2)` (importes) y `DECIMAL(7,6)` (tasa): un valor que no cabe se rechaza aquí,
+    con un mensaje, en vez de reventar en MySQL como 500. `ImporteExacto` rechaza además un
+    número JSON, por la misma razón que en `ParamFiscalGuardarIn`: la huella se calcula sobre
+    el `Decimal` exacto y un `float` que perdió precisión la haría no coincidir nunca."""
+
+    renglon: int = Field(ge=1)
+    limite_inferior: Annotated[Decimal, BeforeValidator(_sin_float), Field(max_digits=14, decimal_places=2)]
+    limite_superior: (
+        Annotated[Decimal, BeforeValidator(_sin_float), Field(max_digits=14, decimal_places=2)] | None
+    ) = None
+    cuota_fija: Annotated[Decimal, BeforeValidator(_sin_float), Field(max_digits=14, decimal_places=2)]
+    tasa_excedente: Annotated[Decimal, BeforeValidator(_sin_float), Field(max_digits=7, decimal_places=6)]
+
+
+class TarifaIsrCorregirIn(BaseModel):
+    """Cuerpo del `PUT` de corrección manual: la **lista completa** de renglones, no un diff.
+    Se revalidan las seis pruebas del Anexo I.1 sobre la tarifa entera — cambiar un renglón
+    puede romper la continuidad con su vecino, y validar solo el que cambió dejaría pasar
+    justo ese hueco."""
+
+    renglones: list[TarifaIsrRenglonIn]
+
+
+class TarifaIsrConfirmarIn(BaseModel):
+    """El cliente manda la huella de **lo que revisó**. Si no coincide con la almacenada, 409:
+    la tarifa cambió entre que se pintó la pantalla y que se hizo clic."""
+
+    huella: str
+
+
+class TarifaIsrRenglonOut(BaseModel):
+    renglon: int
+    limite_inferior: str
+    limite_superior: str | None
+    cuota_fija: str
+    # La fracción que se guarda y calcula.
+    tasa_excedente: str
+    # El mismo número como lo publica el SAT y como lo lee un contador. Lo calcula el
+    # servidor para que la pantalla no tenga que multiplicar por 100 y arriesgar un error de
+    # presentación en el único número donde la escala importa.
+    tasa_porcentaje: str
+
+
+class ComprobacionOut(BaseModel):
+    """Los dos números lado a lado que alguien que no es contador puede comparar de un
+    vistazo (§7.3 del diseño). No es un dictamen: una diferencia de pesos es normal (subsidio
+    al empleo, ajustes del periodo); lo que delata un error de carga es una diferencia grande
+    en proporción al impuesto, y eso lo dice `advertencias`, no un semáforo aquí."""
+
+    uuid: str
+    fecha_inicial_pago: date | None
+    fecha_final_pago: date | None
+    num_empleado: str | None
+    dias_pagados: str | None
+    gravado: str
+    renglon: int
+    limite_inferior: str
+    tasa_excedente: str
+    isr_calculado: str
+    isr_timbrado: str
+    diferencia: str
+    advertencias: list[str]
+
+
+class TarifaIsrOut(BaseModel):
+    """Una tarifa completa, con su procedencia, su estado de confirmación y sus renglones."""
+
+    ejercicio: int
+    periodicidad: PeriodicidadTarifa
+    # Etiqueta en el idioma de un recibo de nómina: "Quincenal (15 días)". Nunca el nombre del
+    # enum: el enum conserva el nombre del Anexo porque es la fuente, la pantalla traduce.
+    etiqueta: str
+    # La clave de `c_PeriodicidadPago` a la que corresponde esta tarifa, o `null` para
+    # `EJERCICIO`: el Anexo la publica para el ingreso de todo un año, no para un recibo.
+    periodicidad_cfdi: str | None
+    origen: OrigenTarifa
+    fuente: str
+    documento_sha256: str | None
+    encabezado: str
+    importado_en: datetime
+    confirmado_por: str | None
+    confirmado_en: datetime | None
+    confirmada: bool
+    # `true` si el origen es `MANUAL`: una tarifa corregida a mano ya no es, por definición,
+    # lo que dice el último documento importado. La pantalla lo dice como texto visible, no
+    # solo con el chip de `origen` (§6 del diseño): una tarifa editada que se ve igual que una
+    # importada es una trampa.
+    difiere_del_documento: bool
+    # `true` solo en la tarifa cuya periodicidad es la que de verdad timbra la nómina
+    # observada (regla B-09.R1). Deriva del universo real de CFDI, no de una preferencia.
+    aplica_a_la_nomina: bool
+    huella: str
+    renglones: list[TarifaIsrRenglonOut]
+    comprobacion: ComprobacionOut | None
+
+
+class ImportacionTarifasOut(BaseModel):
+    """La salida que comparten `GET /tarifa-isr` y `POST /tarifa-isr/importar`, para que la
+    lista y la importación no puedan divergir en lo que muestran."""
+
+    tarifas: list[TarifaIsrOut]
+    # Claves de `c_PeriodicidadPago` que la nómina real usa y para las que el Anexo 8 no
+    # publica tarifa (`03` catorcenal, `06` bimestral): B-09.R1 las resuelve proporcionando
+    # la mensual, y enterarse aquí es mejor que enterarse cuando ese informe salga rotulado.
+    periodicidades_sin_tarifa: list[str]

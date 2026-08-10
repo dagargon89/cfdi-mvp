@@ -366,6 +366,80 @@ fecha ni de estatus, a propósito:** no es un informe sino el inventario de lo q
 un concepto que solo apareció hace dos años sigue necesitando categoría para que la clasificación quede
 completa. Cuatro consultas agregadas en total, con `GROUP BY` en la base (regla 11).
 
+### Tarifa del ISR (Anexo 8 de la RMF) — añadido post-freeze (2026-08-10, tarifa ISR)
+
+Cinco endpoints, **todos de administrador** (`require_admin`): la tarifa del ISR es política federal
+igual que `param_fiscal`, no política de una empresa. Mismo invariante que el resto del recurso: **una
+tarifa sin confirmar no calcula.** Importar y corregir *proponen*; solo `confirmar` la activa, y exige
+la huella de los renglones que se revisaron — el mismo mecanismo que `POST .../fiscal/{clave}/confirmar`.
+
+Los importes de los renglones viajan como **cadena**, igual que el resto del recurso: la huella se
+calcula sobre el `Decimal` exacto y un número JSON que perdió precisión al pasar por `float` la haría
+no coincidir nunca, lo que produciría un `409` imposible de explicar al confirmar. `tasa_porcentaje` lo
+calcula el servidor a partir de la fracción almacenada — es el único número de todo el recurso donde
+una pantalla que multiplicara por su cuenta arriesgaría un error de escala de dos órdenes de magnitud.
+
+#### POST /v1/configuracion/tarifa-isr/importar — Extraer del Anexo 8 *(admin)*
+**Multipart**, no JSON: `archivo` es el PDF del Anexo 8 tal como lo publica el SAT (patrón de
+`POST /v1/empresas/{id}/efirma`). **200** con `{ "tarifas": [TarifaIsr...], "periodicidades_sin_tarifa":
+[...] }` — las tarifas quedan **propuestas, sin confirmar** (`origen: IMPORTADA`). Si cualquier tarifa
+del documento falla una de las seis pruebas del Anexo I.1, no se guarda ninguna: un Anexo 8 a medio
+cargar no se distingue de uno que legítimamente traía menos tablas.
+
+**413** si el archivo pesa más de 1 MB o trae más de 100 páginas (`ARCHIVO_DEMASIADO_GRANDE`, antes de
+intentar leerlo). **422 `DOCUMENTO_INVALIDO`** si no es un PDF legible, es un escaneo sin texto, o no
+contiene ninguna tarifa de sueldos reconocible. **422 `TARIFA_INVALIDA`** si una tabla sí se reconoce
+pero no pasa las seis pruebas de continuidad/monotonía del Anexo I.1. **409 `CORRECCION_MANUAL`** si el
+documento trae una tarifa que ya se corrigió a mano y dice algo distinto — no se pisa una corrección con
+un documento; se descarta la tarifa corregida o se corrige de nuevo con lo que diga el PDF. Los cuatro
+mensajes de error son el texto tal cual de `app.services.anexo8` / `app.services.tarifa_isr` /
+`app.repositories.tarifa_isr`, en español llano, pensado para quien lo lee (el dueño del Hub, que no es
+contador) — nunca el nombre de la excepción de Python. Bitácora: un renglón por tarifa importada.
+
+#### GET /v1/configuracion/tarifa-isr — Todas las tarifas, con su estado *(admin)*
+**200**, misma forma que el `POST` de importar (es el mismo helper del lado del servidor, para que la
+lista y la importación nunca puedan mostrar cosas distintas): `{ "tarifas": [ {ejercicio, periodicidad,
+etiqueta, periodicidad_cfdi, origen, fuente, documento_sha256, encabezado, importado_en, confirmado_por,
+confirmado_en, confirmada, difiere_del_documento, aplica_a_la_nomina, huella, renglones: [{renglon,
+limite_inferior, limite_superior, cuota_fija, tasa_excedente, tasa_porcentaje}], comprobacion} ],
+"periodicidades_sin_tarifa": [...] }`.
+
+`etiqueta` es el nombre en el idioma de un recibo de nómina ("Quincenal (15 días)"), nunca el del enum
+(`DIAS_15`) — la columna conserva el nombre del Anexo porque es la fuente; la pantalla traduce. `origen` ∈
+`IMPORTADA|MANUAL`. `difiere_del_documento` es `true` cuando `origen: MANUAL`: una tarifa corregida a
+mano ya no es, por definición, lo que dice el último documento importado (si coincidiera número por
+número, reimportar la habría regresado a `IMPORTADA` en silencio). `aplica_a_la_nomina` es `true` **solo**
+en la tarifa cuya periodicidad es la que de verdad timbra la nómina observada (B-09.R1: la moda de
+`nomina_receptor.periodicidad_pago` sobre los CFDI vigentes, no una preferencia de la pantalla).
+`periodicidades_sin_tarifa` son las claves de `c_PeriodicidadPago` que la nómina real usa y para las que
+el Anexo 8 no publica tarifa (`03` catorcenal, `06` bimestral) — enterarse aquí es mejor que enterarse
+cuando B-09 salga rotulado. `comprobacion` es `null` si no hay ningún recibo elegible con esa
+periodicidad; si lo hay, trae los campos de `app.services.comprobacion_tarifa.Comprobacion` (§7.3 del
+diseño) con los importes como cadena: el ISR calculado con la tarifa lado a lado con el ISR timbrado del
+propio CFDI, para que alguien que no es contador pueda decidir con fundamento antes de confirmar.
+
+#### PUT /v1/configuracion/tarifa-isr/{ejercicio}/{periodicidad} — Corrección manual *(admin)*
+Body: `{ "renglones": [ {renglon, limite_inferior, limite_superior, cuota_fija, tasa_excedente} ] }` — la
+**lista completa**, no un diff. **200** con la tarifa resultante: `origen: MANUAL` y **`confirmada:
+false`** — corregir tampoco confirma. Se revalidan las seis pruebas del Anexo I.1 sobre la tarifa
+**entera**, no solo el renglón que cambió (cambiar un límite puede romper la continuidad con su vecino).
+**422 `TARIFA_INVALIDA`** si no pasa, con el renglón y el valor que se esperaba. Corregir la tarifa
+**siempre** limpia una confirmación previa, incluso si el mismo administrador que confirmó es quien
+corrige. Bitácora con el diff renglón por renglón, valor anterior → nuevo.
+
+#### POST /v1/configuracion/tarifa-isr/{ejercicio}/{periodicidad}/confirmar — Activar una tarifa propuesta *(admin)*
+Body: `{ "huella": "…" }` — el cliente manda la huella (SHA-256 de la forma canónica) de los renglones
+que revisó. **200** con la tarifa confirmada (idempotente: reconfirmar no reescribe quién la confirmó).
+**409 `TARIFA_CAMBIO`** si la huella no coincide con la almacenada — la tarifa cambió entre que se pintó
+la pantalla y que se hizo clic. **404 `TARIFA_NO_ENCONTRADA`** si no hay tarifa con ese ejercicio y
+periodicidad. Bitácora.
+
+#### DELETE /v1/configuracion/tarifa-isr/{ejercicio}/{periodicidad} — Descartar una propuesta *(admin)*
+**204** sin cuerpo. Solo opera sobre una tarifa **sin confirmar**: **409 `TARIFA_CONFIRMADA`** si ya se
+confirmó — borrarla la haría desaparecer sin sustituto y convertiría un cálculo que funcionaba en uno
+ausente sin explicación; para reemplazar una confirmada se corrige a mano o se reimporta encima, nunca
+se borra primero. **404 `TARIFA_NO_ENCONTRADA`** si no existe. Bitácora con los renglones borrados.
+
 ### Quién mantiene los valores al día — y el interruptor que lo apaga
 
 La tarea diaria del beat `revisar_vigencia_fiscal` hace dos cosas, en una sola transacción con su bitácora:
@@ -488,6 +562,31 @@ export interface DepartamentoObservado { departamento_texto: string; comprobante
 export interface ObservadosEmpresa { conceptos: ConceptoObservado[]; departamentos: DepartamentoObservado[];
                                      sin_clasificar: number; sin_mapear: number }
 
+// Tarifa del ISR (Anexo 8 de la RMF) — añadido post-freeze (2026-08-10, tarifa ISR). Solo admin:
+// es política federal, igual que `param_fiscal`. Los importes de los renglones van como CADENA,
+// en las dos direcciones, por el mismo motivo que el resto del recurso: la huella se calcula sobre
+// el valor exacto y un número JSON que pasó por `float` no coincidiría nunca al confirmar.
+export type PeriodicidadTarifaIsr = 'DIARIA' | 'DIAS_7' | 'DIAS_10' | 'DIAS_15' | 'MENSUAL' | 'EJERCICIO';
+export interface TarifaIsrRenglonIn { renglon: number; limite_inferior: string; limite_superior: string | null;
+                                      cuota_fija: string; tasa_excedente: string }
+// `tasa_porcentaje` la calcula el SERVIDOR a partir de la fracción almacenada: no multiplicar por
+// 100 en el cliente, es el único número del recurso donde un error de escala pasa desapercibido.
+export interface TarifaIsrRenglon extends TarifaIsrRenglonIn { tasa_porcentaje: string }
+export interface ComprobacionTarifa { uuid: string; fecha_inicial_pago: string | null; fecha_final_pago: string | null;
+                                      num_empleado: string | null; dias_pagados: string | null; gravado: string;
+                                      renglon: number; limite_inferior: string; tasa_excedente: string;
+                                      isr_calculado: string; isr_timbrado: string; diferencia: string;
+                                      advertencias: string[] }
+export interface TarifaIsr { ejercicio: number; periodicidad: PeriodicidadTarifaIsr; etiqueta: string;
+                             periodicidad_cfdi: string | null; origen: 'IMPORTADA' | 'MANUAL'; fuente: string;
+                             documento_sha256: string | null; encabezado: string; importado_en: string;
+                             confirmado_por: string | null; confirmado_en: string | null; confirmada: boolean;
+                             difiere_del_documento: boolean; aplica_a_la_nomina: boolean; huella: string;
+                             renglones: TarifaIsrRenglon[]; comprobacion: ComprobacionTarifa | null }
+// `GET` y `POST .../importar` devuelven la misma forma (mismo helper del lado del servidor), para
+// que la lista y la importación no puedan mostrar cosas distintas.
+export interface TarifasIsr { tarifas: TarifaIsr[]; periodicidades_sin_tarifa: string[] }
+
 export interface ApiClient {
   // Sesión (prioridad 1)
   me(): Promise<{ usuario_id: number; correo: string; nombre: string; rol_global: Rol; empresas: EmpresaResumen[] }>;
@@ -542,6 +641,23 @@ export interface ApiClient {
   obtenerMapeosEmpresa(empresaId: number): Promise<MapeosEmpresa>;
   guardarMapeosEmpresa(empresaId: number, input: MapeosEmpresa): Promise<MapeosEmpresa>;
   obtenerConceptosObservados(empresaId: number): Promise<ObservadosEmpresa>;
+  // Tarifa del ISR (Anexo 8 de la RMF), solo admin — añadido post-freeze (2026-08-10, tarifa ISR).
+  // Importar y corregir PROPONEN (`confirmada: false`); solo `confirmarTarifaIsr` la activa, y
+  // exige la huella de los renglones que se revisó (`TarifaIsr.huella`), igual que
+  // `confirmarParametroFiscal`: 409 TARIFA_CAMBIO si no coincide con la almacenada.
+  /** Multipart, no JSON: `archivo` es el PDF del Anexo 8 tal como lo publica el SAT. 413
+   * ARCHIVO_DEMASIADO_GRANDE, 422 DOCUMENTO_INVALIDO / TARIFA_INVALIDA, 409 CORRECCION_MANUAL
+   * si el documento choca con una tarifa ya corregida a mano (no se pisa, hay que descartarla o
+   * corregirla de nuevo). Todo o nada por documento: si una tabla falla, no se guarda ninguna. */
+  importarTarifaIsr(archivo: File): Promise<TarifasIsr>;
+  listarTarifaIsr(): Promise<TarifasIsr>;
+  /** Reemplaza los renglones completos (no un diff). 422 TARIFA_INVALIDA si no pasa las seis
+   * pruebas del Anexo I.1 sobre la tarifa entera. Limpia la confirmación previa. */
+  corregirTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, renglones: TarifaIsrRenglonIn[]): Promise<TarifaIsr>;
+  confirmarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr, huella: string): Promise<TarifaIsr>;
+  /** Solo sobre una tarifa sin confirmar: 409 TARIFA_CONFIRMADA si ya se confirmó — para
+   * reemplazar una confirmada se corrige a mano o se reimporta encima, no se borra primero. */
+  borrarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
 }
 ```
 
