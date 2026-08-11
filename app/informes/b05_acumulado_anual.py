@@ -189,15 +189,23 @@ tres columnas porque no habría umbral defendible; quien concilie el papel de tr
 saber que son dos lecturas de origen distinto. El descuadre que sí se puede afirmar —encabezado
 contra nodos para gravado y exento— lo reporta `TOTALES_DESCUADRADOS`.
 
-**Alcance.** Se implementan las columnas 1–23 del documento fuente. Las columnas 24–26 (ISR anual
-teórico, diferencia, sujeto a cálculo anual) necesitan la tarifa de ISR, que no existe todavía. No
-se declaran columnas ni parámetros para ellas: una columna vacía en un papel de trabajo fiscal es
-peor que su ausencia cuando **nunca** puede llenarse, porque quien lo revise no puede distinguir
-"cero" de "no calculado". La 11 sí se declara porque su vacío es informado: cada corrida dice, por
-bandera, exactamente qué falta para llenarla.
+**Alcance.** Columnas 1–23 del documento fuente, más el bloque anual del art. 97 LISR (Anexo I.4)
+que la tarifa `EJERCICIO` desbloquea: "ISR anual teórico", "Subsidio anual acreditable" y
+"Diferencia a cargo / favor" (§7 de `docs/superpowers/specs/2026-08-11-b09-isr-design.md`). Estas
+tres sustituyen, por decisión de diseño, a la columna 26 de la especificación ("Sujeto a cálculo
+anual", B-05.R2): esa columna exige datos que este informe no tiene —fecha de baja, umbral vigente
+del ejercicio, aviso por escrito del trabajador— y afirmarla sin ellos sería una aseveración fiscal
+sin sustento, así que sigue fuera de alcance. En su lugar se hace explícita la columna que la
+fórmula del art. 97 ya necesitaba y que antes solo se podía deducir leyendo la columna 15 (ver el
+docstring de `_COLUMNAS_ANUALES`, más abajo, para la decisión sobre cuál es el subsidio
+"acreditable"). Las tres se declaran siempre —igual que "Gravado ordinario"— y degradan juntas: si
+falta la base ordinaria o la tarifa `EJERCICIO`, las tres van vacías con la bandera que dice por
+qué, nunca con un cero que se leería como "sin obligación".
 
 **Sin `round()` ni `quantize()`** (el redondeo lo hace `app.informes.excel` al escribir la
-celda). `Decimal` de punta a punta.
+celda), salvo en el bloque anual, que sí redondea **dentro de sí mismo** porque reproduce
+`tarifa_isr.isr_de` (Anexo I.2), que ya redondea internamente; `Decimal` de punta a punta en todo
+lo demás.
 """
 
 from __future__ import annotations
@@ -211,15 +219,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.informes import universo_nomina
+from app.informes import configuracion_isr, universo_nomina
 from app.informes.base import Bandera, Columna, ResultadoInforme
 from app.informes.identidades_b00 import CLAVE_TIPO_DEDUCCION_ISR
 from app.models.cfdi_detalle import ComprobanteDetalle
 from app.models.comprobante import Comprobante
 from app.models.empresa import Empresa
-from app.models.enums import EstatusCfdi
+from app.models.enums import EstatusCfdi, PeriodicidadTarifa
 from app.models.nomina import Nomina, NominaDeduccion, NominaOtroPago, NominaPercepcion, NominaReceptor, NominaTotales
 from app.services import configuracion_fiscal as cfg
+from app.services import tarifa_isr
 
 CLAVE = "B-05"
 NOMBRE = "Acumulado anual por empleado"
@@ -325,7 +334,45 @@ _COLUMNAS_DOCE_A_VEINTITRES: tuple[tuple[str, str, bool], ...] = (
     ("SDI promedio ponderado", "monto", False),
 )
 
-_COLUMNAS: tuple[tuple[str, str, bool], ...] = _COLUMNAS_UNO_A_DIEZ + _COLUMNA_ONCE + _COLUMNAS_DOCE_A_VEINTITRES
+# El bloque anual (Anexo I.4, art. 97 LISR), al FINAL de `_COLUMNAS` y no intercalado con las
+# columnas 24-25 del documento fuente: intercalar habría corrido el índice de las 23 columnas ya
+# publicadas y roto cualquier hoja de cálculo que alguien ya tenga armada sobre este informe.
+#
+# **El paso de lectura del plan, resuelto: cuál de las dos columnas de subsidio es la
+# "acreditable".** B-05 ya trae "Subsidio causado" (columna 15 del documento fuente,
+# `Σ subsidio_causado` de `nomina_otro_pago`: lo que la tabla del Anexo I.3 determina para el
+# periodo — `subsidio_del_periodo` en `tarifa_isr`) y "Subsidio entregado en efectivo" (columna
+# 16, `Σ importe`: solo el excedente que se entrega en efectivo cuando el subsidio del periodo
+# supera al ISR del periodo — `subsidio_a_entregar`). No son lo mismo, y la diferencia se ve en
+# la propia aritmética de `tarifa_isr`: de `isr_a_retener = max(0, isr − subsidio)` y
+# `subsidio_a_entregar = max(0, subsidio − isr)` se sigue que
+# `subsidio_causado = min(isr, subsidio) + subsidio_a_entregar` para cualquier periodo. Es decir,
+# "Subsidio causado" es el monto COMPLETO que en cada periodo se aplicó contra la obligación del
+# trabajador —ya sea acreditándose contra el ISR retenido, o entregándose en efectivo cuando lo
+# rebasa—, mientras que "Subsidio entregado en efectivo" es solo la segunda de esas dos partes: en
+# todo periodo donde el ISR alcanza a cubrir el subsidio (`isr >= subsidio`) esta columna vale
+# 0.00 aunque el subsidio sí se haya acreditado por completo. Usar la columna 16 aquí subestimaría
+# el subsidio acreditable del ejercicio en exactamente esos periodos — que, con un sueldo típico,
+# son la mayoría. Y es lo que dice el documento fuente sin ambigüedad, fuera de toda deducción:
+# el Anexo I.4 define `subsidio_anual_acreditable = B-05 columna 15`, y la columna 15 de la
+# especificación es "Subsidio causado". Por eso "Subsidio anual acreditable" toma
+# `acc.subsidio_causado`, nunca `acc.subsidio_entregado`.
+#
+# **Las tres degradan juntas**, y no cada una por su cuenta: sin base ordinaria (B-05.R4, marcas
+# sin confirmar) o sin tarifa `EJERCICIO` confirmada no hay ISR anual que calcular, y mostrar solo
+# el subsidio acreditable sin el ISR anual ni la diferencia sería un fragmento del cálculo del
+# art. 97, no el cálculo — se leería como un avance parcial que no existe. Ver
+# `_tarifa_del_ejercicio` y el bloque del bucle principal en `consultar` para el punto exacto de
+# la puerta.
+_COLUMNAS_ANUALES: tuple[tuple[str, str, bool], ...] = (
+    ("ISR anual teórico", "monto", False),
+    ("Subsidio anual acreditable", "monto", False),
+    ("Diferencia a cargo / favor", "monto", False),
+)
+
+_COLUMNAS: tuple[tuple[str, str, bool], ...] = (
+    _COLUMNAS_UNO_A_DIEZ + _COLUMNA_ONCE + _COLUMNAS_DOCE_A_VEINTITRES + _COLUMNAS_ANUALES
+)
 
 
 def _columnas() -> list[Columna]:
@@ -598,6 +645,52 @@ async def _gravado_ordinario(db: AsyncSession, gravado_por_tipo: dict[int, dict[
     return _Ordinario(calculable=True, por_comprobante=por_comprobante, banderas=[])
 
 
+# --------------------------------------------------------------------------------------
+# El bloque anual (Anexo I.4): la tarifa `EJERCICIO`, o la razón por la que el bloque va vacío
+# --------------------------------------------------------------------------------------
+
+
+async def _tarifa_del_ejercicio(
+    db: AsyncSession, *, ejercicio: int, tipos_presentes: set[str]
+) -> tuple[tuple[tarifa_isr.Renglon, ...], list[Bandera]]:
+    """La tarifa `EJERCICIO` confirmada para el bloque anual, vía el mismo ayudante que consume
+    B-09 (`app.informes.configuracion_isr.resolver`) — para que los dos informes digan
+    exactamente lo mismo cuando falta, en vez de que cada uno redacte su propio aviso.
+
+    `en_fecha` se fija al 31 de diciembre del `ejercicio`: la tarifa `EJERCICIO` se identifica por
+    `(ejercicio, periodicidad)`, no por una fecha dentro del año (a diferencia de la UMA o el
+    subsidio, que sí varían por vigencia), así que cualquier fecha del propio ejercicio serviría —
+    el cierre es la más representativa. `tipos_presentes` no cambia lo que esta función devuelve
+    (las marcas de percepción ya las resuelve `_gravado_ordinario` por su cuenta, con su propia
+    bandera); se le pasa igual para que `ConfiguracionIsr.faltantes` quede completo si algún
+    consumidor futuro lo necesita.
+    """
+    config = await configuracion_isr.resolver(
+        db,
+        ejercicio=ejercicio,
+        en_fecha=date(ejercicio, 12, 31),
+        periodicidades=[PeriodicidadTarifa.EJERCICIO],
+        tipos_presentes=tipos_presentes,
+    )
+    renglones = config.tarifas.get(PeriodicidadTarifa.EJERCICIO, ())
+    if renglones:
+        return renglones, []
+    return (), [
+        Bandera(
+            clave="FALTA_TARIFA_EJERCICIO",
+            severidad="alta",
+            ambito="informe",
+            mensaje=(
+                "El bloque anual del art. 97 LISR («ISR anual teórico», «Subsidio anual "
+                "acreditable» y «Diferencia a cargo / favor») salió vacío en todas las filas: no "
+                f"hay una tarifa `EJERCICIO` confirmada para {ejercicio}. Descarga el Anexo 8 de "
+                "la Resolución Miscelánea Fiscal del portal del SAT y súbelo en Configuración → "
+                "Fiscal; después confírmalo."
+            ),
+        )
+    ]
+
+
 async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> ResultadoInforme:
     rfc_empresa = await db.scalar(select(Empresa.rfc).where(Empresa.empresa_id == empresa_id))
     if rfc_empresa is None:
@@ -704,6 +797,17 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # resuelve una vez por corrida sobre los tipos que de verdad aparecen en el acumulado.
     ordinario = await _gravado_ordinario(db, agregados.gravado_por_tipo)
     banderas.extend(ordinario.banderas)
+    # Bloque anual (Anexo I.4): la tarifa `EJERCICIO`, resuelta una vez para la corrida completa
+    # (es la misma tarifa para todos los empleados), no por fila. Reusa el mismo conjunto de tipos
+    # con gravado distinto de cero que `_gravado_ordinario` ya calculó — no otra pasada sobre
+    # `gravado_por_tipo` con distinto criterio, regla 11.
+    tipos_presentes_ejercicio = {
+        tipo for por_tipo in agregados.gravado_por_tipo.values() for tipo, gravado in por_tipo.items() if gravado != _CERO
+    }
+    tarifa_ejercicio, banderas_tarifa_ejercicio = await _tarifa_del_ejercicio(
+        db, ejercicio=p.ejercicio, tipos_presentes=tipos_presentes_ejercicio
+    )
+    banderas.extend(banderas_tarifa_ejercicio)
     # Identidades #4 y #5 de B-00 sobre lo que SÍ entra al acumulado: sin ellas, una fila de este
     # informe podía no cuadrar consigo misma en silencio ("Total percepciones" viene del
     # encabezado y "Total gravado"/"Total exento" de los nodos), y diferir de B-01/B-02 para el
@@ -801,6 +905,26 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         sbc_promedio = (acc.suma_sbc_dias / acc.dias_pagados) if acc.dias_pagados else _CERO
         sdi_promedio = (acc.suma_sdi_dias / acc.dias_pagados) if acc.dias_pagados else _CERO
 
+        # Bloque anual (Anexo I.4): las tres columnas degradan JUNTAS (ver el comentario de
+        # `_COLUMNAS_ANUALES`). Sin base ordinaria (B-05.R4) o sin tarifa `EJERCICIO` confirmada,
+        # ISR anual no tiene con qué calcularse, y mostrar solo el subsidio acreditable sería un
+        # fragmento del cálculo del art. 97, no el cálculo — así que el bloque completo va `None`.
+        isr_anual: Decimal | None = None
+        subsidio_acreditable: Decimal | None = None
+        diferencia_ejercicio: Decimal | None = None
+        if ordinario.calculable and tarifa_ejercicio:
+            # `isr_de`, no `isr_del_periodo`: el Anexo I.4 aplica la tarifa del ejercicio
+            # directamente sobre el acumulado anual, sin elevar ni prorratear — no hay "días
+            # pagados" que prorratear en un cálculo que ya es del año completo, y
+            # `tarifa_isr.DIAS_NOMINALES` ni siquiera tiene entrada para `EJERCICIO`.
+            isr_anual = tarifa_isr.isr_de(tarifa_ejercicio, acc.gravado_ordinario)
+            # El subsidio "acreditable" es `subsidio_causado` (columna 15), no
+            # `subsidio_entregado` (columna 16) — la decisión del paso de lectura del plan, con
+            # su razón completa en el comentario de `_COLUMNAS_ANUALES`.
+            subsidio_acreditable = acc.subsidio_causado
+            # Anexo I.4, paso 5: positiva es a cargo del trabajador, negativa es a favor.
+            diferencia_ejercicio = isr_anual - subsidio_acreditable - acc.isr_retenido
+
         filas.append(
             [
                 p.ejercicio,
@@ -833,6 +957,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 acc.neto_pagado,
                 sbc_promedio,
                 sdi_promedio,
+                isr_anual,
+                subsidio_acreditable,
+                diferencia_ejercicio,
             ]
         )
 

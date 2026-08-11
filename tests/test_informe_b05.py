@@ -14,12 +14,16 @@ from app.informes import b05_acumulado_anual as b05
 from app.informes import universo_nomina
 from app.models.cfdi_detalle import CfdiRelacionado, ComprobanteDetalle
 from app.models.configuracion_fiscal import CatalogoPercepcionMarca
-from app.models.enums import EstatusCfdi
+from app.models.enums import EstatusCfdi, PeriodicidadTarifa
+from app.repositories import tarifa_isr as repo_tarifa
+from app.services import anexo8
 from app.services import configuracion_fiscal as cfg
+from app.services import tarifa_isr as t
 from tests import factories
 from tests.helpers_nomina import insertar_nomina
 
 _CONFIRMADO_EN = datetime(2026, 8, 6, 12, 0, 0)
+_ACTOR = "quien@revisa.mx"
 
 
 async def _empresa(db: AsyncSession) -> int:
@@ -55,6 +59,41 @@ async def _sembrar_marcas(
     for fila in (await db.scalars(select(CatalogoPercepcionMarca))).all():
         fila.confirmado_por = "uid-prueba"
         fila.confirmado_en = _CONFIRMADO_EN
+    await db.commit()
+
+
+def _renglones_ejercicio() -> tuple[t.Renglon, ...]:
+    """Dos renglones estructuralmente válidos para `tarifa_isr.validar` (arrancan en 0.01, tasas
+    crecientes, la última entre 30 % y 40 %), **no** la tabla anual real del Anexo 8: el bloque
+    anual del ejercicio no existe todavía en ningún boletín público con el que comparar, así que,
+    igual que `tests/test_informe_b09.py::_renglones_sinteticos`, aquí solo importa que la
+    aritmética se pueda verificar a mano, no que la cifra sea la oficial.
+
+    Renglón 1: `[0.01, 10000.00]`, cuota fija 0.00, tasa 10 %.
+    Renglón 2: `[10000.01, en adelante]`, cuota fija 1000.00, tasa 30 %.
+    """
+    return (
+        t.Renglon(1, Decimal("0.01"), Decimal("10000.00"), Decimal("0.00"), Decimal("0.10")),
+        t.Renglon(2, Decimal("10000.01"), None, Decimal("1000.00"), Decimal("0.30")),
+    )
+
+
+async def _sembrar_tarifa_ejercicio(db: AsyncSession, ejercicio: int = 2026) -> None:
+    """Siembra y confirma la tarifa `EJERCICIO` por el repositorio real (`guardar_importadas` +
+    `confirmar`), igual que `tests/test_informe_b09.py::_sembrar_tarifa`: ejercita el mismo
+    invariante de confirmación que se está probando, en vez de un `INSERT` directo."""
+    extraida = anexo8.TarifaExtraida(
+        ejercicio=ejercicio,
+        periodicidad=PeriodicidadTarifa.EJERCICIO,
+        encabezado=f"Tarifa EJERCICIO {ejercicio} (fixture de prueba)",
+        renglones=_renglones_ejercicio(),
+    )
+    guardadas = await repo_tarifa.guardar_importadas(db, [extraida], fuente="Anexo 8, DOF (fixture)", sha256="c" * 64)
+    await db.commit()
+    await repo_tarifa.confirmar(
+        db, ejercicio=ejercicio, periodicidad=PeriodicidadTarifa.EJERCICIO,
+        huella_revisada=guardadas[0].huella, actor=_ACTOR,
+    )
     await db.commit()
 
 
@@ -269,22 +308,23 @@ async def test_subsidio_causado_y_entregado(db: AsyncSession) -> None:
     assert _fila(resultado, "Subsidio entregado en efectivo") == Decimal("120.00")
 
 
-async def test_no_hay_columnas_de_alcance_diferido(db: AsyncSession) -> None:
-    """Las columnas 24-26 (ISR anual teórico, diferencia, sujeto a cálculo anual) siguen fuera
-    de alcance: necesitan la tarifa de ISR, que no existe.
+async def test_no_hay_columna_sujeto_a_calculo_anual(db: AsyncSession) -> None:
+    """La columna 26 del documento fuente ("Sujeto a cálculo anual", B-05.R2) sigue fuera de
+    alcance: exige datos que este informe no tiene (fecha de baja, umbral vigente del ejercicio,
+    aviso por escrito del trabajador), y afirmarla sin ellos sería una aseveración fiscal sin
+    sustento.
 
-    **Esta prueba aseveraba también la ausencia de la columna 11** ("Gravado ordinario"), que
-    era correcto mientras `catalogo_percepcion_marca` no existía. La tarea 8 de la fase 3 la
-    implementa, así que esa aserción se retira **por diseño** — es el sujeto de la prueba el que
-    cambió, no la prueba la que se acomodó a la implementación. La diferencia con las 24-26 es
-    real: el vacío de la 11 es informado (cada corrida dice por bandera qué falta para llenarla)
-    y el de las 24-26 no podría serlo."""
+    **Esta prueba antes aseveraba también la ausencia de "ISR anual teórico" y de la columna 11**
+    ("Gravado ordinario"). Las dos correcciones son del mismo tipo —el sujeto de la prueba
+    cambió, no la prueba se acomodó a la implementación—: la 11 la desbloqueó
+    `catalogo_percepcion_marca` (tarea 8 de la fase 3) y "ISR anual teórico" —junto con "Subsidio
+    anual acreditable" y "Diferencia a cargo / favor"— los desbloquea la tarifa `EJERCICIO` (esta
+    tarea). Ver `test_las_tres_columnas_anuales_existen_siempre` para las tres columnas nuevas."""
     eid = await _empresa(db)
     await insertar_nomina(db, empresa_id=eid, uuid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                           fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30))
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     titulos = [c.titulo for c in resultado.columnas]
-    assert not any("teórico" in t.lower() or "teorico" in t.lower() for t in titulos)
     assert not any("cálculo anual" in t.lower() for t in titulos)
 
 
@@ -791,3 +831,180 @@ async def test_nombre_empleado_es_del_trabajador_no_del_patron(db: AsyncSession)
 
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
     assert _fila(resultado, "Nombre empleado") == "JUANA INVENTADA DE PRUEBA"
+
+
+# --------------------------------------------------------------------------------------
+# El bloque anual (Anexo I.4, art. 97 LISR): las tres columnas nuevas
+# --------------------------------------------------------------------------------------
+
+
+async def test_las_tres_columnas_anuales_existen_siempre(db: AsyncSession) -> None:
+    """Igual que "Gravado ordinario": las tres columnas del bloque anual se declaran aunque no
+    haya ninguna configuración fiscal cargada (ni marcas ni tarifa `EJERCICIO`). Con todo
+    ausente, las tres van `None` — y las dos banderas que explican por qué (`FALTA_MARCA`,
+    porque sin marcas no hay "Gravado ordinario"; `FALTA_TARIFA_EJERCICIO`, porque tampoco hay
+    tarifa) aparecen juntas."""
+    eid = await _empresa(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000001-0000-0000-0000-000000000001",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30))
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+
+    titulos = [c.titulo for c in resultado.columnas]
+    assert "ISR anual teórico" in titulos
+    assert "Subsidio anual acreditable" in titulos
+    assert "Diferencia a cargo / favor" in titulos
+    assert _fila(resultado, "ISR anual teórico") is None
+    assert _fila(resultado, "Subsidio anual acreditable") is None
+    assert _fila(resultado, "Diferencia a cargo / favor") is None
+    claves = [b.clave for b in resultado.banderas]
+    assert "FALTA_MARCA" in claves
+    assert "FALTA_TARIFA_EJERCICIO" in claves
+
+
+async def test_el_isr_anual_usa_la_tarifa_del_ejercicio_sin_prorratear(db: AsyncSession, tmp_path: Path) -> None:
+    """El Anexo I.4 aplica `isr_de` (Anexo I.2) directamente sobre el gravado ordinario
+    acumulado del ejercicio, sin elevar ni prorratear — a diferencia de B-09, que sí prorratea
+    por periodo (art. 175). No hay "días pagados" que prorratear en un cálculo que ya es del año
+    completo, y `tarifa_isr.DIAS_NOMINALES` ni siquiera trae una entrada para `EJERCICIO`: si el
+    código llamara a `isr_del_periodo` en vez de a `isr_de`, este caso reventaría con un
+    `KeyError` en vez de dar el número correcto.
+
+    **Cálculo a mano**, con la tarifa sintética de `_renglones_ejercicio` (renglón 1:
+    `[0.01, 10000.00]` cuota 0.00 tasa 10 %; renglón 2: `[10000.01, ∞)` cuota 1000.00 tasa 30 %)
+    y una base (gravado ordinario) de 20000.00, que cae en el renglón 2:
+
+        excedente = 20000.00 − 10000.01 = 9999.99
+        marginal  = 9999.99 × 0.30 = 2999.997 → 3000.00 (ROUND_HALF_UP a 2 decimales)
+        ISR anual = 1000.00 (cuota fija) + 3000.00 = 4000.00
+    """
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await _sembrar_tarifa_ejercicio(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000002-0000-0000-0000-000000000002",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "20000.00", "0.00")],
+                          total_percepciones="20000.00", total="20000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+
+    assert _fila(resultado, "Gravado ordinario") == Decimal("20000.00")
+    assert _fila(resultado, "ISR anual teórico") == Decimal("4000.00")
+
+
+async def test_sin_marcas_confirmadas_las_tres_columnas_van_vacias(db: AsyncSession) -> None:
+    """Se hereda la degradación de "Gravado ordinario" (B-05.R4): sin marcas confirmadas no hay
+    base ordinaria, y sin base ordinaria no hay ISR anual que calcular — así que las tres
+    columnas del bloque anual van vacías, aunque la tarifa `EJERCICIO` SÍ esté confirmada. No se
+    sustituye la base por "Total gravado" para rescatar el cálculo: sería un número plausible y
+    fiscalmente equivocado (sumaría también lo que tiene régimen propio, B-05.R4)."""
+    eid = await _empresa(db)
+    await _sembrar_tarifa_ejercicio(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000003-0000-0000-0000-000000000003",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "20000.00", "0.00")],
+                          total_percepciones="20000.00", total="20000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+
+    assert _fila(resultado, "Gravado ordinario") is None
+    assert _fila(resultado, "ISR anual teórico") is None
+    assert _fila(resultado, "Subsidio anual acreditable") is None
+    assert _fila(resultado, "Diferencia a cargo / favor") is None
+    claves = [b.clave for b in resultado.banderas]
+    assert "FALTA_MARCA" in claves
+    # La tarifa SÍ está confirmada: si esta bandera apareciera también, la prueba no aislaría
+    # cuál de las dos causas está degradando el bloque.
+    assert "FALTA_TARIFA_EJERCICIO" not in claves
+
+
+async def test_la_diferencia_del_ejercicio_dice_a_cargo_o_a_favor(db: AsyncSession, tmp_path: Path) -> None:
+    """Anexo I.4, paso 5: `diferencia = ISR_anual − subsidio_acreditable − ISR_retenido`.
+    Positiva es a cargo del trabajador, negativa es a favor — los dos signos, en dos empleados
+    de la misma corrida para que ninguno de los dos se cuele como el único caso probado.
+
+    **Empleado A** (gravado ordinario 20000.00 → ISR anual 4000.00, igual que en
+    `test_el_isr_anual_usa_la_tarifa_del_ejercicio_sin_prorratear`), sin subsidio y con
+    2000.00 → 500.00 de ISR retenido en el ejercicio:
+
+        diferencia = 4000.00 − 0.00 − 500.00 = 3500.00  → positiva, A CARGO
+
+    **Empleado B** (gravado ordinario 5000.00, renglón 1):
+
+        excedente = 5000.00 − 0.01 = 4999.99
+        marginal  = 4999.99 × 0.10 = 499.999 → 500.00 (ROUND_HALF_UP)
+        ISR anual = 0.00 (cuota fija) + 500.00 = 500.00
+
+    con subsidio acreditable 400.00 e ISR retenido 300.00:
+
+        diferencia = 500.00 − 400.00 − 300.00 = −200.00  → negativa, A FAVOR
+    """
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True)], confirmadas=True)
+    await _sembrar_tarifa_ejercicio(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000004-0000-0000-0000-000000000004",
+                          rfc_receptor="XAXX010101000",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "20000.00", "0.00")],
+                          total_percepciones="20000.00",
+                          deducciones=[("002", "045", "ISR", "500.00")], total_deducciones="500.00",
+                          total="19500.00")
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000005-0000-0000-0000-000000000005",
+                          rfc_receptor="AAAA010101AA1",
+                          fecha_pago=date(2026, 7, 15), fecha_final_pago=date(2026, 7, 15),
+                          percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+                          total_percepciones="5000.00",
+                          deducciones=[("002", "045", "ISR", "300.00")], total_deducciones="300.00",
+                          otros_pagos=[("002", "035", "Subsidio", "0.00", "400.00")],
+                          total="4700.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+
+    titulos = [c.titulo for c in resultado.columnas]
+    idx_rfc = titulos.index("RFC empleado")
+    idx_subsidio = titulos.index("Subsidio anual acreditable")
+    idx_diferencia = titulos.index("Diferencia a cargo / favor")
+    por_rfc_subsidio = {fila[idx_rfc]: fila[idx_subsidio] for fila in resultado.filas}
+    por_rfc_diferencia = {fila[idx_rfc]: fila[idx_diferencia] for fila in resultado.filas}
+    # "Subsidio anual acreditable" es `acc.subsidio_causado` (columna 15), no
+    # `acc.subsidio_entregado` (columna 16): A no tiene registro de `otro_pago` y suma 0.00; B
+    # declaró `subsidio_causado=400.00` con `importe` (subsidio entregado en efectivo) en 0.00 —
+    # si esta columna tomara la 16 en vez de la 15, saldría 0.00 también para B, y la diferencia
+    # de B sería -600.00 en vez de -200.00.
+    assert por_rfc_subsidio["XAXX010101000"] == Decimal("0.00")
+    assert por_rfc_subsidio["AAAA010101AA1"] == Decimal("400.00")
+    assert por_rfc_diferencia["XAXX010101000"] == Decimal("3500.00")
+    assert por_rfc_diferencia["AAAA010101AA1"] == Decimal("-200.00")
+
+
+async def test_separacion_y_jubilacion_no_entran_en_la_base_anual(db: AsyncSession, tmp_path: Path) -> None:
+    """B-05.R4, ahora sobre el ISR anual: un empleado con ingreso por separación (régimen propio,
+    art. 95 LISR) no lo ve sumado a la base del cálculo anual del art. 97. La base la sigue
+    dando "Gravado ordinario" (columna 11, que ya excluye separación y jubilación por marca) —
+    esta prueba no reimplementa esa exclusión, solo fija que el bloque anual la hereda en vez de
+    usar "Total gravado" (que sí sumaría los 5000.00 de más).
+
+    Con gravado ordinario 8000.00 (solo el tipo `001`, marcado ordinario; el tipo `022` —prima de
+    antigüedad, régimen de separación— se excluye por marca):
+
+        excedente = 8000.00 − 0.01 = 7999.99
+        marginal  = 7999.99 × 0.10 = 799.999 → 800.00 (ROUND_HALF_UP)
+        ISR anual = 0.00 (cuota fija) + 800.00 = 800.00
+
+    Si el ISR anual usara "Total gravado" (13000.00) en vez de "Gravado ordinario", el renglón
+    aplicable seguiría siendo el 1, pero el ISR saldría 1300.00 en vez de 800.00 — la prueba
+    fallaría con ese número si alguien reintrodujera el defecto.
+    """
+    eid = await _empresa(db)
+    await _sembrar_marcas(db, tmp_path, [("001", True), ("022", False)], confirmadas=True)
+    await _sembrar_tarifa_ejercicio(db)
+    await insertar_nomina(db, empresa_id=eid, uuid="e0000006-0000-0000-0000-000000000006",
+                          fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
+                          percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
+                                        ("022", "022", "Prima de antigüedad", "5000.00", "0.00")],
+                          total_percepciones="13000.00", total_separacion="5000.00", total="13000.00")
+
+    resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
+
+    assert _fila(resultado, "Gravado ordinario") == Decimal("8000.00")
+    assert _fila(resultado, "ISR anual teórico") == Decimal("800.00")
