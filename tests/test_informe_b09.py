@@ -9,8 +9,14 @@ Lo que estas pruebas fijan, en orden de importancia:
    (`test_la_base_gravable_excluye_las_percepciones_no_ordinarias`): un aguinaldo mezclado en la
    base produce un ISR teórico mayor al real y el informe acusaría al patrón de un exceso que no
    existe.
-3. **Un recibo raro (cero días pagados) no tumba la corrida completa.** Se captura, se deja sin
-   calcular y se marca con una bandera — el resto del universo se sigue reportando.
+3. **Un recibo raro (cero días pagados, sin receptor, o sin periodicidad) no tumba la corrida
+   completa.** Se captura, se deja sin calcular y se marca con una bandera — el resto del
+   universo se sigue reportando.
+4. **B-09.R1: la periodicidad sin tarifa publicada por el SAT usa la mensual prorrateada,
+   marcada, y nunca bloquea el informe completo.** Catorcenal, bimestral, por obra, comisión,
+   precio alzado u "otra" no tienen tarifa propia en el Anexo 8 (`tarifa_isr.PARA_CFDI` las
+   traduce a `None`); sin esta regla esos recibos saldrían mudos —todas las columnas vacías y
+   sin ninguna bandera—, que es peor que un aviso.
 
 Los valores esperados de las columnas de cálculo (renglón, límite inferior, excedente, tasa,
 impuesto marginal, cuota fija, ISR determinado) están calculados **a mano** en el docstring de
@@ -26,12 +32,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import b09_recalculo_isr as b09
 from app.informes import registro
 from app.models.configuracion_fiscal import CatalogoPercepcionMarca, ParamFiscal
 from app.models.enums import BaseExencion, OrigenValor, PeriodicidadTarifa
+from app.models.nomina import Nomina, NominaReceptor
 from app.repositories import tarifa_isr as repo_tarifa
 from app.services import anexo8
 from app.services import configuracion_fiscal as cfg
@@ -85,19 +93,38 @@ def _renglones_quincenal() -> tuple[t.Renglon, ...]:
     )
 
 
-async def _sembrar_tarifa_quincenal(db: AsyncSession) -> None:
+def _renglones_sinteticos() -> tuple[t.Renglon, ...]:
+    """Dos renglones estructuralmente válidos (pasan `tarifa_isr.validar`), los mismos de
+    `tests/test_configuracion_isr.py::_renglones` — no son una cifra publicada por el SAT, así
+    que solo se usan para la tarifa **mensual** de repuesto de B-09.R1, donde lo que se prueba
+    es que el prorrateo y la bandera ocurren, no una cifra oficial de la mensual."""
+    return (
+        t.Renglon(1, Decimal("0.01"), Decimal("1000.00"), Decimal("0.00"), Decimal("0.0500")),
+        t.Renglon(2, Decimal("1000.01"), None, Decimal("50.00"), Decimal("0.3500")),
+    )
+
+
+async def _sembrar_tarifa(db: AsyncSession, periodicidad: PeriodicidadTarifa, renglones: tuple[t.Renglon, ...], *, sha256: str) -> None:
     extraida = anexo8.TarifaExtraida(
         ejercicio=_EJERCICIO,
-        periodicidad=PeriodicidadTarifa.DIAS_15,
-        encabezado="Tarifa quincenal 2026 (fixture de prueba)",
-        renglones=_renglones_quincenal(),
+        periodicidad=periodicidad,
+        encabezado=f"Tarifa {periodicidad.value} {_EJERCICIO} (fixture de prueba)",
+        renglones=renglones,
     )
-    guardadas = await repo_tarifa.guardar_importadas(db, [extraida], fuente="Anexo 8, DOF (fixture)", sha256="a" * 64)
+    guardadas = await repo_tarifa.guardar_importadas(db, [extraida], fuente="Anexo 8, DOF (fixture)", sha256=sha256)
     await db.commit()
     await repo_tarifa.confirmar(
-        db, ejercicio=_EJERCICIO, periodicidad=PeriodicidadTarifa.DIAS_15, huella_revisada=guardadas[0].huella, actor=_ACTOR
+        db, ejercicio=_EJERCICIO, periodicidad=periodicidad, huella_revisada=guardadas[0].huella, actor=_ACTOR
     )
     await db.commit()
+
+
+async def _sembrar_tarifa_quincenal(db: AsyncSession) -> None:
+    await _sembrar_tarifa(db, PeriodicidadTarifa.DIAS_15, _renglones_quincenal(), sha256="a" * 64)
+
+
+async def _sembrar_tarifa_mensual(db: AsyncSession) -> None:
+    await _sembrar_tarifa(db, PeriodicidadTarifa.MENSUAL, _renglones_sinteticos(), sha256="b" * 64)
 
 
 async def _sembrar_marca(db: AsyncSession, tipo: str, *, ordinario: bool, confirmar: bool = True) -> None:
@@ -203,8 +230,11 @@ async def test_sin_marcas_confirmadas_no_genera_filas(db: AsyncSession) -> None:
 
 
 async def test_con_todo_confirmado_una_fila_por_recibo(db: AsyncSession) -> None:
-    """Con todo confirmado, dos recibos producen dos filas de 21 columnas — las del documento
-    fuente, sin cambios (§6 del diseño)."""
+    """Con todo confirmado, dos recibos producen dos filas de 24 columnas. El documento fuente
+    numera 21 renglones, pero sus dos primeros agrupan varios campos ("UUID / Fecha pago /
+    Periodo", "RFC / Nombre / Núm. empleado"); expandidos uno a uno —como ya hace B-03 con el
+    mismo tipo de grupo— son 24 columnas físicas, no 21 (una ronda de revisión de esta misma
+    tarea corrigió el conteo original)."""
     eid = await _empresa_con_configuracion_confirmada(db)
     await insertar_nomina(
         db, empresa_id=eid, uuid="11111111-1111-4111-8111-111111111101",
@@ -222,7 +252,7 @@ async def test_con_todo_confirmado_una_fila_por_recibo(db: AsyncSession) -> None
     resultado = await b09.consultar(db, eid, _p())
 
     assert len(resultado.filas) == 2
-    assert len(resultado.columnas) == 21
+    assert len(resultado.columnas) == 24
     assert [c.titulo for c in resultado.columnas].count("UUID") == 1
 
 
@@ -402,3 +432,110 @@ async def test_un_recibo_con_cero_dias_pagados_no_tumba_la_corrida_y_lleva_bande
     assert len(banderas_recibo) == 1
     assert banderas_recibo[0].severidad == "alta"
     assert "55555555-5555-4555-8555-555555555502" in banderas_recibo[0].ambito
+
+
+# --------------------------------------------------------------------------------------
+# 10-11. B-09.R1 — la periodicidad sin tarifa publicada usa la mensual prorrateada
+# --------------------------------------------------------------------------------------
+
+
+async def test_periodicidad_sin_tarifa_publicada_usa_la_mensual_prorrateada_y_marca(db: AsyncSession) -> None:
+    """El Anexo 8 no publica tarifa para la periodicidad catorcenal (`03`; ver
+    `tarifa_isr.PARA_CFDI`). Con la tarifa **mensual** confirmada (los dos renglones sintéticos
+    de `_renglones_sinteticos`, que sí pasan `tarifa_isr.validar`), el recibo se recalcula
+    prorrateando por sus propios días pagados contra el mes (30 días nominales):
+
+    Sueldo 500.00 gravados en 14 días →
+    elevada = 500.00 × 30 / 14 = 1071.428571… → 1071.43 (ROUND_HALF_UP)
+    Esa base cae en el renglón 2 (1000.01 en adelante, cuota 50.00, tasa 0.35):
+    marginal  = (1071.43 − 1000.01) × 0.35 = 71.42 × 0.35 = 24.997 → 25.00
+    completo  = 50.00 + 25.00 = 75.00
+    ISR determinado = 75.00 × 14 / 30 = 35.00
+    """
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_marca(db, "001", ordinario=True)
+    await _sembrar_tarifa_mensual(db)
+    await insertar_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="66666666-6666-4666-8666-666666666601",
+        periodicidad="03", dias="14.000",
+        percepciones=[("001", "001", "Sueldo", "500.00", "0.00")],
+        deducciones=[],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 1
+    fila = resultado.filas[0]
+    assert fila[_COL_ISR_DETERMINADO] == Decimal("35.00")
+
+    banderas_prop = [b for b in resultado.banderas if b.clave == "TARIFA_PROPORCIONADA"]
+    assert len(banderas_prop) == 1
+    assert banderas_prop[0].severidad == "media"
+    assert "66666666-6666-4666-8666-666666666601" in banderas_prop[0].ambito
+
+
+async def test_periodicidad_sin_tarifa_publicada_sin_mensual_confirmada_cae_en_no_calculable(
+    db: AsyncSession,
+) -> None:
+    """Gemela negativa: sin la tarifa mensual de repuesto confirmada, el recibo catorcenal no se
+    puede calcular. El informe **sigue generándose** — la periodicidad catorcenal no entra en el
+    bloqueo global de B-09 (§ del módulo), así que su falta no le quita el informe a una empresa
+    que nunca paga catorcenal."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_marca(db, "001", ordinario=True)
+    # Ninguna tarifa se confirma: ni la catorcenal (que no existe en el Anexo 8) ni la mensual
+    # de repuesto.
+    await insertar_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="66666666-6666-4666-8666-666666666602",
+        periodicidad="03", dias="14.000",
+        percepciones=[("001", "001", "Sueldo", "500.00", "0.00")],
+        deducciones=[],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, empresa.empresa_id, _p())
+
+    assert len(resultado.filas) == 1, "el informe se genera igual: la periodicidad catorcenal no bloquea nada"
+    fila = resultado.filas[0]
+    assert fila[_COL_ISR_DETERMINADO] is None
+
+    banderas_no_calc = [b for b in resultado.banderas if b.clave == "RECIBO_NO_CALCULABLE"]
+    assert len(banderas_no_calc) == 1
+    assert banderas_no_calc[0].severidad == "alta"
+
+
+# --------------------------------------------------------------------------------------
+# 12. El mismo patrón del recibo de 0 días: sin receptor o sin días pagados
+# --------------------------------------------------------------------------------------
+
+
+async def test_un_recibo_sin_receptor_o_sin_dias_pagados_cae_en_no_calculable(db: AsyncSession) -> None:
+    """El mismo tratamiento que el recibo de 0 días pagados, para los otros dos datos del propio
+    CFDI que también pueden faltar: `num_dias_pagados` es nullable en el modelo, y
+    `nomina_receptor` llega por `LEFT JOIN` en `universo_nomina.universo` — un XML sin ese nodo
+    (o sin el atributo) es un hueco real, no un caso de laboratorio. Ninguno de los dos debe
+    tumbar la corrida."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    cid_sin_dias = await insertar_nomina(
+        db, empresa_id=eid, uuid="77777777-7777-4777-8777-777777777701",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")], deducciones=[],
+    )
+    cid_sin_receptor = await insertar_nomina(
+        db, empresa_id=eid, uuid="77777777-7777-4777-8777-777777777702",
+        rfc_receptor="XAXX010101003",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")], deducciones=[],
+    )
+    await db.execute(update(Nomina).where(Nomina.comprobante_id == cid_sin_dias).values(num_dias_pagados=None))
+    await db.execute(delete(NominaReceptor).where(NominaReceptor.comprobante_id == cid_sin_receptor))
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    assert len(resultado.filas) == 2, "ninguno de los dos huecos debe tumbar la corrida"
+    por_uuid = {fila[b09._COL_UUID]: fila for fila in resultado.filas}
+    assert por_uuid["77777777-7777-4777-8777-777777777701"][_COL_ISR_DETERMINADO] is None
+    assert por_uuid["77777777-7777-4777-8777-777777777702"][_COL_ISR_DETERMINADO] is None
+
+    banderas_no_calc = [b for b in resultado.banderas if b.clave == "RECIBO_NO_CALCULABLE"]
+    assert len(banderas_no_calc) == 2

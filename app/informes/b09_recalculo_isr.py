@@ -16,11 +16,24 @@ Grano: **una fila por recibo (UUID)**, igual que el resto del universo del grupo
 CFDI de nómina uno a uno.
 
 Esta tarea (3 del plan) entrega **filas y columnas correctas**: el universo, la base gravable, el
-recálculo y las 21 columnas del documento fuente. Las banderas de comparación (`COINCIDE`,
-`DIFERENCIA_MAYOR`, `PERIODO_IRREGULAR`, `PERCEPCIONES_EXTRAORDINARIAS`,
-`PROCEDIMIENTO_ART174`, `DIFERENCIA_SISTEMATICA`, `ISR_CERO_CON_BASE`) son la tarea 4 y no viven
-aquí — la única bandera que esta tarea sí emite es `RECIBO_NO_CALCULABLE` (ver abajo), porque es
-la que impide que un solo recibo raro tumbe la corrida completa.
+recálculo y las **24 columnas** de datos del documento fuente. El documento numera 21 renglones,
+pero sus dos primeros agrupan varios campos cada uno ("UUID / Fecha pago / Periodo",
+"RFC / Nombre / Núm. empleado"); expandidos uno a uno —como ya hace B-03 con el mismo tipo de
+grupo— son 24 columnas físicas, no 21 (una ronda de revisión de esta misma tarea corrigió el
+conteo). La fila 21 del documento ("Bandera") **no** es una columna de esta hoja: en este
+proyecto los hallazgos van a la hoja `Banderas` (`ResultadoInforme.banderas`), nunca a una celda
+de texto por fila.
+
+Las banderas de comparación (`COINCIDE`, `DIFERENCIA_MAYOR`, `PERIODO_IRREGULAR`,
+`PERCEPCIONES_EXTRAORDINARIAS`, `PROCEDIMIENTO_ART174`, `DIFERENCIA_SISTEMATICA`,
+`ISR_CERO_CON_BASE`) son la tarea 4 y no viven aquí. Esta tarea sí emite dos banderas propias,
+las dos sobre **si** se pudo calcular, no sobre si el número coincide:
+
+- `RECIBO_NO_CALCULABLE` (alta): el recibo no se pudo recalcular — cero días pagados, falta el
+  nodo del receptor o su periodicidad de pago, o ni siquiera la tarifa de repuesto (ver B-09.R1
+  abajo) está confirmada. Impide que un solo recibo raro tumbe la corrida completa.
+- `TARIFA_PROPORCIONADA` (media, B-09.R1): el Anexo 8 no publica tarifa para la periodicidad de
+  este recibo, así que se usó la mensual prorrateada — ver la sección de abajo.
 
 La base gravable son **solo las percepciones ordinarias**
 -----------------------------------------------------------
@@ -41,14 +54,39 @@ La degradación es por partes (§5 del diseño), heredada de `app.informes.confi
   (`Subsidio al empleo teórico`, `ISR a retener teórico`, `Subsidio a entregar teórico`, y lo que
   de ellas depende: `Diferencia de subsidio`) quedan vacías.
 
-El recibo con cero días pagados (hueco explícito de esta tarea)
---------------------------------------------------------------------
+El recibo con cero días pagados, o sin receptor, o sin periodicidad (hueco explícito de esta tarea)
+------------------------------------------------------------------------------------------------------
 `tarifa_isr.isr_del_periodo` y `subsidio_del_periodo` lanzan `TarifaInvalida` cuando
 `num_dias_pagados <= 0` (una baja el día 1 es un dato real, no un caso imaginario). Esta tarea
 **captura** esa excepción por recibo, deja sus columnas de cálculo vacías (`None`, nunca cero: un
 cero ahí se leería como "no le tocó ISR", que es un hallazgo distinto de "no se pudo calcular") y
-emite una bandera `RECIBO_NO_CALCULABLE` de severidad alta con el mensaje de la excepción — la
-corrida completa sigue, no se rompe por un recibo atípico.
+emite `RECIBO_NO_CALCULABLE` con el mensaje de la excepción — la corrida completa sigue, no se
+rompe por un recibo atípico.
+
+El mismo tratamiento aplica a los recibos sin nodo de receptor (`nomina_receptor`, que llega por
+`LEFT JOIN` en `universo_nomina.universo` y puede faltar), sin `num_dias_pagados`, o sin
+`periodicidad_pago`: son datos del propio CFDI, no de configuración, y su ausencia deja el recibo
+igual de no calculable que un cero en los días. Ninguno de estos casos tumba la corrida.
+
+B-09.R1 — la periodicidad sin tarifa publicada usa la mensual prorrateada
+------------------------------------------------------------------------------
+`tarifa_isr.PARA_CFDI` traduce `c_PeriodicidadPago` a `PeriodicidadTarifa`, y mapea a `None` las
+periodicidades que el Anexo 8 **no** publica: `03` (catorcenal), `06` (bimestral), `07` (por
+unidad de obra), `08` (comisión), `09` (precio alzado) y `99` (otra). Un recibo con cualquiera de
+ellas no puede quedar mudo —una fila con todas las columnas vacías y sin ninguna bandera es peor
+que una con aviso, porque nadie nota que no se calculó—, así que este informe implementa la regla
+que la especificación exige (B-09.R1): se recalcula con la **tarifa mensual**, prorrateada a los
+días pagados del propio recibo (`isr_del_periodo` con `DIAS_NOMINALES[MENSUAL]`, el mismo
+prorrateo del art. 175 que ya usa B-09.R3 para un periodo incompleto), y se marca con
+`TARIFA_PROPORCIONADA` (severidad media): la comparación sigue siendo útil, pero es orientativa,
+no exacta. Si la tarifa mensual tampoco está confirmada, el recibo cae en `RECIBO_NO_CALCULABLE`
+como cualquier otro que no se puede calcular.
+
+**Esta necesidad de la mensual nunca bloquea el informe completo.** Solo las periodicidades que
+los recibos usan **directamente** (las que sí traducen a una `PeriodicidadTarifa`) entran en la
+verificación de bloqueo de `configuracion_isr`; la mensual de repuesto se resuelve aparte
+(`configs_mensual`, más abajo) precisamente para que su ausencia degrade recibo por recibo — con
+`RECIBO_NO_CALCULABLE` — y no le quite el informe entero a una empresa que nunca paga catorcenal.
 
 **Ningún importe fiscal literal vive en este archivo** (§2.12): la tarifa, la UMA mensual y los
 parámetros del subsidio salen de `app.informes.configuracion_isr`, resueltos por fecha y
@@ -130,13 +168,18 @@ class _ParametrosUniverso:
 
 
 # --------------------------------------------------------------------------------------
-# Las 21 columnas, en el orden del documento fuente
+# Las 24 columnas: los 21 renglones del documento fuente, con sus dos primeros grupos
+# ("UUID / Fecha pago / Periodo", "RFC / Nombre / Núm. empleado") expandidos uno a uno —
+# igual que ya hace B-03 con el mismo tipo de grupo (`b03_gravado_exento._COLUMNAS`).
 # --------------------------------------------------------------------------------------
 
 _COLUMNAS: tuple[tuple[str, str], ...] = (
     ("UUID", "texto"),
     ("Fecha pago", "fecha"),
+    ("Periodo", "entero"),
     ("RFC empleado", "texto"),
+    ("Nombre empleado", "texto"),
+    ("Núm. empleado", "texto"),
     ("Periodicidad", "texto"),
     ("Días pagados", "decimal"),
     ("Base gravable", "monto"),
@@ -160,7 +203,10 @@ _COLUMNAS: tuple[tuple[str, str], ...] = (
 (
     _COL_UUID,
     _COL_FECHA_PAGO,
+    _COL_PERIODO,
     _COL_RFC_EMPLEADO,
+    _COL_NOMBRE_EMPLEADO,
+    _COL_NUM_EMPLEADO,
     _COL_PERIODICIDAD,
     _COL_DIAS_PAGADOS,
     _COL_BASE,
@@ -283,6 +329,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # traducción con `PARA_CFDI` es de este informe, porque es quien lee los recibos) y los
     # tipos de percepción que de verdad aparecen — nunca las 44 claves del catálogo completo.
     periodicidades_presentes: set[PeriodicidadTarifa] = set()
+    necesita_fallback_mensual = False
     fecha_representativa_por_ejercicio: dict[int, date] = {}
     for _comprobante, nomina, receptor, _totales, _detalle in filas_universo:
         if nomina.fecha_pago is not None:
@@ -291,9 +338,16 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             if actual is None or nomina.fecha_pago > actual:
                 fecha_representativa_por_ejercicio[ejercicio] = nomina.fecha_pago
         codigo = receptor.periodicidad_pago if receptor is not None else None
-        traducida = tarifa_isr.PARA_CFDI.get(codigo) if codigo is not None else None
-        if traducida is not None:
-            periodicidades_presentes.add(traducida)
+        if codigo is not None:
+            traducida = tarifa_isr.PARA_CFDI.get(codigo)
+            if traducida is not None:
+                periodicidades_presentes.add(traducida)
+            else:
+                # B-09.R1: el Anexo 8 no publica tarifa para esta periodicidad (catorcenal,
+                # bimestral, por obra, comisión, precio alzado u "otra"). No entra en el
+                # bloqueo global — sería exigir una tarifa que casi ninguna empresa necesita
+                # confirmar—; se resuelve aparte (`configs_mensual`) y degrada por recibo.
+                necesita_fallback_mensual = True
 
     tipos_presentes: set[str] = {tipo for por_tipo in gravado_por_tipo.values() for tipo in por_tipo}
     periodicidades_ordenadas = sorted(periodicidades_presentes, key=lambda per: per.value)
@@ -303,6 +357,12 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # los parámetros del subsidio vigentes por fecha. La tarifa no depende de la fecha dentro del
     # ejercicio, solo del ejercicio y la periodicidad.
     configs: dict[int, ConfiguracionIsr] = {}
+    # La tarifa mensual de repuesto (B-09.R1) se resuelve **aparte**, en una llamada propia, y
+    # solo cuando algún recibo la necesita: si se pidiera junto con `periodicidades_ordenadas`
+    # en la misma llamada, su ausencia se colaría en `config.faltantes` y bloquearía el informe
+    # entero por una periodicidad que la mayoría de las empresas nunca usa (ver el docstring del
+    # módulo). Aquí su ausencia solo llega a `configs_mensual`, que el bloqueo de abajo no mira.
+    configs_mensual: dict[int, ConfiguracionIsr] = {}
     for ejercicio, fecha in fecha_representativa_por_ejercicio.items():
         configs[ejercicio] = await configuracion_isr.resolver(
             db,
@@ -311,6 +371,14 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             periodicidades=periodicidades_ordenadas,
             tipos_presentes=tipos_presentes,
         )
+        if necesita_fallback_mensual:
+            configs_mensual[ejercicio] = await configuracion_isr.resolver(
+                db,
+                ejercicio=ejercicio,
+                en_fecha=fecha,
+                periodicidades=[PeriodicidadTarifa.MENSUAL],
+                tipos_presentes=tipos_presentes,
+            )
 
     # La degradación es por partes (§5 del diseño): sin tarifa o sin marcas, nada se genera y el
     # aviso es literalmente el texto de `configuracion_isr` (nunca reescrito aquí). Sin subsidio
@@ -329,13 +397,14 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
 
     filas: list[list[Any]] = []
-    for comprobante, nomina, receptor, _totales, _detalle in filas_universo:
+    for comprobante, nomina, receptor, _totales, detalle in filas_universo:
         cid = comprobante.comprobante_id
         fecha_pago = nomina.fecha_pago
+        periodo = fecha_pago.month if fecha_pago is not None else None
         ejercicio = fecha_pago.year if fecha_pago is not None else None
         config = configs.get(ejercicio) if ejercicio is not None else None
+        config_mensual = configs_mensual.get(ejercicio) if ejercicio is not None else None
         codigo = receptor.periodicidad_pago if receptor is not None else None
-        periodicidad_tarifa = tarifa_isr.PARA_CFDI.get(codigo) if codigo is not None else None
         dias_pagados = nomina.num_dias_pagados
 
         base = _base_ordinaria(config, gravado_por_tipo.get(cid, {})) if config is not None else Decimal("0.00")
@@ -352,11 +421,44 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         subsidio_a_entregar_teorico: Decimal | None = None
         tarifa_aplicada: str | None = None
 
-        if config is not None and periodicidad_tarifa is not None and dias_pagados is not None:
-            dias_nominales = tarifa_isr.DIAS_NOMINALES.get(periodicidad_tarifa)
-            renglones = config.tarifas.get(periodicidad_tarifa, ())
+        if receptor is None or dias_pagados is None or codigo is None:
+            # Faltan datos del propio CFDI (no de configuración): el nodo del receptor, sus
+            # días pagados o su periodicidad de pago. Mismo tratamiento que el resto de los
+            # huecos de esta sección — el recibo no desaparece, se marca.
+            banderas.append(
+                Bandera(
+                    clave="RECIBO_NO_CALCULABLE",
+                    severidad="alta",
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=(
+                        "Este recibo no trae uno de los datos que el recálculo necesita del "
+                        "propio CFDI (el nodo del receptor, sus días pagados o su periodicidad "
+                        "de pago), así que no se pudo calcular su ISR."
+                    ),
+                )
+            )
+        else:
+            periodicidad_tarifa = tarifa_isr.PARA_CFDI.get(codigo)
+            proporcionada = periodicidad_tarifa is None
+            periodicidad_efectiva = PeriodicidadTarifa.MENSUAL if periodicidad_tarifa is None else periodicidad_tarifa
+            if proporcionada:
+                # B-09.R1: el Anexo 8 no publica tarifa para esta periodicidad — se recalcula
+                # con la mensual, prorrateada a los días pagados del propio recibo.
+                renglones = (
+                    config_mensual.tarifas.get(PeriodicidadTarifa.MENSUAL, ())
+                    if config_mensual is not None
+                    else ()
+                )
+            else:
+                renglones = config.tarifas.get(periodicidad_efectiva, ()) if config is not None else ()
+            dias_nominales = tarifa_isr.DIAS_NOMINALES.get(periodicidad_efectiva)
+
             if dias_nominales is not None and renglones:
-                tarifa_aplicada = f"{ejercicio} · {tarifa_isr.ETIQUETAS_TARIFA[periodicidad_tarifa]}"
+                tarifa_aplicada = (
+                    f"{ejercicio} · {tarifa_isr.ETIQUETAS_TARIFA[periodicidad_efectiva]} (proporcionada)"
+                    if proporcionada
+                    else f"{ejercicio} · {tarifa_isr.ETIQUETAS_TARIFA[periodicidad_efectiva]}"
+                )
                 try:
                     # `isr_del_periodo` se llama primero: si `dias_pagados` es cero o negativo
                     # lanza aquí, antes de que la elevación de la base de abajo pudiera dividir
@@ -379,7 +481,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                     tasa = tarifa_isr.a_porcentaje(r.tasa_excedente)
                     cuota_fija = r.cuota_fija
 
-                    if config.hay_subsidio:
+                    if config is not None and config.hay_subsidio:
                         uma_mensual = config.uma_mensual
                         factor_subsidio = config.factor_subsidio
                         tope_subsidio = config.tope_subsidio
@@ -391,6 +493,23 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                         )
                         isr_a_retener_teorico = tarifa_isr.isr_a_retener(isr_determinado, subsidio_teorico)
                         subsidio_a_entregar_teorico = tarifa_isr.subsidio_a_entregar(isr_determinado, subsidio_teorico)
+
+                    if proporcionada:
+                        banderas.append(
+                            Bandera(
+                                clave="TARIFA_PROPORCIONADA",
+                                severidad="media",
+                                ambito=f"uuid:{comprobante.uuid}",
+                                mensaje=(
+                                    f"El Anexo 8 de la RMF no publica una tarifa para la periodicidad de pago "
+                                    f"`{codigo}` de este recibo (catorcenal, bimestral, por unidad de obra, "
+                                    "comisión, precio alzado u otra), así que se usó la tarifa mensual "
+                                    "repartida entre los días pagados (mismo prorrateo del art. 175 del "
+                                    "Reglamento que B-09.R3 usa para un periodo incompleto). La comparación "
+                                    "con lo timbrado es orientativa, no exacta."
+                                ),
+                            )
+                        )
                 except tarifa_isr.TarifaInvalida as exc:
                     renglon = limite_inferior = excedente = tasa = impuesto_marginal = cuota_fija = None
                     isr_determinado = None
@@ -403,6 +522,24 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                             mensaje=f"No se pudo recalcular el ISR de este recibo con la tarifa: {exc}",
                         )
                     )
+            else:
+                # Ni la tarifa propia de esta periodicidad, ni —si aplicaba— la mensual de
+                # repuesto de B-09.R1, están confirmadas para este ejercicio.
+                banderas.append(
+                    Bandera(
+                        clave="RECIBO_NO_CALCULABLE",
+                        severidad="alta",
+                        ambito=f"uuid:{comprobante.uuid}",
+                        mensaje=(
+                            "No hay tarifa confirmada para calcular el ISR de este recibo"
+                            + (
+                                " (la tarifa mensual de repuesto de B-09.R1 tampoco está confirmada)."
+                                if proporcionada
+                                else "."
+                            )
+                        ),
+                    )
+                )
 
         isr_cfdi = isr_cfdi_por_comprobante.get(cid, Decimal("0.00"))
         subsidio_cfdi = subsidio_cfdi_por_comprobante.get(cid, Decimal("0.00"))
@@ -415,7 +552,10 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             [
                 comprobante.uuid,
                 fecha_pago,
+                periodo,
                 comprobante.rfc_receptor,
+                detalle.nombre_receptor if detalle is not None else None,
+                receptor.num_empleado if receptor is not None else None,
                 codigo,
                 dias_pagados,
                 base,
