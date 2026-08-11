@@ -412,7 +412,7 @@ def _paso_5_comprobacion_manual(resultado: ResultadoInforme) -> list[str]:
     **Lo que el patrón de verdad timbró en este CFDI** (`nomina_deduccion`/`nomina_otro_pago`):
 
         ISR retenido en el CFDI     = 939.32
-        Subsidio en el CFDI         = 0.00
+        Subsidio causado en el CFDI = 0.00
 
         Diferencia de ISR = 939.32 − 939.33 = −0.01
 
@@ -440,7 +440,7 @@ def _paso_5_comprobacion_manual(resultado: ResultadoInforme) -> list[str]:
         "ISR a retener teórico": Decimal("939.33"),
         "Subsidio a entregar teórico": Decimal("0.00"),
         "ISR retenido en el CFDI": Decimal("939.32"),
-        "Subsidio en el CFDI": Decimal("0.00"),
+        "Subsidio causado en el CFDI": Decimal("0.00"),
         "Diferencia de ISR": Decimal("-0.01"),
         "Diferencia de subsidio": Decimal("0.00"),
     }

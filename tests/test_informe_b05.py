@@ -979,30 +979,45 @@ async def test_la_diferencia_del_ejercicio_dice_a_cargo_o_a_favor(db: AsyncSessi
 
 async def test_separacion_y_jubilacion_no_entran_en_la_base_anual(db: AsyncSession, tmp_path: Path) -> None:
     """B-05.R4, ahora sobre el ISR anual: un empleado con ingreso por separación (régimen propio,
-    art. 95 LISR) no lo ve sumado a la base del cálculo anual del art. 97. La base la sigue
-    dando "Gravado ordinario" (columna 11, que ya excluye separación y jubilación por marca) —
-    esta prueba no reimplementa esa exclusión, solo fija que el bloque anual la hereda en vez de
-    usar "Total gravado" (que sí sumaría los 5000.00 de más).
+    art. 95 LISR) **y** por jubilación (régimen propio, art. 96 LISR) en el mismo recibo no los ve
+    sumados a la base del cálculo anual del art. 97. Antes esta prueba —a pesar de su nombre—
+    solo ejercitaba separación (tipo `022`); se agrega jubilación (tipo `039`, "Jubilaciones,
+    pensiones o haberes de retiro") para que el nombre no prometa más cobertura de la que la
+    prueba de verdad tiene. La base la sigue dando "Gravado ordinario" (columna 11, que ya
+    excluye los dos regímenes por marca) — esta prueba no reimplementa esa exclusión, solo fija
+    que el bloque anual la hereda en vez de usar "Total gravado" (que sí sumaría los 8000.00 de
+    más entre los dos regímenes propios).
 
-    Con gravado ordinario 8000.00 (solo el tipo `001`, marcado ordinario; el tipo `022` —prima de
-    antigüedad, régimen de separación— se excluye por marca):
+    Con gravado ordinario 8000.00 (solo el tipo `001`, marcado ordinario; `022` —separación— y
+    `039` —jubilación— se excluyen por marca):
 
         excedente = 8000.00 − 0.01 = 7999.99
         marginal  = 7999.99 × 0.10 = 799.999 → 800.00 (ROUND_HALF_UP)
         ISR anual = 0.00 (cuota fija) + 800.00 = 800.00
 
-    Si el ISR anual usara "Total gravado" (13000.00) en vez de "Gravado ordinario", el renglón
-    aplicable seguiría siendo el 1, pero el ISR saldría 1300.00 en vez de 800.00 — la prueba
-    fallaría con ese número si alguien reintrodujera el defecto.
+    Si el ISR anual usara "Total gravado" (8000.00 + 5000.00 + 3000.00 = 16000.00) en vez de
+    "Gravado ordinario", el gravado caería en el renglón **2** (10000.01 en adelante), no en el 1:
+
+        excedente = 16000.00 − 10000.01 = 5999.99
+        marginal  = 5999.99 × 0.30 = 1799.997 → 1800.00 (ROUND_HALF_UP)
+        ISR anual = 1000.00 (cuota fija) + 1800.00 = 2800.00
+
+    — 2800.00 en vez de 800.00, y en el renglón 2, no el 1: la versión anterior de este docstring
+    decía "el renglón aplicable seguiría siendo el 1 … 1300.00", que no es lo que da la tarifa
+    sintética con 13000.00 (el total de esa versión, sin jubilación): 13000.00 también cae en el
+    renglón 2 (excedente 2999.99 × 0.30 = 899.997 → 900.00; ISR = 1000.00 + 900.00 = 1900.00, no
+    1300.00). La cuenta de esta versión (16000.00 → 2800.00) está verificada a mano arriba.
     """
     eid = await _empresa(db)
-    await _sembrar_marcas(db, tmp_path, [("001", True), ("022", False)], confirmadas=True)
+    await _sembrar_marcas(db, tmp_path, [("001", True), ("022", False), ("039", False)], confirmadas=True)
     await _sembrar_tarifa_ejercicio(db)
     await insertar_nomina(db, empresa_id=eid, uuid="e0000006-0000-0000-0000-000000000006",
                           fecha_pago=date(2026, 6, 30), fecha_final_pago=date(2026, 6, 30),
                           percepciones=[("001", "001", "Sueldo", "8000.00", "0.00"),
-                                        ("022", "022", "Prima de antigüedad", "5000.00", "0.00")],
-                          total_percepciones="13000.00", total_separacion="5000.00", total="13000.00")
+                                        ("022", "022", "Prima de antigüedad", "5000.00", "0.00"),
+                                        ("039", "039", "Jubilación", "3000.00", "0.00")],
+                          total_percepciones="16000.00", total_separacion="5000.00",
+                          total_jubilacion="3000.00", total="16000.00")
 
     resultado = await b05.consultar(db, eid, b05.Parametros(ejercicio=2026))
 

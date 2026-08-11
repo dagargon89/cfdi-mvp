@@ -242,6 +242,40 @@ def test_cero_dias_pagados_en_el_subsidio_tampoco_divide_entre_cero() -> None:
         )
 
 
+def _mensual_sintetica() -> list[t.Renglon]:
+    """Dos renglones estructuralmente válidos (pasan `t.validar`), **no** la tabla mensual real
+    del Anexo 8 — aquí solo importa que un mes de 31 días no dispare un prorrateo al alza, no que
+    la cifra sea la oficial (mismo criterio que `tests/test_informe_b09.py::_renglones_sinteticos`
+    para la mensual de repuesto de B-09.R1)."""
+    return [
+        t.Renglon(1, Decimal("0.01"), Decimal("1000.00"), Decimal("0.00"), Decimal("0.0500")),
+        t.Renglon(2, Decimal("1000.01"), None, Decimal("50.00"), Decimal("0.3500")),
+    ]
+
+
+def test_mas_dias_que_los_nominales_no_se_prorratea_al_alza() -> None:
+    """Un recibo mensual de **31 días naturales** (`dias_nominales` de MENSUAL es 30 por
+    convención — ver `DIAS_NOMINALES`) es una práctica frecuente de captura, no un dato roto.
+    Elevar la base cuando ya se pagaron MÁS días que los nominales sería el error simétrico del
+    que el prorrateo a la baja existe para evitar: infla la base al tramo de un ingreso mayor y
+    produce un ISR que ningún sistema de nómina calcula así.
+
+    Gravado 2000.00, renglón 2 (1000.01 en adelante, cuota 50.00, tasa 0.35), aplicado
+    DIRECTAMENTE sobre el gravado (sin elevar ni volver a reducir):
+
+        excedente = 2000.00 − 1000.01 = 999.99
+        marginal  = 999.99 × 0.35 = 349.9965 → 350.00 (ROUND_HALF_UP)
+        ISR       = 50.00 + 350.00 = 400.00
+
+    Si el código elevara como si fueran menos días (el defecto que esta prueba protege), la base
+    elevada sería 2000.00 × 30/31 = 1935.483871 → 1935.48 (renglón 2 también, pero un excedente
+    menor): 50.00 + (1935.48 − 1000.01) × 0.35 = 50.00 + 327.4145 → 50.00 + 327.41 = 377.41,
+    y prorrateado de vuelta 377.41 × 31/30 = 389.9903 → 389.99: un resultado distinto (389.99,
+    no 400.00) que no es el que un proveedor de nómina timbra para un mes de 31 días."""
+    tarifa = _mensual_sintetica()
+    assert t.isr_del_periodo(tarifa, Decimal("2000.00"), Decimal("31"), Decimal("30")) == Decimal("400.00")
+
+
 def test_la_base_elevada_se_redondea_antes_de_aplicar_la_tarifa() -> None:
     """7 días de una quincena con un gravado que no eleva limpio, para que el redondeo
     intermedio de la base elevada sí importe (a diferencia de 3000.00 × 15/9, que da exacto).

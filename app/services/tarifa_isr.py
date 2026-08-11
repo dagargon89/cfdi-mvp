@@ -178,7 +178,7 @@ def isr_de(renglones: Sequence[Renglon], base: Decimal) -> Decimal:
 def isr_del_periodo(
     renglones: Sequence[Renglon], gravado: Decimal, dias_pagados: Decimal, dias_nominales: Decimal
 ) -> Decimal:
-    """ISR de un periodo, prorrateando cuando cubre menos días que los nominales.
+    """ISR de un periodo, prorrateando cuando cubre **menos** días que los nominales.
 
     **Vía elegida, declarada como exige B-09.R3:** la del art. 175 del Reglamento — se eleva la
     base al periodo completo, se aplica la tarifa de esa periodicidad, y el impuesto se reduce en
@@ -192,6 +192,23 @@ def isr_del_periodo(
     ingreso— y el ISR saldría por debajo del correcto. Elevar primero coloca la base en el
     renglón que de verdad le toca.
 
+    **Corrección de la revisión final: cuando `dias_pagados > dias_nominales` (un mes de 31 días
+    naturales, con `dias_nominales` fijo en 30 por convención) NO se prorratea al alza.** La
+    tarifa se aplica directamente sobre el gravado del periodo, sin elevarlo ni volver a
+    reducirlo. Elevar aquí sería el error simétrico del que este mismo procedimiento existe para
+    evitar: "el mes son 30 días" es una convención declarada de este módulo (ver
+    `subsidio_del_periodo`), no una promesa de que ningún recibo mensual traiga más días —un
+    proveedor de nómina que declara los 31 días naturales de un mes largo es una práctica
+    frecuente, no un dato roto—, y ningún sistema de nómina eleva la base por encima de un
+    periodo ya completo antes de aplicar la tarifa. Elevarla de todos modos infla la base al
+    tramo que le tocaría a un ingreso mayor y produce un ISR que no es el que el proveedor
+    calculó, así que en los siete meses de 31 días del año un prorrateo inventado por esta
+    función generaría una diferencia sistemática que no existe en la realidad. La tarea 4
+    (`b09_recalculo_isr`) sigue marcando el recibo con `PERIODO_IRREGULAR` cuando
+    `dias_pagados != dias_nominales` en cualquier sentido —incluido este—, pero con un mensaje
+    que aclara que aquí no hubo prorrateo: el aviso es contexto, no una disculpa por un cálculo
+    que de hecho coincide con el estándar de la industria.
+
     **`TarifaInvalida` se reutiliza aquí, en vez de crear una excepción nueva, porque unos días
     pagados en cero o negativos ya significan exactamente lo que esa excepción dice: "no se puede
     calcular con estos datos".** Crear una jerarquía aparte para este caso no le agrega
@@ -203,7 +220,10 @@ def isr_del_periodo(
             f"El recibo dice {dias_pagados} días pagados, así que no se puede calcular el ISR del "
             "periodo. Revisa el CFDI: un recibo sin días pagados no debería traer sueldo gravado."
         )
-    if dias_pagados == dias_nominales:
+    if dias_pagados >= dias_nominales:
+        # Días exactos: cálculo directo. Más días que los nominales (mes de 31 días natural):
+        # tampoco se eleva — ver el porqué en el docstring — se aplica la tarifa tal cual sobre
+        # el gravado del periodo, igual que con los días exactos.
         return isr_de(renglones, gravado)
     elevada = (gravado * dias_nominales / dias_pagados).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
     completo = isr_de(renglones, elevada)

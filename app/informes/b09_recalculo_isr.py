@@ -99,12 +99,23 @@ no nombrar una condición. Ocho claves, siete por recibo y una de toda la corrid
   (`_UMBRAL_COINCIDE`); hasta 1.00 peso sigue siendo redondeo acumulado, no un error
   (`_UMBRAL_DIFERENCIA_MENOR`); por encima ya merece revisarse con el proveedor de nómina. Ninguno
   de los tres nombres es una cifra fiscal: son la clasificación que este informe define.
-- `ISR_CERO_CON_BASE` (alta): el patrón retuvo 0.00 de ISR en un recibo cuya base gravable ya
-  rebasó el tramo exento de la tarifa (su renglón calculado es el 2 o mayor). Es el hallazgo más
-  grave del informe: apunta a una retención que debió calcularse y no se hizo.
+- `ISR_CERO_CON_BASE`: el patrón retuvo 0.00 de ISR en un recibo cuya base gravable ya rebasó el
+  tramo exento de la tarifa (su renglón calculado es el 2 o mayor). **Corrección de la revisión
+  final (C1):** el renglón por sí solo no basta — un sueldo bajo puede caer en el renglón 2 y aun
+  así tener `isr_a_retener_teorico == 0.00` cuando el subsidio al empleo absorbe por completo el
+  ISR determinado, que es exactamente el caso que el subsidio existe para proteger. Por eso esta
+  bandera exige además `isr_a_retener_teorico is not None and isr_a_retener_teorico > 0`:
+  - **Confirmado y mayor que cero** (alta): sí había algo que retener y no se retuvo. Es el
+    hallazgo más grave del informe.
+  - **Confirmado e igual a cero**: no se emite — retener 0.00 es lo correcto, no un hallazgo.
+  - **Subsidio sin confirmar** (media): no se puede afirmar cuál de los dos casos anteriores es
+    este, así que se avisa con severidad reducida en vez de callarlo o acusar a ciegas, pidiendo
+    confirmar el subsidio para saberlo con certeza.
 - `PERIODO_IRREGULAR` (baja): el recibo pagó más o menos días que los nominales de su
   periodicidad. No es un error en sí — es contexto: cualquier diferencia de ISR de ese recibo
-  puede venir del prorrateo, no del cálculo del proveedor.
+  puede venir del prorrateo, no del cálculo del proveedor. **Con MÁS días** (I3: un mes de 31
+  días naturales), `tarifa_isr.isr_del_periodo` ya no prorratea al alza, así que el mensaje lo
+  aclara en vez de hablar de un prorrateo que no ocurrió.
 - `PERCEPCIONES_EXTRAORDINARIAS` (media): el recibo trae al menos una percepción marcada
   `es_ingreso_ordinario = false` en el catálogo **confirmado** — nunca una lista de tipos escrita
   en el código. Esas percepciones (aguinaldo, PTU, prima vacacional…) no se gravan con la tarifa
@@ -133,7 +144,8 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -168,6 +180,27 @@ _CLAVE_OTRO_PAGO_SUBSIDIO = "002"
 `b05_acumulado_anual._CLAVE_OTRO_PAGO_SUBSIDIO`: se declara localmente porque, a diferencia del
 ISR (una identidad de B-00 con una sola clave inequívoca), esta constante no tiene todavía un
 hogar compartido — no vale la pena crear uno para una constante que dos módulos ya repiten igual."""
+
+_ETIQUETAS_PERIODICIDAD_CFDI: Final[Mapping[str, str]] = {
+    "01": "Diario",
+    "02": "Semanal",
+    "03": "Catorcenal",
+    "04": "Quincenal",
+    "05": "Mensual",
+    "06": "Bimestral",
+    "07": "Unidad de obra",
+    "08": "Comisión",
+    "09": "Precio alzado",
+    "10": "Decenal",
+    "99": "Otra",
+}
+"""Etiqueta legible de `c_PeriodicidadPago` (ronda de corrección: la columna "Periodicidad" y el
+mensaje de `TARIFA_PROPORCIONADA` mostraban el código crudo del catálogo, p. ej. `"04"`, que el
+dueño del Hub —que no es contador— no puede leer). No es la misma tabla que
+`tarifa_isr.ETIQUETAS_TARIFA`: esa está indexada por `PeriodicidadTarifa` (las seis periodicidades
+que el Anexo 8 sí publica) y esta por el código crudo del CFDI (las once de `c_PeriodicidadPago`,
+incluidas las que el Anexo 8 no publica y que por eso `PARA_CFDI` traduce a `None`). Ninguna de
+las dos cubre lo que le falta a la otra, así que no se puede reusar una para la otra."""
 
 # --------------------------------------------------------------------------------------
 # Los umbrales de las banderas (tarea 4, B-09.R4 y §6 del diseño). Ninguno es un importe
@@ -269,7 +302,7 @@ _COLUMNAS: tuple[tuple[str, str], ...] = (
     ("ISR a retener teórico", "monto"),
     ("Subsidio a entregar teórico", "monto"),
     ("ISR retenido en el CFDI", "monto"),
-    ("Subsidio en el CFDI", "monto"),
+    ("Subsidio causado en el CFDI", "monto"),
     ("Diferencia de ISR", "monto"),
     ("Diferencia de subsidio", "monto"),
 )
@@ -425,7 +458,17 @@ def _bandera_diferencia_sistematica(datos: list[tuple[str, Decimal]]) -> Bandera
     o dos empleados "todos difieren igual" es trivialmente cierto y la bandera sería ruido; con
     tres o más, una diferencia pareja deja de leerse como una coincidencia y empieza a apuntar a
     otro procedimiento (el propio art. 174, por ejemplo) o a una tarifa mal cargada — no a errores
-    sueltos de cada recibo."""
+    sueltos de cada recibo.
+
+    **Corrección de la revisión final (I1): el sentido del mensaje estaba invertido.**
+    `diferencia = isr_cfdi − isr_a_retener_teorico`, así que `signos == {-1}` significa que lo
+    que el patrón retuvo quedó **por debajo** de lo que marca la tarifa (retuvo de menos), y
+    `signos == {1}` que quedó **por encima** (retuvo de más) — la referencia es siempre la
+    tarifa, nunca "lo que retuvo el patrón" comparado consigo mismo. El texto anterior decía "todos
+    por debajo de lo que retuvo el patrón", que no tiene sujeto: lo único que puede estar por
+    encima o por debajo es la retención **respecto de la tarifa**, y ese es el único dato
+    accionable de esta bandera — retener de más y de menos tienen consecuencias fiscales
+    opuestas para el trabajador."""
     empleados_distintos = {num_empleado for num_empleado, _diferencia in datos}
     if len(empleados_distintos) < _MIN_EMPLEADOS_DIFERENCIA_SISTEMATICA:
         return None
@@ -441,11 +484,10 @@ def _bandera_diferencia_sistematica(datos: list[tuple[str, Decimal]]) -> Bandera
         ambito="informe",
         mensaje=(
             f"Los {len(empleados_distintos)} empleados de esta corrida con ISR comparable "
-            f"difieren de la tarifa en el mismo sentido: todos {sentido} de lo que retuvo el "
-            "patrón. Esto no se ve como errores sueltos de cada recibo, sino como el proveedor "
-            "de nómina usando otro procedimiento (por ejemplo el del art. 174) o una tarifa mal "
-            "cargada — vale la pena confirmarlo con el proveedor antes de revisar recibos uno "
-            "por uno."
+            f"tienen algo en común: todos retuvieron {sentido} de lo que marca la tarifa. Esto "
+            "no se ve como errores sueltos de cada recibo, sino como el proveedor de nómina "
+            "usando otro procedimiento (por ejemplo el del art. 174) o una tarifa mal cargada — "
+            "vale la pena confirmarlo con el proveedor antes de revisar recibos uno por uno."
         ),
     )
 
@@ -479,13 +521,10 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     # tipos de percepción que de verdad aparecen — nunca las 44 claves del catálogo completo.
     periodicidades_presentes: set[PeriodicidadTarifa] = set()
     necesita_fallback_mensual = False
-    fecha_representativa_por_ejercicio: dict[int, date] = {}
+    fechas_pago_presentes: set[date] = set()
     for _comprobante, nomina, receptor, _totales, _detalle in filas_universo:
         if nomina.fecha_pago is not None:
-            ejercicio = nomina.fecha_pago.year
-            actual = fecha_representativa_por_ejercicio.get(ejercicio)
-            if actual is None or nomina.fecha_pago > actual:
-                fecha_representativa_por_ejercicio[ejercicio] = nomina.fecha_pago
+            fechas_pago_presentes.add(nomina.fecha_pago)
         codigo = receptor.periodicidad_pago if receptor is not None else None
         if codigo is not None:
             traducida = tarifa_isr.PARA_CFDI.get(codigo)
@@ -501,29 +540,38 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     tipos_presentes: set[str] = {tipo for por_tipo in gravado_por_tipo.values() for tipo in por_tipo}
     periodicidades_ordenadas = sorted(periodicidades_presentes, key=lambda per: per.value)
 
-    # Se resuelve una vez por ejercicio presente (acotado por el calendario, no por el número de
-    # recibos: regla 11), con la fecha de pago más reciente de ese ejercicio como referencia para
-    # los parámetros del subsidio vigentes por fecha. La tarifa no depende de la fecha dentro del
-    # ejercicio, solo del ejercicio y la periodicidad.
-    configs: dict[int, ConfiguracionIsr] = {}
+    # Corrección de la revisión final (I2): se resuelve una vez por **fecha de pago distinta**,
+    # no una por ejercicio con la fecha más reciente como representante. `config/fiscal/README.md`
+    # dice que la UMA (y con ella el subsidio) cambia el 1 de febrero, así que enero usa la del
+    # año anterior: cachear por ejercicio calculaba el subsidio de enero con los valores vigentes
+    # en la fecha más reciente del año (julio, digamos), y esa diferencia de vigencia se leía
+    # como `DIFERENCIA_MAYOR` en cada recibo de enero y `DIFERENCIA_SISTEMATICA` sobre la corrida
+    # — un hallazgo grave inventado por esta resolución de vigencias, no por el proveedor de
+    # nómina. Las fechas de pago distintas de un ejercicio están acotadas por el calendario (a lo
+    # sumo unas 26 al año, para la periodicidad más frecuente), no por el número de recibos, así
+    # que sigue siendo regla 11: cero N+1. La tarifa en sí no depende de la fecha dentro del
+    # ejercicio (solo del ejercicio y la periodicidad), pero `configuracion_isr.resolver` ya la
+    # resuelve junto con el subsidio en la misma llamada, y repetirla por fecha es más barato que
+    # separar las dos resoluciones.
+    configs: dict[date, ConfiguracionIsr] = {}
     # La tarifa mensual de repuesto (B-09.R1) se resuelve **aparte**, en una llamada propia, y
     # solo cuando algún recibo la necesita: si se pidiera junto con `periodicidades_ordenadas`
     # en la misma llamada, su ausencia se colaría en `config.faltantes` y bloquearía el informe
     # entero por una periodicidad que la mayoría de las empresas nunca usa (ver el docstring del
     # módulo). Aquí su ausencia solo llega a `configs_mensual`, que el bloqueo de abajo no mira.
-    configs_mensual: dict[int, ConfiguracionIsr] = {}
-    for ejercicio, fecha in fecha_representativa_por_ejercicio.items():
-        configs[ejercicio] = await configuracion_isr.resolver(
+    configs_mensual: dict[date, ConfiguracionIsr] = {}
+    for fecha in fechas_pago_presentes:
+        configs[fecha] = await configuracion_isr.resolver(
             db,
-            ejercicio=ejercicio,
+            ejercicio=fecha.year,
             en_fecha=fecha,
             periodicidades=periodicidades_ordenadas,
             tipos_presentes=tipos_presentes,
         )
         if necesita_fallback_mensual:
-            configs_mensual[ejercicio] = await configuracion_isr.resolver(
+            configs_mensual[fecha] = await configuracion_isr.resolver(
                 db,
-                ejercicio=ejercicio,
+                ejercicio=fecha.year,
                 en_fecha=fecha,
                 periodicidades=[PeriodicidadTarifa.MENSUAL],
                 tipos_presentes=tipos_presentes,
@@ -538,10 +586,10 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     bloqueantes: list[str] = []
     vistos: set[str] = set()
     sin_subsidio_confirmado = False
-    for config_ejercicio in configs.values():
-        if configuracion_isr.BANDERA_SIN_SUBSIDIO in config_ejercicio.faltantes:
+    for config_fecha in configs.values():
+        if configuracion_isr.BANDERA_SIN_SUBSIDIO in config_fecha.faltantes:
             sin_subsidio_confirmado = True
-        for falta in config_ejercicio.faltantes:
+        for falta in config_fecha.faltantes:
             if falta != configuracion_isr.BANDERA_SIN_SUBSIDIO and falta not in vistos:
                 vistos.add(falta)
                 bloqueantes.append(falta)
@@ -563,8 +611,10 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         fecha_pago = nomina.fecha_pago
         periodo = fecha_pago.month if fecha_pago is not None else None
         ejercicio = fecha_pago.year if fecha_pago is not None else None
-        config = configs.get(ejercicio) if ejercicio is not None else None
-        config_mensual = configs_mensual.get(ejercicio) if ejercicio is not None else None
+        # I2: la configuración se busca por la fecha de pago exacta de este recibo, no por su
+        # ejercicio — ver el comentario de `configs` más arriba.
+        config = configs.get(fecha_pago) if fecha_pago is not None else None
+        config_mensual = configs_mensual.get(fecha_pago) if fecha_pago is not None else None
         codigo = receptor.periodicidad_pago if receptor is not None else None
         dias_pagados = nomina.num_dias_pagados
 
@@ -644,21 +694,39 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
                     if dias_pagados != dias_nominales:
                         # El recibo cubrió más o menos días que los nominales de su
-                        # periodicidad: hubo prorrateo (art. 175 del Reglamento). No es un
-                        # error en sí — es contexto para leer cualquier diferencia de ISR de
-                        # este mismo recibo (§6 del diseño).
+                        # periodicidad. No es un error en sí — es contexto para leer cualquier
+                        # diferencia de ISR de este mismo recibo (§6 del diseño). Pero el CÓMO
+                        # difiere según el sentido (corrección de la revisión final, I3): con
+                        # MENOS días hubo prorrateo de verdad (art. 175 del Reglamento, se elevó
+                        # la base, se aplicó la tarifa y se redujo el resultado). Con MÁS días
+                        # (un mes de 31 días naturales) `tarifa_isr.isr_del_periodo` ya NO
+                        # prorratea al alza — ver su docstring —, así que decir "hubo un
+                        # prorrateo" ahí sería falso: el mensaje tiene que aclarar que el cálculo
+                        # se hizo directo sobre el gravado, para que el aviso siga siendo contexto
+                        # y no una disculpa por un cálculo que de hecho es el estándar.
+                        if dias_pagados > dias_nominales:
+                            mensaje_irregular = (
+                                f"Este recibo pagó {dias_pagados} días, más que los "
+                                f"{dias_nominales} días normales de su periodicidad (por ejemplo, "
+                                "un mes de 31 días naturales): la tarifa se aplicó directamente "
+                                "sobre la base gravable, sin prorratear, así que este aviso es "
+                                "solo contexto — no indica un cálculo distinto del que hace un "
+                                "sistema de nómina típico."
+                            )
+                        else:
+                            mensaje_irregular = (
+                                f"Este recibo pagó {dias_pagados} días, menos que los "
+                                f"{dias_nominales} días normales de su periodicidad: hubo un "
+                                "prorrateo, así que si el ISR retenido difiere del que marca "
+                                "la tarifa, la causa puede ser ese prorrateo y no un error del "
+                                "proveedor de nómina."
+                            )
                         banderas.append(
                             Bandera(
                                 clave="PERIODO_IRREGULAR",
                                 severidad="baja",
                                 ambito=f"uuid:{comprobante.uuid}",
-                                mensaje=(
-                                    f"Este recibo pagó {dias_pagados} días, distintos de los "
-                                    f"{dias_nominales} días normales de su periodicidad: hubo un "
-                                    "prorrateo, así que si el ISR retenido difiere del que marca "
-                                    "la tarifa, la causa puede ser ese prorrateo y no un error del "
-                                    "proveedor de nómina."
-                                ),
+                                mensaje=mensaje_irregular,
                             )
                         )
 
@@ -676,18 +744,22 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                         subsidio_a_entregar_teorico = tarifa_isr.subsidio_a_entregar(isr_determinado, subsidio_teorico)
 
                     if proporcionada:
+                        # Etiqueta legible del catálogo (`_ETIQUETAS_PERIODICIDAD_CFDI`), nunca el
+                        # código crudo entre backticks: el dueño del Hub no sabe qué es "04"
+                        # (ronda de corrección de la revisión final).
+                        etiqueta_periodicidad = _ETIQUETAS_PERIODICIDAD_CFDI.get(codigo, codigo)
                         banderas.append(
                             Bandera(
                                 clave="TARIFA_PROPORCIONADA",
                                 severidad="media",
                                 ambito=f"uuid:{comprobante.uuid}",
                                 mensaje=(
-                                    f"El Anexo 8 de la RMF no publica una tarifa para la periodicidad de pago "
-                                    f"`{codigo}` de este recibo (catorcenal, bimestral, por unidad de obra, "
-                                    "comisión, precio alzado u otra), así que se usó la tarifa mensual "
-                                    "repartida entre los días pagados (mismo prorrateo del art. 175 del "
-                                    "Reglamento que B-09.R3 usa para un periodo incompleto). La comparación "
-                                    "con lo timbrado es orientativa, no exacta."
+                                    f"El Anexo 8 de la RMF no publica una tarifa para la "
+                                    f"periodicidad de pago {etiqueta_periodicidad} de este recibo, "
+                                    "así que se usó la tarifa mensual repartida entre los días "
+                                    "pagados (mismo prorrateo del art. 175 del Reglamento que "
+                                    "B-09.R3 usa para un periodo incompleto). La comparación con "
+                                    "lo timbrado es orientativa, no exacta."
                                 ),
                             )
                         )
@@ -725,15 +797,25 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
         isr_cfdi = isr_cfdi_por_comprobante.get(cid, Decimal("0.00"))
         subsidio_cfdi = subsidio_cfdi_por_comprobante.get(cid, Decimal("0.00"))
         diferencia_isr = None if isr_a_retener_teorico is None else _redondear(isr_cfdi - isr_a_retener_teorico)
-        diferencia_subsidio = (
-            None if subsidio_a_entregar_teorico is None else _redondear(subsidio_cfdi - subsidio_a_entregar_teorico)
-        )
+        # Corrección de la revisión final (C2): `subsidio_cfdi` es `Σ SubsidioCausado` del CFDI
+        # (`nomina_otro_pago.subsidio_causado`) — el subsidio DETERMINADO del periodo, la misma
+        # pareja que `subsidio_teorico` (`tarifa_isr.subsidio_del_periodo`). Compararlo contra
+        # `subsidio_a_entregar_teorico` (solo el excedente en EFECTIVO cuando el subsidio supera
+        # al ISR) apareaba dos cosas distintas: con un sueldo típico el ISR determinado cubre el
+        # subsidio, `subsidio_a_entregar_teorico` sale 0.00, y esta columna acusaba al proveedor
+        # de "no entregar" un subsidio que en realidad sí determinó y aplicó contra el ISR (ver el
+        # docstring de `b05_acumulado_anual._COLUMNAS_ANUALES` para la misma distinción, ya
+        # documentada ahí). Lo que B-09 quiere saber es si el proveedor DETERMINÓ bien el
+        # subsidio del periodo, y eso se compara contra `subsidio_teorico`, no contra el
+        # excedente en efectivo.
+        diferencia_subsidio = None if subsidio_teorico is None else _redondear(subsidio_cfdi - subsidio_teorico)
 
         # -------------------------------------------------------------------------------
         # Tarea 4 — las banderas de comparación. `COINCIDE`/`DIFERENCIA_MENOR`/
-        # `DIFERENCIA_MAYOR` e `ISR_CERO_CON_BASE` necesitan que el ISR se haya podido
-        # calcular; las dos primeras necesitan además el subsidio confirmado (`diferencia_isr`
-        # compara contra lo que de verdad se retiene, no contra el ISR determinado bruto).
+        # `DIFERENCIA_MAYOR` necesitan el subsidio confirmado (`diferencia_isr` compara contra
+        # lo que de verdad se retiene, no contra el ISR determinado bruto). `ISR_CERO_CON_BASE`
+        # (C1) también depende de `isr_a_retener_teorico`, y por eso también degrada cuando el
+        # subsidio no está confirmado — ver su bloque más abajo.
         # -------------------------------------------------------------------------------
         if diferencia_isr is not None:
             clave_diferencia = _clasificar_diferencia(diferencia_isr)
@@ -772,22 +854,59 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 datos_diferencia_sistematica.append((num_empleado_actual, diferencia_isr))
 
         if renglon is not None and renglon >= 2 and isr_cfdi == Decimal("0.00"):
-            # El caso más grave del informe (§6 del diseño): la base ya rebasó el tramo exento
-            # de la tarifa (por eso cayó en el renglón 2 o uno mayor), pero el patrón timbró
-            # 0.00 de ISR retenido. No es una diferencia de centavos: es una retención que
-            # debió calcularse y no se hizo.
-            banderas.append(
-                Bandera(
-                    clave="ISR_CERO_CON_BASE",
-                    severidad="alta",
-                    ambito=f"uuid:{comprobante.uuid}",
-                    mensaje=(
-                        "El patrón no retuvo ISR en este recibo (0.00), pero la base gravable ya "
-                        "rebasó el tramo exento de la tarifa: es el hallazgo más grave del "
-                        "informe, porque apunta a una retención que debió calcularse y no se hizo."
-                    ),
+            # Corrección de la revisión final (C1): el renglón por sí solo NO basta. Un sueldo
+            # bajo que cae en el renglón 2 (por encima del tramo exento del ISR) puede tener,
+            # de todos modos, `isr_a_retener_teorico == 0.00` cuando el subsidio al empleo
+            # absorbe por completo el ISR determinado (`max(0, isr − subsidio)`) — es
+            # exactamente el caso que el subsidio existe para proteger, y antes de esta
+            # corrección esta bandera acusaba a esos recibos del hallazgo más grave del informe
+            # por retener correctamente 0.00. Solo se afirma "debió calcularse y no se hizo"
+            # cuando `isr_a_retener_teorico` está confirmado Y es mayor que cero: ahí sí hay algo
+            # que retener y no se retuvo.
+            if isr_a_retener_teorico is not None and isr_a_retener_teorico > Decimal("0.00"):
+                banderas.append(
+                    Bandera(
+                        clave="ISR_CERO_CON_BASE",
+                        severidad="alta",
+                        ambito=f"uuid:{comprobante.uuid}",
+                        mensaje=(
+                            "El patrón no retuvo ISR en este recibo (0.00), pero la base gravable "
+                            "ya rebasó el tramo exento de la tarifa y, aun descontando el subsidio "
+                            "al empleo, debía retenerse algo: es el hallazgo más grave del "
+                            "informe, porque apunta a una retención que debió calcularse y no se "
+                            "hizo."
+                        ),
+                    )
                 )
-            )
+            elif isr_a_retener_teorico is None:
+                # Sin el subsidio confirmado no se puede afirmar NADA sobre este recibo: un
+                # 0.00 retenido con base en el renglón 2 puede ser el error más grave del
+                # informe, o puede ser exactamente lo que la ley manda cuando el subsidio cubre
+                # el ISR determinado — y sin el subsidio confirmado no hay forma de distinguir
+                # los dos casos. Se elige NO callarlo (silencio se leería como "no hay nada que
+                # revisar", que tampoco se puede afirmar) sino emitirlo con severidad MEDIA y un
+                # mensaje que pide confirmar el subsidio para saber cuál de las dos es: el lado
+                # barato del error es una alerta que hay que rebajar con un dato, no una
+                # acusación de "alta" severidad sin ese dato. `_NOTA_SIN_SUBSIDIO` ya explica la
+                # degradación general de la corrida; esta bandera es la señal puntual sobre ESTE
+                # recibo, el único donde la falta del subsidio puede estar ocultando el hallazgo
+                # más grave del informe.
+                banderas.append(
+                    Bandera(
+                        clave="ISR_CERO_CON_BASE",
+                        severidad="media",
+                        ambito=f"uuid:{comprobante.uuid}",
+                        mensaje=(
+                            "El patrón no retuvo ISR en este recibo (0.00) y la base gravable ya "
+                            "rebasó el tramo exento de la tarifa, pero sin el subsidio al empleo "
+                            "confirmado no se puede saber si eso es correcto (el subsidio puede "
+                            "cubrir por completo el ISR de un sueldo bajo) o es el hallazgo más "
+                            "grave del informe (una retención que debió calcularse y no se hizo). "
+                            "Confirma la UMA mensual, el factor y el tope del subsidio en "
+                            "Configuración → Fiscal para saberlo con certeza."
+                        ),
+                    )
+                )
 
         if config is not None and any(
             not _es_ordinaria(config, tipo) for tipo in gravado_por_tipo.get(cid, {})
@@ -830,6 +949,11 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 )
             )
 
+        # Etiqueta legible del código crudo del catálogo (ronda de corrección de la revisión
+        # final): el dueño del Hub no sabe qué es "04", y la columna "Tarifa aplicada" ya
+        # muestra "2026 · Quincenal (15 días)" en el mismo idioma.
+        periodicidad_legible = _ETIQUETAS_PERIODICIDAD_CFDI.get(codigo, codigo) if codigo is not None else None
+
         filas.append(
             [
                 comprobante.uuid,
@@ -838,7 +962,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 comprobante.rfc_receptor,
                 detalle.nombre_receptor if detalle is not None else None,
                 receptor.num_empleado if receptor is not None else None,
-                codigo,
+                periodicidad_legible,
                 dias_pagados,
                 base,
                 tarifa_aplicada,

@@ -664,6 +664,17 @@ async def _tarifa_del_ejercicio(
     (las marcas de percepción ya las resuelve `_gravado_ordinario` por su cuenta, con su propia
     bandera); se le pasa igual para que `ConfiguracionIsr.faltantes` quede completo si algún
     consumidor futuro lo necesita.
+
+    **Corrección de la revisión final (I4): el aviso se cita, no se redacta aquí.** La primera
+    versión de esta función escribía su propia frase, casi idéntica a
+    `configuracion_isr.AVISO_SIN_TARIFA` — y el docstring del módulo `configuracion_isr` declara
+    justo lo contrario: que los textos de qué falta viven ahí una sola vez y los informes los
+    citan, para que dos informes digan lo mismo cuando falta lo mismo. Los dos ya habían
+    divergido ("confírmala" vs. "confírmalo") y B-05 metía `` `EJERCICIO` `` —el nombre de un
+    valor del enum `PeriodicidadTarifa`— en crudo dentro de un texto que una persona lee, que la
+    restricción global prohíbe. Ahora se usa `AVISO_SIN_TARIFA` tal cual, con la etiqueta legible
+    de `tarifa_isr.ETIQUETAS_TARIFA` en vez del nombre del enum; el párrafo que sigue solo agrega
+    el contexto propio de B-05 (qué tres columnas quedan vacías), sin tocar el texto compartido.
     """
     config = await configuracion_isr.resolver(
         db,
@@ -682,10 +693,10 @@ async def _tarifa_del_ejercicio(
             ambito="informe",
             mensaje=(
                 "El bloque anual del art. 97 LISR («ISR anual teórico», «Subsidio anual "
-                "acreditable» y «Diferencia a cargo / favor») salió vacío en todas las filas: no "
-                f"hay una tarifa `EJERCICIO` confirmada para {ejercicio}. Descarga el Anexo 8 de "
-                "la Resolución Miscelánea Fiscal del portal del SAT y súbelo en Configuración → "
-                "Fiscal; después confírmalo."
+                "acreditable» y «Diferencia a cargo / favor») salió vacío en todas las filas. "
+                + configuracion_isr.AVISO_SIN_TARIFA.format(
+                    etiquetas=tarifa_isr.ETIQUETAS_TARIFA[PeriodicidadTarifa.EJERCICIO], ejercicio=ejercicio
+                )
             ),
         )
     ]

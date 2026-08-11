@@ -76,6 +76,10 @@ _COL_ISR_DETERMINADO = b09._COL_ISR_DETERMINADO
 _COL_SUBSIDIO_TEORICO = b09._COL_SUBSIDIO_TEORICO
 _COL_ISR_A_RETENER_TEORICO = b09._COL_ISR_A_RETENER_TEORICO
 _COL_SUBSIDIO_A_ENTREGAR_TEORICO = b09._COL_SUBSIDIO_A_ENTREGAR_TEORICO
+_COL_ISR_RETENIDO_CFDI = b09._COL_ISR_RETENIDO_CFDI
+_COL_SUBSIDIO_CFDI = b09._COL_SUBSIDIO_CFDI
+_COL_DIFERENCIA_ISR = b09._COL_DIFERENCIA_ISR
+_COL_DIFERENCIA_SUBSIDIO = b09._COL_DIFERENCIA_SUBSIDIO
 
 
 # --------------------------------------------------------------------------------------
@@ -158,6 +162,45 @@ async def _sembrar_param(db: AsyncSession, clave: str, valor: str, *, confirmar:
     assert fila is not None
     fila.confirmado_por = _ACTOR
     fila.confirmado_en = _CONFIRMADO_EN
+    await db.commit()
+
+
+async def _sembrar_param_desde_enero(db: AsyncSession, clave: str, valor: str) -> None:
+    """Como `_sembrar_param`, pero con `vigencia_desde=2026-01-01` en vez de febrero: lo necesita
+    la prueba de I2 (más abajo) para el factor y el tope del subsidio, que ahí se mantienen
+    constantes todo el año mientras solo `UMA_MENSUAL` varía por tramo. `confirmar_param_fiscal`
+    (la ruta real, no un `UPDATE` directo) ejercita el mismo invariante de confirmación que
+    `_sembrar_param`."""
+    await cfg.guardar_param_fiscal(
+        db, clave=clave, valor=Decimal(valor), vigencia_desde=date(2026, 1, 1), origen=OrigenValor.SEMILLA,
+        fuente="Fixture de prueba",
+    )
+    await db.commit()
+    await cfg.confirmar_param_fiscal(db, clave=clave, vigencia_desde=date(2026, 1, 1), valor=Decimal(valor), actor=_ACTOR)
+    await db.commit()
+
+
+async def _sembrar_uma_dos_tramos(db: AsyncSession, *, valor_enero: str, valor_febrero: str) -> None:
+    """Dos tramos de vigencia de `UMA_MENSUAL` dentro del mismo 2026: uno para enero
+    (`vigencia_desde=2026-01-01`, `vigencia_hasta=2026-01-31`) y otro desde el 1 de febrero. Es
+    la simulación mínima, dentro de un solo ejercicio, del hecho que `config/fiscal/README.md`
+    documenta (la UMA cambia el 1 de febrero) y que la prueba de I2 necesita: dos fechas de pago
+    del mismo año con un valor vigente distinto cada una."""
+    await cfg.guardar_param_fiscal(
+        db, clave="UMA_MENSUAL", valor=Decimal(valor_enero), vigencia_desde=date(2026, 1, 1),
+        vigencia_hasta=date(2026, 1, 31), origen=OrigenValor.SEMILLA, fuente="Fixture de prueba",
+    )
+    await cfg.guardar_param_fiscal(
+        db, clave="UMA_MENSUAL", valor=Decimal(valor_febrero), vigencia_desde=date(2026, 2, 1),
+        origen=OrigenValor.SEMILLA, fuente="Fixture de prueba",
+    )
+    await db.commit()
+    await cfg.confirmar_param_fiscal(
+        db, clave="UMA_MENSUAL", vigencia_desde=date(2026, 1, 1), valor=Decimal(valor_enero), actor=_ACTOR
+    )
+    await cfg.confirmar_param_fiscal(
+        db, clave="UMA_MENSUAL", vigencia_desde=date(2026, 2, 1), valor=Decimal(valor_febrero), actor=_ACTOR
+    )
     await db.commit()
 
 
@@ -415,6 +458,69 @@ async def test_sin_subsidio_confirmado_las_columnas_del_subsidio_van_vacias_pero
 
 
 # --------------------------------------------------------------------------------------
+# 7bis. C1+C2 — la cobertura que faltaba: las cuatro columnas de comparación, por valor
+# --------------------------------------------------------------------------------------
+
+
+async def test_todo_confirmado_y_correcto_no_produce_hallazgos(db: AsyncSession) -> None:
+    """C1+C2, la prueba que faltaba. Antes de esta corrección, ninguna prueba de este archivo
+    aseveraba las cuatro columnas de comparación (`ISR retenido en el CFDI`, `Subsidio causado en
+    el CFDI`, `Diferencia de ISR`, `Diferencia de subsidio`) **por valor** — solo indirectamente,
+    vía qué bandera dispara cada umbral —y esa falta de cobertura directa es lo que dejó pasar
+    los dos Critical de la revisión final. Un recibo donde el proveedor de nómina timbró TODO
+    correcto no debe llevar ninguna bandera de hallazgo (severidad alta o media): solo
+    `COINCIDE`, que es la lectura de "este recibo no necesita revisión".
+
+    Base 5000.00, quincenal, 15 días exactos (mismo caso base que
+    `test_las_columnas_del_calculo_reproducen_la_tarifa` y la sección 13):
+
+        ISR determinado              = 366.91  (renglón 3: 207.75 + (5000.00−3537.16)×0.1088)
+        Subsidio teórico               = 267.83  (mensualizado 5000×30/15=10000.00 ≤ tope
+                                                    11492.66; mensual 0.1502×3566.22=535.646244
+                                                    → 535.65; del periodo 535.65×15/30=267.825
+                                                    → 267.83)
+        ISR a retener teórico          = max(0, 366.91 − 267.83) = 99.08
+        Subsidio a entregar teórico    = max(0, 267.83 − 366.91) = 0.00 (el ISR ya cubre el
+                                                                          subsidio)
+
+    El proveedor timbra exactamente esos números: ISR retenido (`nomina_deduccion` tipo `002`)
+    99.08, y en `nomina_otro_pago` (tipo `002`) `SubsidioCausado` 267.83 —el subsidio
+    DETERMINADO del periodo, la columna que C2 corrige— con `Importe` (subsidio entregado en
+    efectivo) 0.00, coherente con que el ISR ya lo cubre por completo:
+
+        Diferencia de ISR      = 99.08 − 99.08   = 0.00
+        Diferencia de subsidio = 267.83 − 267.83 = 0.00
+
+    (Antes de C2, "Diferencia de subsidio" comparaba `SubsidioCausado` contra el subsidio A
+    ENTREGAR teórico, no contra el subsidio teórico: 267.83 − 0.00 = 267.83, una acusación falsa
+    de 267.83 pesos sobre un recibo timbrado sin ningún error.)
+    """
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="99999999-9999-4999-8999-999999999901",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "99.08")],
+        otros_pagos=[("002", "002", "Subsidio", "0.00", "267.83")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    fila = resultado.filas[0]
+    assert fila[_COL_ISR_A_RETENER_TEORICO] == Decimal("99.08")
+    assert fila[_COL_SUBSIDIO_A_ENTREGAR_TEORICO] == Decimal("0.00")
+    assert fila[_COL_ISR_RETENIDO_CFDI] == Decimal("99.08")
+    assert fila[_COL_SUBSIDIO_CFDI] == Decimal("267.83")
+    assert fila[_COL_DIFERENCIA_ISR] == Decimal("0.00")
+    assert fila[_COL_DIFERENCIA_SUBSIDIO] == Decimal("0.00")
+
+    hallazgos = [b for b in resultado.banderas if b.severidad in ("alta", "media")]
+    assert hallazgos == []
+    coincide = [b for b in resultado.banderas if b.clave == "COINCIDE"]
+    assert len(coincide) == 1
+
+
+# --------------------------------------------------------------------------------------
 # 8. El catálogo
 # --------------------------------------------------------------------------------------
 
@@ -657,12 +763,18 @@ async def test_diferencia_mayor_pasado_un_peso(db: AsyncSession) -> None:
     assert [b.clave for b in resultado.banderas if b.clave in ("COINCIDE", "DIFERENCIA_MENOR")] == []
 
 
-async def test_isr_cero_con_base_cuando_no_retuvo_debiendo(db: AsyncSession) -> None:
-    """El hallazgo más grave del informe: el patrón timbró 0.00 de ISR retenido
-    (`deducciones=[]`) en un recibo cuya base (500.00) ya cayó en el renglón 2 de la tarifa
-    (416.71–3537.15), no en el exento. Sin subsidio confirmado a propósito, para que la única
-    bandera de comparación posible sea esta —no se contamina con `COINCIDE`/`DIFERENCIA_*`,
-    que necesitan `isr_a_retener_teorico`, y éste depende del subsidio."""
+async def test_isr_cero_con_base_sin_subsidio_confirmado_avisa_con_severidad_media(db: AsyncSession) -> None:
+    """Corrección de la revisión final (C1): sin el subsidio confirmado no se puede afirmar que
+    esta retención de 0.00 sea el hallazgo más grave del informe (podría ser el subsidio
+    cubriendo el ISR de un sueldo bajo) ni que no lo sea, así que la bandera se emite igual —
+    callarla sería tan falso como acusar— pero con severidad MEDIA, no ALTA, y pidiendo confirmar
+    el subsidio para saberlo con certeza (ver el docstring de `_bandera_diferencia_sistematica`...
+    perdón, del bloque `ISR_CERO_CON_BASE` en `consultar`, para la justificación completa).
+
+    Antes de esta corrección la bandera salía con severidad ALTA sin importar el subsidio, que es
+    justo el defecto que `test_isr_cero_con_base_no_sale_con_el_subsidio_confirmado` (más abajo)
+    expone: con el subsidio confirmado, este mismo recibo de 500.00 NO debe llevar la bandera —
+    esta prueba, en cambio, aísla el caso en que el subsidio sigue sin confirmarse."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_tarifa_quincenal(db)
     await _sembrar_marca(db, "001", ordinario=True)
@@ -677,11 +789,52 @@ async def test_isr_cero_con_base_cuando_no_retuvo_debiendo(db: AsyncSession) -> 
 
     fila = resultado.filas[0]
     assert fila[_COL_RENGLON] == 2
+    assert fila[_COL_ISR_A_RETENER_TEORICO] is None
 
     cero_con_base = [b for b in resultado.banderas if b.clave == "ISR_CERO_CON_BASE"]
     assert len(cero_con_base) == 1
-    assert cero_con_base[0].severidad == "alta"
+    assert cero_con_base[0].severidad == "media"
     assert "88888888-8888-4888-8888-888888888804" in cero_con_base[0].ambito
+
+
+async def test_isr_cero_con_base_no_sale_con_el_subsidio_confirmado(db: AsyncSession) -> None:
+    """**El escenario que expone el defecto de C1.** Mismo recibo que la prueba anterior (base
+    500.00, quincenal, 15 días, ISR retenido 0.00), pero ahora con el subsidio SÍ confirmado
+    (`_empresa_con_configuracion_confirmada`). Con la tarifa quincenal real, 500.00 cae en el
+    renglón 2 (416.71–3537.15, cuota 7.95, tasa 0.0640):
+
+        excedente         = 500.00 − 416.71 = 83.29
+        impuesto marginal = 83.29 × 0.0640  = 5.33056 → 5.33 (ROUND_HALF_UP)
+        ISR determinado   = 7.95 + 5.33     = 13.28
+
+    Subsidio (UMA 3566.22, factor 0.1502, tope 11492.66 — los valores de 2026):
+
+        mensualizado    = 500.00 × 30 / 15 = 1000.00 ≤ 11492.66 (tope)
+        subsidio mensual = 0.1502 × 3566.22 = 535.646244 → 535.65
+        subsidio periodo = 535.65 × 15 / 30 = 267.825 → 267.83
+
+        ISR a retener teórico = max(0, 13.28 − 267.83) = 0.00
+
+    El subsidio absorbe por completo el ISR determinado: retener 0.00 es exactamente lo correcto
+    para este sueldo, y es la población que el subsidio al empleo existe para proteger. Antes de
+    la corrección, esta bandera se disparaba de todos modos (el renglón por sí solo bastaba) y
+    acusaba a este recibo, correctamente calculado, del hallazgo más grave del informe."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888809",
+        percepciones=[("001", "001", "Sueldo", "500.00", "0.00")],
+        deducciones=[],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    fila = resultado.filas[0]
+    assert fila[_COL_RENGLON] == 2
+    assert fila[_COL_ISR_A_RETENER_TEORICO] == Decimal("0.00")
+
+    cero_con_base = [b for b in resultado.banderas if b.clave == "ISR_CERO_CON_BASE"]
+    assert cero_con_base == []
 
 
 async def test_periodo_irregular_cuando_los_dias_no_son_los_nominales(db: AsyncSession) -> None:
@@ -773,7 +926,13 @@ async def test_diferencia_sistematica_exige_tres_empleados_y_el_mismo_signo(db: 
     """Tres empleados con la misma base y todos retenidos 50.00 por debajo de lo que dice la
     tarifa (isr_cfdi = 49.08 contra un isr_a_retener_teorico de 99.08 para los tres): eso no son
     tres errores, es otro procedimiento o una tarifa mal cargada, y el informe tiene que
-    decirlo."""
+    decirlo.
+
+    Corrección de la revisión final (I1): el mensaje anterior decía "todos por debajo de lo que
+    retuvo el patrón", una referencia invertida (lo que puede estar por encima o por debajo es la
+    retención respecto de la TARIFA, no respecto de sí misma). `diferencia = isr_cfdi −
+    isr_a_retener_teorico = 49.08 − 99.08 = −50.00 < 0`, así que aquí el patrón retuvo POR DEBAJO
+    de lo que marca la tarifa — se asevera la frase completa, no solo la palabra "todos"."""
     eid = await _empresa_con_configuracion_confirmada(db)
     for n, uuid_base in enumerate(("aaaa", "bbbb", "cccc"), start=1):
         await insertar_nomina(
@@ -791,7 +950,32 @@ async def test_diferencia_sistematica_exige_tres_empleados_y_el_mismo_signo(db: 
     assert len(sistematicas) == 1
     assert sistematicas[0].severidad == "alta"
     assert sistematicas[0].ambito == "informe"
-    assert "todos" in sistematicas[0].mensaje.lower()
+    assert "todos retuvieron por debajo de lo que marca la tarifa" in sistematicas[0].mensaje.lower()
+
+
+async def test_diferencia_sistematica_dice_por_encima_cuando_el_patron_retuvo_de_mas(db: AsyncSession) -> None:
+    """Gemela de signo contrario de la prueba anterior (I1): tres empleados retenidos 50.00 POR
+    ENCIMA de lo que marca la tarifa (isr_cfdi = 99.08 + 50.00 = 149.08 contra un
+    isr_a_retener_teorico de 99.08 para los tres). `diferencia = 149.08 − 99.08 = +50.00 > 0`, así
+    que el mensaje tiene que decir "por encima", no "por debajo" — antes de esta corrección el
+    texto no distinguía sujeto (tarifa) de referencia (patrón), y esta prueba fija el sentido
+    correcto en el caso que la prueba original no cubría."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    for n, uuid_base in enumerate(("aaaa", "bbbb", "cccc"), start=1):
+        await insertar_nomina(
+            db, empresa_id=eid,
+            uuid=f"{uuid_base * 2}-{uuid_base}-4{uuid_base[:3]}-8{uuid_base[:3]}-{uuid_base * 3}",
+            num_empleado=f"00{n}",
+            percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+            deducciones=[("002", "002", "ISR", "149.08")],
+        )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    sistematicas = [b for b in resultado.banderas if b.clave == "DIFERENCIA_SISTEMATICA"]
+    assert len(sistematicas) == 1
+    assert "todos retuvieron por encima de lo que marca la tarifa" in sistematicas[0].mensaje.lower()
 
 
 async def test_diferencia_sistematica_no_sale_con_dos_empleados(db: AsyncSession) -> None:
@@ -837,3 +1021,62 @@ async def test_diferencia_sistematica_no_sale_con_signos_mezclados(db: AsyncSess
 
     sistematicas = [b for b in resultado.banderas if b.clave == "DIFERENCIA_SISTEMATICA"]
     assert sistematicas == []
+
+
+# --------------------------------------------------------------------------------------
+# 15. I2 — el subsidio se resuelve por la fecha de pago de cada recibo, no por una del ejercicio
+# --------------------------------------------------------------------------------------
+
+
+async def test_el_subsidio_se_resuelve_por_la_fecha_de_pago_de_cada_recibo(db: AsyncSession) -> None:
+    """Corrección de la revisión final (I2): antes la configuración se resolvía una sola vez por
+    EJERCICIO, con la fecha de pago **más reciente** del año como referencia para el subsidio —
+    así que un recibo de enero se calculaba con los valores vigentes en, por ejemplo, julio.
+    `config/fiscal/README.md` documenta que la UMA cambia el 1 de febrero (enero de un ejercicio
+    usa la del año anterior), así que en cuanto una corrida cubriera enero y febrero a la vez,
+    esa resolución producía una diferencia sistemática **inventada por el propio Hub**, no por
+    el proveedor de nómina: `DIFERENCIA_MAYOR` en cada recibo de enero y `DIFERENCIA_SISTEMATICA`
+    sobre la corrida.
+
+    Se simulan dos tramos de `UMA_MENSUAL` dentro de 2026 (enero: 1000.00; desde el 1 de
+    febrero: 2000.00 — números redondos, no las cifras oficiales, para que la aritmética se siga
+    a mano), con `SUBSIDIO_FACTOR_UMA` (0.10) y `SUBSIDIO_TOPE_INGRESO` (99999.99, muy por
+    encima del gravado para que el tope nunca se cruce) constantes todo el año. Dos recibos
+    idénticos por lo demás (base 5000.00, quincenal, 15 días), uno pagado el 15 de enero y otro
+    el 15 de febrero:
+
+        Subsidio mensual enero   = 0.10 × 1000.00 = 100.00 → del periodo: 100.00 × 15/30 = 50.00
+        Subsidio mensual febrero = 0.10 × 2000.00 = 200.00 → del periodo: 200.00 × 15/30 = 100.00
+
+    Si el código siguiera cacheando por ejercicio con la fecha más reciente (febrero) como
+    representante, el recibo de enero saldría también con 100.00 de subsidio en vez de 50.00 —
+    el defecto que esta prueba haría fallar."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_tarifa_quincenal(db)
+    await _sembrar_marca(db, "001", ordinario=True)
+    await _sembrar_param_desde_enero(db, "SUBSIDIO_FACTOR_UMA", "0.10")
+    await _sembrar_param_desde_enero(db, "SUBSIDIO_TOPE_INGRESO", "99999.99")
+    await _sembrar_uma_dos_tramos(db, valor_enero="1000.00", valor_febrero="2000.00")
+    await insertar_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="aaaaaaaa-1111-4111-8111-111111111101",
+        fecha_pago=date(2026, 1, 15), fecha_inicial_pago=date(2026, 1, 1), fecha_final_pago=date(2026, 1, 15),
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "0.00")],
+    )
+    await insertar_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-2222-4222-8222-222222222202",
+        rfc_receptor="XAXX010101002",
+        fecha_pago=date(2026, 2, 15), fecha_inicial_pago=date(2026, 2, 1), fecha_final_pago=date(2026, 2, 15),
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "0.00")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(
+        db, empresa.empresa_id,
+        b09.Parametros(fecha_desde=date(2026, 1, 1), fecha_hasta=date(2026, 2, 28)),
+    )
+
+    por_uuid = {fila[b09._COL_UUID]: fila for fila in resultado.filas}
+    assert por_uuid["aaaaaaaa-1111-4111-8111-111111111101"][_COL_SUBSIDIO_TEORICO] == Decimal("50.00")
+    assert por_uuid["bbbbbbbb-2222-4222-8222-222222222202"][_COL_SUBSIDIO_TEORICO] == Decimal("100.00")
