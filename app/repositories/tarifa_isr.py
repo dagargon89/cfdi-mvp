@@ -171,9 +171,15 @@ async def _escribir(
     sha256: str | None,
     encabezado: str,
     proteger_correccion_manual: bool = False,
+    limpiar_confirmacion: bool = False,
 ) -> TarifaGuardada:
     """Única puerta de escritura. Valida, decide si la confirmación sobrevive, reemplaza los
     renglones.
+
+    `limpiar_confirmacion=True` (lo pone `guardar_manual`, nunca `guardar_importadas`) limpia la
+    confirmación aunque los renglones no hayan cambiado: corregir a mano es en sí mismo un acto de
+    revisión, así que guardar sin tocar ningún número no puede dejar la tarifa "confirmada y sin
+    revisar" al mismo tiempo — ver el caso 4 del docstring del módulo.
 
     **Se valida la tarifa completa**, no el renglón que cambió: editar un `limite_superior` rompe la
     continuidad con su vecino, y validar solo lo editado dejaría pasar justo el hueco que ese cambio
@@ -229,13 +235,17 @@ async def _escribir(
         cambio = reglas.huella(anteriores) != huella_nueva
         if proteger_correccion_manual and cabecera.origen is OrigenTarifa.MANUAL and cambio:
             raise CorreccionManualProtegida(
-                f"Corregiste a mano la tarifa {periodicidad.value} de {ejercicio} y el documento dice "
-                "otra cosa. No la sobreescribí. Si el documento nuevo es el bueno, descarta la tarifa "
-                "y vuelve a importar."
+                f"Corregiste a mano la tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio} y el "
+                "documento dice otra cosa. No la sobreescribí. Si el documento nuevo es el bueno, descarta "
+                "la tarifa y vuelve a importar."
             )
-        if cambio:
-            # Una cifra distinta es una tarifa nueva y necesita que alguien la vuelva a mirar. Sin
-            # esto, una resolución posterior del SAT activaría cifras que nadie revisó.
+        if cambio or limpiar_confirmacion:
+            # Una cifra distinta es una tarifa nueva y necesita que alguien la vuelva a mirar (sin
+            # esto, una resolución posterior del SAT activaría cifras que nadie revisó).
+            # `limpiar_confirmacion=True` (lo pone `guardar_manual`, siempre) lo fuerza incluso sin
+            # cambio: el acto de guardar una corrección ya es una afirmación de que alguien miró el
+            # dato y lo dio por bueno de nuevo, así que no hay "reconfirmar lo mismo" en este caso
+            # como sí lo hay al reimportar el documento sin cambios.
             cabecera.confirmado_por = None
             cabecera.confirmado_en = None
 
@@ -284,9 +294,9 @@ async def guardar_importadas(
         if existente is not None and existente.origen is OrigenTarifa.MANUAL:
             if existente.huella != reglas.huella(list(extraida.renglones)):
                 raise CorreccionManualProtegida(
-                    f"Corregiste a mano la tarifa {extraida.periodicidad.value} de {extraida.ejercicio} y el "
-                    "documento dice otra cosa. No la sobreescribí. Si el documento nuevo es el bueno, "
-                    "descarta la tarifa y vuelve a importar."
+                    f"Corregiste a mano la tarifa {reglas.ETIQUETAS_TARIFA[extraida.periodicidad]} de "
+                    f"{extraida.ejercicio} y el documento dice otra cosa. No la sobreescribí. Si el "
+                    "documento nuevo es el bueno, descarta la tarifa y vuelve a importar."
                 )
 
     return [
@@ -309,16 +319,26 @@ async def guardar_manual(
     db: AsyncSession, *, ejercicio: int, periodicidad: PeriodicidadTarifa, renglones: Sequence[reglas.Renglon], fuente: str
 ) -> TarifaGuardada:
     """Corrige a mano una tarifa (o la crea, si no existía). Marca `origen: MANUAL`, lo que la
-    protege de una futura reimportación que diga otra cosa (ver `guardar_importadas`).
+    protege de una futura reimportación que diga otra cosa (ver `guardar_importadas`), y limpia la
+    confirmación **siempre** —no solo cuando los renglones cambian—, porque el acto de corregir ya
+    es una afirmación de que el dato anterior no era el bueno (caso 4 del docstring del módulo).
 
-    Sin `documento_sha256`: una corrección a mano no tiene un archivo del que salga. `encabezado`
-    se conserva como una cita fija en vez de un campo capturable, para que la pantalla siga
-    mostrando de qué tabla salió el dato original.
+    **Conserva `documento_sha256` y `fuente` de la tarifa importada anterior, si la había** —mismo
+    patrón que ya usa con `encabezado`—, en vez de borrarlos como si la corrección viniera de la
+    nada. La hoja de revisión del contador (§7.4 del diseño) necesita esa procedencia justo en el
+    caso donde más importa: cuando alguien corrigió un renglón y el contador tiene que comparar
+    contra el Anexo 8 del que salió, no contra la corrección misma. Solo si nunca hubo un
+    documento (tarifa capturada a mano desde el principio, `documento_sha256` sigue `None`) se usa
+    la `fuente` que manda quien llama, que describe la corrección misma.
     """
-    encabezado = f"Corrección manual de la tarifa {periodicidad.value} de {ejercicio}"
+    encabezado = f"Corrección manual de la tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio}"
+    sha256: str | None = None
     existente = await obtener(db, ejercicio=ejercicio, periodicidad=periodicidad)
     if existente is not None:
         encabezado = existente.encabezado
+        if existente.documento_sha256 is not None:
+            sha256 = existente.documento_sha256
+            fuente = existente.fuente
     return await _escribir(
         db,
         ejercicio=ejercicio,
@@ -326,8 +346,9 @@ async def guardar_manual(
         renglones=renglones,
         origen=OrigenTarifa.MANUAL,
         fuente=fuente,
-        sha256=None,
+        sha256=sha256,
         encabezado=encabezado,
+        limpiar_confirmacion=True,
     )
 
 
@@ -407,13 +428,14 @@ async def confirmar(
     )
     if cabecera is None:
         raise NoEncontrada(
-            f"No hay ninguna tarifa {periodicidad.value} de {ejercicio}. Impórtala o captúrala antes de confirmarla."
+            f"No hay ninguna tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio}. Impórtala o "
+            "captúrala antes de confirmarla."
         )
 
     renglones = await _leer_renglones(db, ejercicio=ejercicio, periodicidad=periodicidad, bajo_candado=True)
     if reglas.huella(renglones) != huella_revisada:
         raise ValorCambio(
-            f"La tarifa {periodicidad.value} de {ejercicio} cambió mientras la revisabas. "
+            f"La tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio} cambió mientras la revisabas. "
             "Vuelve a cargarla y revísala otra vez antes de confirmar."
         )
 
@@ -448,11 +470,13 @@ async def borrar(db: AsyncSession, *, ejercicio: int, periodicidad: Periodicidad
         .execution_options(populate_existing=True)
     )
     if cabecera is None:
-        raise NoEncontrada(f"No hay ninguna tarifa {periodicidad.value} de {ejercicio} que borrar.")
+        raise NoEncontrada(
+            f"No hay ninguna tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio} que borrar."
+        )
     if cabecera.confirmado_en is not None:
         raise YaConfirmada(
-            f"La tarifa {periodicidad.value} de {ejercicio} ya está confirmada y no se puede borrar así. "
-            "Corrígela a mano o reemplázala reimportando el documento correcto."
+            f"La tarifa {reglas.ETIQUETAS_TARIFA[periodicidad]} de {ejercicio} ya está confirmada y no se "
+            "puede borrar así. Corrígela a mano o reemplázala reimportando el documento correcto."
         )
     await db.delete(cabecera)
     await db.flush()

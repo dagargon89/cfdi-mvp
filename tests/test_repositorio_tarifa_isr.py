@@ -139,6 +139,145 @@ async def test_corregir_a_mano_limpia_la_confirmacion_y_marca_el_origen(db: Asyn
     assert despues.confirmado_en is None
 
 
+async def test_corregir_a_mano_con_los_mismos_renglones_tambien_limpia_la_confirmacion(db: AsyncSession) -> None:
+    """El docstring del módulo (caso 4), `api.ts` y el modal de corrección prometen que guardar
+    **siempre** deja la tarifa sin confirmar, incluso si no se tocó ningún número: el acto de
+    guardar ya es una afirmación de que alguien la revisó. Sin esto, abrir "Corregir", no cambiar
+    nada y guardar dejaba la tarifa confirmada con `origen: MANUAL` y `difiere_del_documento:
+    true` — una contradicción, porque los renglones seguían siendo idénticos al documento."""
+    await repo.guardar_importadas(db, [_extraida()], fuente="f", sha256=SHA_A)
+    await db.commit()
+    fila = await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15)
+    assert fila is not None
+    await repo.confirmar(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, huella_revisada=fila.huella, actor="quien",
+    )
+    await db.commit()
+
+    # Los MISMOS renglones que ya estaban guardados: ningún valor cambia.
+    identicos = await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=list(fila.renglones),
+        fuente="corregido a mano sin cambiar nada",
+    )
+    await db.commit()
+    assert identicos.confirmado_en is None
+    assert identicos.confirmado_por is None
+    assert identicos.origen is OrigenTarifa.MANUAL
+
+    despues = await repo.obtener(db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15)
+    assert despues is not None
+    assert despues.confirmado_en is None
+
+
+async def test_corregir_a_mano_conserva_el_sha256_y_la_fuente_del_documento_importado(db: AsyncSession) -> None:
+    """El contador necesita saber contra qué Anexo 8 comparar justo en el caso donde más importa:
+    cuando alguien corrigió un renglón. Antes, corregir a mano borraba `documento_sha256` (se
+    pasaba `sha256=None` sin condición) y sobrescribía `fuente` con el texto de la corrección
+    misma, y la hoja de revisión mostraba "— (corrección manual: no proviene de un documento)"
+    sobre una tarifa que sí venía de un documento real."""
+    await repo.guardar_importadas(db, [_extraida()], fuente="Anexo 8 DOF 28-12-2025", sha256=SHA_A)
+    await db.commit()
+
+    corregida = await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones("8.95"),
+        fuente="Corrección manual de admin@demo.test el 2026-08-10",
+    )
+    await db.commit()
+    assert corregida.documento_sha256 == SHA_A
+    assert corregida.fuente == "Anexo 8 DOF 28-12-2025"
+    assert corregida.origen is OrigenTarifa.MANUAL
+
+    # Una segunda corrección manual, encadenada sobre la primera, sigue conservando la procedencia
+    # del documento original — no solo de la corrección inmediatamente anterior.
+    otra_vez = await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones("9.50"),
+        fuente="Corrección manual de admin@demo.test el 2026-08-11",
+    )
+    await db.commit()
+    assert otra_vez.documento_sha256 == SHA_A
+    assert otra_vez.fuente == "Anexo 8 DOF 28-12-2025"
+
+
+async def test_guardar_manual_sin_tarifa_previa_usa_la_etiqueta_no_el_enum_en_el_encabezado(db: AsyncSession) -> None:
+    """El caso más dañino de nombrar el enum: `encabezado` se persiste y se cita literal en el
+    panel y en la hoja del contador. Se dispara al capturar a mano una tarifa que no existía
+    antes (sin tarifa previa de la que heredar el encabezado)."""
+    fila = await repo.guardar_manual(
+        db, ejercicio=2026, periodicidad=PeriodicidadTarifa.DIAS_15, renglones=_renglones(), fuente="mano",
+    )
+    assert fila.documento_sha256 is None
+    assert "DIAS_15" not in fila.encabezado
+    assert t.ETIQUETAS_TARIFA[PeriodicidadTarifa.DIAS_15] in fila.encabezado
+
+
+async def test_ningun_mensaje_de_las_excepciones_del_repositorio_nombra_el_enum(db: AsyncSession) -> None:
+    """§7.2 del diseño: ninguna etiqueta visible es un nombre de enum, ni siquiera uno tan
+    descriptivo como `DIAS_15` — y un mensaje de error es tan visible como una pantalla. Recorre
+    las seis excepciones que el repositorio puede lanzar y comprueba que ninguna incluya el
+    nombre crudo de la periodicidad."""
+    periodicidad = PeriodicidadTarifa.DIAS_15
+    etiqueta = t.ETIQUETAS_TARIFA[periodicidad]
+    mensajes: list[str] = []
+
+    # CorreccionManualProtegida — pre-comprobación de `guardar_importadas`.
+    await repo.guardar_manual(
+        db, ejercicio=4001, periodicidad=periodicidad, renglones=_renglones("8.95"), fuente="mano",
+    )
+    await db.commit()
+    extraida_4001 = anexo8.TarifaExtraida(
+        ejercicio=4001, periodicidad=periodicidad, encabezado="x", renglones=tuple(_renglones()),
+    )
+    with pytest.raises(repo.CorreccionManualProtegida) as exc1:
+        await repo.guardar_importadas(db, [extraida_4001], fuente="f", sha256=SHA_A)
+    mensajes.append(str(exc1.value))
+    await db.rollback()
+
+    # CorreccionManualProtegida — reverificación bajo candado, dentro de `_escribir`.
+    with pytest.raises(repo.CorreccionManualProtegida) as exc2:
+        await repo._escribir(
+            db, ejercicio=4001, periodicidad=periodicidad, renglones=_renglones(),
+            origen=OrigenTarifa.IMPORTADA, fuente="f", sha256=SHA_A, encabezado="x",
+            proteger_correccion_manual=True,
+        )
+    mensajes.append(str(exc2.value))
+    await db.rollback()
+
+    # NoEncontrada — confirmar una tarifa que no existe.
+    with pytest.raises(repo.NoEncontrada) as exc3:
+        await repo.confirmar(db, ejercicio=4002, periodicidad=periodicidad, huella_revisada="0" * 64, actor="q")
+    mensajes.append(str(exc3.value))
+
+    # ValorCambio — confirmar con una huella que ya no corresponde.
+    await repo.guardar_importadas(
+        db,
+        [anexo8.TarifaExtraida(ejercicio=4003, periodicidad=periodicidad, encabezado="x", renglones=tuple(_renglones()))],
+        fuente="f", sha256=SHA_A,
+    )
+    await db.commit()
+    with pytest.raises(repo.ValorCambio) as exc4:
+        await repo.confirmar(db, ejercicio=4003, periodicidad=periodicidad, huella_revisada="0" * 64, actor="q")
+    mensajes.append(str(exc4.value))
+
+    # NoEncontrada — borrar una tarifa que no existe.
+    with pytest.raises(repo.NoEncontrada) as exc5:
+        await repo.borrar(db, ejercicio=4004, periodicidad=periodicidad)
+    mensajes.append(str(exc5.value))
+
+    # YaConfirmada — borrar una tarifa ya confirmada.
+    fila = await repo.obtener(db, ejercicio=4003, periodicidad=periodicidad)
+    assert fila is not None
+    await repo.confirmar(db, ejercicio=4003, periodicidad=periodicidad, huella_revisada=fila.huella, actor="q")
+    await db.commit()
+    with pytest.raises(repo.YaConfirmada) as exc6:
+        await repo.borrar(db, ejercicio=4003, periodicidad=periodicidad)
+    mensajes.append(str(exc6.value))
+
+    assert len(mensajes) == 6
+    for mensaje in mensajes:
+        assert periodicidad.value not in mensaje, mensaje
+        assert etiqueta in mensaje, mensaje
+
+
 async def test_una_correccion_que_rompe_la_continuidad_se_rechaza(db: AsyncSession) -> None:
     malos = _renglones()
     malos[2] = t.Renglon(3, Decimal("3537.00"), None, Decimal("207.75"), Decimal("0.3500"))
