@@ -61,6 +61,9 @@ _SUBSIDIO_FACTOR_UMA = "0.1502"
 _SUBSIDIO_TOPE_INGRESO = "11492.66"
 
 # Índices de columna con nombre, nunca números sueltos dentro de las aserciones.
+_COL_PERIODO = b09._COL_PERIODO
+_COL_NOMBRE_EMPLEADO = b09._COL_NOMBRE_EMPLEADO
+_COL_NUM_EMPLEADO = b09._COL_NUM_EMPLEADO
 _COL_BASE = b09._COL_BASE
 _COL_TARIFA_APLICADA = b09._COL_TARIFA_APLICADA
 _COL_RENGLON = b09._COL_RENGLON
@@ -238,6 +241,7 @@ async def test_con_todo_confirmado_una_fila_por_recibo(db: AsyncSession) -> None
     eid = await _empresa_con_configuracion_confirmada(db)
     await insertar_nomina(
         db, empresa_id=eid, uuid="11111111-1111-4111-8111-111111111101",
+        num_empleado="101",
         percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
         deducciones=[("002", "002", "ISR", "366.91")],
     )
@@ -254,6 +258,16 @@ async def test_con_todo_confirmado_una_fila_por_recibo(db: AsyncSession) -> None
     assert len(resultado.filas) == 2
     assert len(resultado.columnas) == 24
     assert [c.titulo for c in resultado.columnas].count("UUID") == 1
+
+    # Encargo extra de la revisión de la tarea anterior: las tres columnas nuevas que ya se
+    # contaban ("son 24") pero cuyo contenido nadie afirmaba. `fecha_pago` por defecto de
+    # `insertar_nomina` es el 30 de junio de 2026, así que el periodo es el mes 6; el nombre lo
+    # pone `comprobante_detalle.nombre_receptor` (el fijo por defecto del helper); el número de
+    # empleado es el que se pidió explícitamente para este recibo, "101".
+    fila_101 = next(f for f in resultado.filas if f[b09._COL_UUID] == "11111111-1111-4111-8111-111111111101")
+    assert fila_101[_COL_PERIODO] == 6
+    assert fila_101[_COL_NOMBRE_EMPLEADO] == "JUANA INVENTADA DE PRUEBA"
+    assert fila_101[_COL_NUM_EMPLEADO] == "101"
 
 
 # --------------------------------------------------------------------------------------
@@ -539,3 +553,268 @@ async def test_un_recibo_sin_receptor_o_sin_dias_pagados_cae_en_no_calculable(db
 
     banderas_no_calc = [b for b in resultado.banderas if b.clave == "RECIBO_NO_CALCULABLE"]
     assert len(banderas_no_calc) == 2
+
+
+# --------------------------------------------------------------------------------------
+# 13. Tarea 4 — las ocho banderas de juicio (§6 del diseño)
+#
+# Todas las pruebas de esta sección usan un sueldo de 5000.00 en una quincena de 15 días
+# exactos (el mismo caso base que `test_las_columnas_del_calculo_reproducen_la_tarifa`), con
+# la configuración completa confirmada (tarifa + marcas + subsidio), así que
+# `isr_a_retener_teorico` es siempre el mismo punto de partida para las tres primeras pruebas
+# (los tres umbrales de comparación). Se calcula a mano una sola vez aquí, con la misma
+# aritmética que ya fijó la tarea 3:
+#
+#   ISR determinado (renglón 3): 207.75 + (5000.00 − 3537.16) × 0.1088 = 366.91
+#   Subsidio mensualizado: 5000.00 × 30 / 15 = 10000.00 ≤ 11492.66 (tope) → sí aplica
+#   Subsidio mensual: 0.1502 × 3566.22 = 535.646844 → 535.65 (ROUND_HALF_UP)
+#   Subsidio del periodo: 535.65 × 15 / 30 = 267.825 → 267.83 (ROUND_HALF_UP)
+#   ISR a retener teórico: max(0, 366.91 − 267.83) = 99.08
+# --------------------------------------------------------------------------------------
+
+_ISR_A_RETENER_TEORICO_BASE = Decimal("99.08")
+"""El punto de partida de las tres pruebas de umbral: ver la cuenta completa arriba."""
+
+
+async def test_coincide_hasta_dos_centavos(db: AsyncSession) -> None:
+    """B-09.R4, borde exacto inferior: una diferencia de exactamente 0.02 pesos —ni un centavo
+    más— sigue siendo `COINCIDE`. isr_cfdi = 99.08 + 0.02 = 99.10; diferencia = 99.10 − 99.08 =
+    0.02, y 0.02 ≤ 0.02 (el propio umbral), así que coincide."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888801",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "99.10")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    assert resultado.filas[0][_COL_ISR_A_RETENER_TEORICO] == _ISR_A_RETENER_TEORICO_BASE
+    coincide = [b for b in resultado.banderas if b.clave == "COINCIDE"]
+    assert len(coincide) == 1
+    assert coincide[0].severidad == "baja"
+    assert "88888888-8888-4888-8888-888888888801" in coincide[0].ambito
+    assert [b.clave for b in resultado.banderas if b.clave in ("DIFERENCIA_MENOR", "DIFERENCIA_MAYOR")] == []
+
+
+async def test_diferencia_menor_hasta_un_peso(db: AsyncSession) -> None:
+    """B-09.R4, borde exacto superior de `DIFERENCIA_MENOR`: una diferencia de exactamente 1.00
+    peso —el borde, no un centavo antes— todavía es redondeo, no error. isr_cfdi =
+    99.08 + 1.00 = 100.08; diferencia = 100.08 − 99.08 = 1.00, y 0.02 < 1.00 ≤ 1.00 (el propio
+    umbral)."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888802",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "100.08")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    menor = [b for b in resultado.banderas if b.clave == "DIFERENCIA_MENOR"]
+    assert len(menor) == 1
+    assert menor[0].severidad == "baja"
+    assert [b.clave for b in resultado.banderas if b.clave in ("COINCIDE", "DIFERENCIA_MAYOR")] == []
+
+
+async def test_diferencia_mayor_pasado_un_peso(db: AsyncSession) -> None:
+    """B-09.R4, un centavo pasado el borde: 1.01 pesos de diferencia ya no es redondeo. isr_cfdi
+    = 99.08 + 1.01 = 100.09; diferencia = 100.09 − 99.08 = 1.01 > 1.00."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888803",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "100.09")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    mayor = [b for b in resultado.banderas if b.clave == "DIFERENCIA_MAYOR"]
+    assert len(mayor) == 1
+    assert mayor[0].severidad == "alta"
+    assert [b.clave for b in resultado.banderas if b.clave in ("COINCIDE", "DIFERENCIA_MENOR")] == []
+
+
+async def test_isr_cero_con_base_cuando_no_retuvo_debiendo(db: AsyncSession) -> None:
+    """El hallazgo más grave del informe: el patrón timbró 0.00 de ISR retenido
+    (`deducciones=[]`) en un recibo cuya base (500.00) ya cayó en el renglón 2 de la tarifa
+    (416.71–3537.15), no en el exento. Sin subsidio confirmado a propósito, para que la única
+    bandera de comparación posible sea esta —no se contamina con `COINCIDE`/`DIFERENCIA_*`,
+    que necesitan `isr_a_retener_teorico`, y éste depende del subsidio."""
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await _sembrar_tarifa_quincenal(db)
+    await _sembrar_marca(db, "001", ordinario=True)
+    await insertar_nomina(
+        db, empresa_id=empresa.empresa_id, uuid="88888888-8888-4888-8888-888888888804",
+        percepciones=[("001", "001", "Sueldo", "500.00", "0.00")],
+        deducciones=[],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, empresa.empresa_id, _p())
+
+    fila = resultado.filas[0]
+    assert fila[_COL_RENGLON] == 2
+
+    cero_con_base = [b for b in resultado.banderas if b.clave == "ISR_CERO_CON_BASE"]
+    assert len(cero_con_base) == 1
+    assert cero_con_base[0].severidad == "alta"
+    assert "88888888-8888-4888-8888-888888888804" in cero_con_base[0].ambito
+
+
+async def test_periodo_irregular_cuando_los_dias_no_son_los_nominales(db: AsyncSession) -> None:
+    """9 días pagados en una quincena (nominal: 15) es un periodo irregular — hubo prorrateo,
+    y cualquier diferencia de ISR de este recibo frente a la tarifa puede venir de ahí."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888805",
+        dias="9.000",
+        percepciones=[("001", "001", "Sueldo", "3000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "100.00")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    irregular = [b for b in resultado.banderas if b.clave == "PERIODO_IRREGULAR"]
+    assert len(irregular) == 1
+    assert irregular[0].severidad == "baja"
+    assert "9" in irregular[0].mensaje
+    assert "15" in irregular[0].mensaje
+
+
+async def test_percepciones_extraordinarias_marca_el_recibo(db: AsyncSession) -> None:
+    """El recibo trae un aguinaldo (tipo `002`, marcado `es_ingreso_ordinario = false` en
+    `_empresa_con_configuracion_confirmada`): la bandera sale del dato confirmado del catálogo,
+    no de una lista de tipos escrita en el código (§6 del diseño)."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888806",
+        percepciones=[
+            ("001", "001", "Sueldo", "5000.00", "0.00"),
+            ("002", "002", "Aguinaldo", "2000.00", "0.00"),
+        ],
+        deducciones=[("002", "002", "ISR", "366.91")],
+        total_gravado="7000.00",
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    extraordinarias = [b for b in resultado.banderas if b.clave == "PERCEPCIONES_EXTRAORDINARIAS"]
+    assert len(extraordinarias) == 1
+    assert extraordinarias[0].severidad == "media"
+    assert "88888888-8888-4888-8888-888888888806" in extraordinarias[0].ambito
+
+
+async def test_art_174_se_detecta_en_el_concepto_de_la_deduccion(db: AsyncSession) -> None:
+    """Detección deliberadamente laxa (§6 del diseño): el concepto "RETENCIÓN ART. 174" —en
+    mayúsculas y con acento, para probar que la normalización de verdad quita ambos— dispara la
+    bandera porque contiene "174" una vez normalizado. El segundo recibo, con la deducción
+    "ISR" a secas, **no** la dispara: nombrar el impuesto no es lo mismo que mencionar el
+    artículo."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888807",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "RETENCIÓN ART. 174", "366.91")],
+    )
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="88888888-8888-4888-8888-888888888808",
+        rfc_receptor="XAXX010101099",
+        percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+        deducciones=[("002", "002", "ISR", "366.91")],
+    )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    art174 = [b for b in resultado.banderas if b.clave == "PROCEDIMIENTO_ART174"]
+    assert len(art174) == 1
+    assert art174[0].severidad == "baja"
+    assert "88888888-8888-4888-8888-888888888807" in art174[0].ambito
+    assert "88888888-8888-4888-8888-888888888808" not in art174[0].ambito
+
+
+# --------------------------------------------------------------------------------------
+# 14. `DIFERENCIA_SISTEMATICA` — la única bandera de la corrida completa, no de una fila
+#
+# Los tres empleados comparten el mismo sueldo base (5000.00, quincenal, 15 días) que las
+# pruebas de umbral de arriba, así que `isr_a_retener_teorico` es el mismo 99.08 para los tres.
+# "Todos retenidos 50.00 por debajo de lo que dice la tarifa" es entonces
+# isr_cfdi = 99.08 − 50.00 = 49.08 para los tres, y diferencia_isr = 49.08 − 99.08 = −50.00:
+# la misma cifra y el mismo signo en los tres, muy por encima del umbral de 1.00 peso.
+# --------------------------------------------------------------------------------------
+
+
+async def test_diferencia_sistematica_exige_tres_empleados_y_el_mismo_signo(db: AsyncSession) -> None:
+    """Tres empleados con la misma base y todos retenidos 50.00 por debajo de lo que dice la
+    tarifa (isr_cfdi = 49.08 contra un isr_a_retener_teorico de 99.08 para los tres): eso no son
+    tres errores, es otro procedimiento o una tarifa mal cargada, y el informe tiene que
+    decirlo."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    for n, uuid_base in enumerate(("aaaa", "bbbb", "cccc"), start=1):
+        await insertar_nomina(
+            db, empresa_id=eid,
+            uuid=f"{uuid_base * 2}-{uuid_base}-4{uuid_base[:3]}-8{uuid_base[:3]}-{uuid_base * 3}",
+            num_empleado=f"00{n}",
+            percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+            deducciones=[("002", "002", "ISR", "49.08")],
+        )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    sistematicas = [b for b in resultado.banderas if b.clave == "DIFERENCIA_SISTEMATICA"]
+    assert len(sistematicas) == 1
+    assert sistematicas[0].severidad == "alta"
+    assert sistematicas[0].ambito == "informe"
+    assert "todos" in sistematicas[0].mensaje.lower()
+
+
+async def test_diferencia_sistematica_no_sale_con_dos_empleados(db: AsyncSession) -> None:
+    """Gemela negativa: la misma situación exacta, pero con **dos** empleados en vez de tres.
+    'Todos difieren igual' es trivialmente cierto en una muestra de dos, así que la bandera no
+    debe salir — es justo el ruido que el umbral de tres evita."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    for n, uuid_base in enumerate(("aaaa", "bbbb"), start=1):
+        await insertar_nomina(
+            db, empresa_id=eid,
+            uuid=f"{uuid_base * 2}-{uuid_base}-4{uuid_base[:3]}-8{uuid_base[:3]}-{uuid_base * 3}",
+            num_empleado=f"00{n}",
+            percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+            deducciones=[("002", "002", "ISR", "49.08")],
+        )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    sistematicas = [b for b in resultado.banderas if b.clave == "DIFERENCIA_SISTEMATICA"]
+    assert sistematicas == []
+
+
+async def test_diferencia_sistematica_no_sale_con_signos_mezclados(db: AsyncSession) -> None:
+    """Tres empleados, pero dos retenidos por arriba de la tarifa y uno por abajo: diferencias
+    dispersas apuntan a ajustes individuales de cada recibo, no a un procedimiento distinto, así
+    que la bandera no debe salir aunque haya tres empleados y las tres diferencias superen el
+    peso. isr_a_retener_teorico es 99.08 para los tres; dos reciben isr_cfdi = 99.08 + 60.00 =
+    159.08 (diferencia +60.00) y uno isr_cfdi = 99.08 − 60.00 = 39.08 (diferencia −60.00)."""
+    eid = await _empresa_con_configuracion_confirmada(db)
+    isr_cfdi_por_empleado = ("159.08", "159.08", "39.08")
+    for n, (uuid_base, isr_cfdi) in enumerate(zip(("aaaa", "bbbb", "cccc"), isr_cfdi_por_empleado), start=1):
+        await insertar_nomina(
+            db, empresa_id=eid,
+            uuid=f"{uuid_base * 2}-{uuid_base}-4{uuid_base[:3]}-8{uuid_base[:3]}-{uuid_base * 3}",
+            num_empleado=f"00{n}",
+            percepciones=[("001", "001", "Sueldo", "5000.00", "0.00")],
+            deducciones=[("002", "002", "ISR", isr_cfdi)],
+        )
+    await db.commit()
+
+    resultado = await b09.consultar(db, eid, _p())
+
+    sistematicas = [b for b in resultado.banderas if b.clave == "DIFERENCIA_SISTEMATICA"]
+    assert sistematicas == []

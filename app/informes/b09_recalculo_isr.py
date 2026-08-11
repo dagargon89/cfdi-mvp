@@ -24,10 +24,11 @@ conteo). La fila 21 del documento ("Bandera") **no** es una columna de esta hoja
 proyecto los hallazgos van a la hoja `Banderas` (`ResultadoInforme.banderas`), nunca a una celda
 de texto por fila.
 
-Las banderas de comparación (`COINCIDE`, `DIFERENCIA_MAYOR`, `PERIODO_IRREGULAR`,
-`PERCEPCIONES_EXTRAORDINARIAS`, `PROCEDIMIENTO_ART174`, `DIFERENCIA_SISTEMATICA`,
-`ISR_CERO_CON_BASE`) son la tarea 4 y no viven aquí. Esta tarea sí emite dos banderas propias,
-las dos sobre **si** se pudo calcular, no sobre si el número coincide:
+Las banderas de comparación (`COINCIDE`, `DIFERENCIA_MENOR`, `DIFERENCIA_MAYOR`,
+`ISR_CERO_CON_BASE`, `PERIODO_IRREGULAR`, `PERCEPCIONES_EXTRAORDINARIAS`, `PROCEDIMIENTO_ART174`,
+`DIFERENCIA_SISTEMATICA`) son la tarea 4 (§6 del diseño): el juicio que separa un hallazgo de un
+recibo que no necesita revisión — ver la sección dedicada más abajo. Esta tarea (3) emite dos
+banderas propias, las dos sobre **si** se pudo calcular, no sobre si el número coincide:
 
 - `RECIBO_NO_CALCULABLE` (alta): el recibo no se pudo recalcular — cero días pagados, falta el
   nodo del receptor o su periodicidad de pago, o ni siquiera la tarifa de repuesto (ver B-09.R1
@@ -88,6 +89,38 @@ verificación de bloqueo de `configuracion_isr`; la mensual de repuesto se resue
 (`configs_mensual`, más abajo) precisamente para que su ausencia degrade recibo por recibo — con
 `RECIBO_NO_CALCULABLE` — y no le quite el informe entero a una empresa que nunca paga catorcenal.
 
+Tarea 4 — las ocho banderas que separan un hallazgo del ruido
+--------------------------------------------------------------
+El dueño del Hub **no es contador**: estas banderas tienen que decirle qué significa el hallazgo,
+no nombrar una condición. Ocho claves, siete por recibo y una de toda la corrida (§6 del diseño):
+
+- `COINCIDE` / `DIFERENCIA_MENOR` / `DIFERENCIA_MAYOR` (B-09.R4): clasifican `Diferencia de ISR`
+  contra tres umbrales — hasta 0.02 pesos es redondeo entre dos cálculos hechos por separado
+  (`_UMBRAL_COINCIDE`); hasta 1.00 peso sigue siendo redondeo acumulado, no un error
+  (`_UMBRAL_DIFERENCIA_MENOR`); por encima ya merece revisarse con el proveedor de nómina. Ninguno
+  de los tres nombres es una cifra fiscal: son la clasificación que este informe define.
+- `ISR_CERO_CON_BASE` (alta): el patrón retuvo 0.00 de ISR en un recibo cuya base gravable ya
+  rebasó el tramo exento de la tarifa (su renglón calculado es el 2 o mayor). Es el hallazgo más
+  grave del informe: apunta a una retención que debió calcularse y no se hizo.
+- `PERIODO_IRREGULAR` (baja): el recibo pagó más o menos días que los nominales de su
+  periodicidad. No es un error en sí — es contexto: cualquier diferencia de ISR de ese recibo
+  puede venir del prorrateo, no del cálculo del proveedor.
+- `PERCEPCIONES_EXTRAORDINARIAS` (media): el recibo trae al menos una percepción marcada
+  `es_ingreso_ordinario = false` en el catálogo **confirmado** — nunca una lista de tipos escrita
+  en el código. Esas percepciones (aguinaldo, PTU, prima vacacional…) no se gravan con la tarifa
+  del periodo, así que la comparación de ISR de ese recibo no es concluyente.
+- `PROCEDIMIENTO_ART174` (baja): alguna deducción del recibo menciona, en su texto normalizado
+  (minúsculas, sin acentos), el `174` del Reglamento. Es una detección **deliberadamente laxa**:
+  un falso positivo solo rotula un recibo como no concluyente (el lado barato del error); un falso
+  negativo —un proveedor que no nombra el artículo— queda cubierto por `DIFERENCIA_SISTEMATICA`,
+  que no depende del texto. Que una deducción diga solo "ISR" no la dispara: hace falta el `174`.
+- `DIFERENCIA_SISTEMATICA` (alta): la única bandera de la **corrida completa**, no de una fila.
+  Exige al menos tres empleados distintos con `Diferencia de ISR` comparable, y que **todos**
+  difieran en más de un peso y del mismo signo. Con uno o dos empleados "todos difieren igual" es
+  trivialmente cierto y la bandera sería ruido; con tres o más, una diferencia pareja deja de
+  parecer una coincidencia y empieza a apuntar a otro procedimiento (el propio art. 174, por
+  ejemplo) o a una tarifa mal cargada, no a errores sueltos de cada recibo.
+
 **Ningún importe fiscal literal vive en este archivo** (§2.12): la tarifa, la UMA mensual y los
 parámetros del subsidio salen de `app.informes.configuracion_isr`, resueltos por fecha y
 confirmados. **Todo redondeo a dos decimales con `ROUND_HALF_UP`**, igual que
@@ -96,6 +129,7 @@ confirmados. **Todo redondeo a dos decimales con `ROUND_HALF_UP`**, igual que
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -106,7 +140,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.informes import configuracion_isr, universo_nomina
-from app.informes.base import Bandera, Columna, ResultadoInforme
+from app.informes.base import Bandera, Columna, ResultadoInforme, Severidad
 from app.informes.configuracion_isr import ConfiguracionIsr
 from app.informes.identidades_b00 import CLAVE_TIPO_DEDUCCION_ISR
 from app.models.empresa import Empresa
@@ -134,6 +168,27 @@ _CLAVE_OTRO_PAGO_SUBSIDIO = "002"
 `b05_acumulado_anual._CLAVE_OTRO_PAGO_SUBSIDIO`: se declara localmente porque, a diferencia del
 ISR (una identidad de B-00 con una sola clave inequívoca), esta constante no tiene todavía un
 hogar compartido — no vale la pena crear uno para una constante que dos módulos ya repiten igual."""
+
+# --------------------------------------------------------------------------------------
+# Los umbrales de las banderas (tarea 4, B-09.R4 y §6 del diseño). Ninguno es un importe
+# fiscal (§2.12): no sale de una tarifa ni de la ley, es la tolerancia de comparación que este
+# informe define para separar el redondeo de un hallazgo real.
+# --------------------------------------------------------------------------------------
+
+_UMBRAL_COINCIDE = Decimal("0.02")
+"""Hasta 2 centavos de diferencia se explica por el redondeo entre dos cálculos hechos por
+separado (el nuestro y el del proveedor de nómina): `COINCIDE`."""
+
+_UMBRAL_DIFERENCIA_MENOR = Decimal("1.00")
+"""Hasta un peso completo sigue leyéndose como redondeo acumulado de varias operaciones
+encadenadas, no como un error del proveedor: `DIFERENCIA_MENOR`. Por encima de este umbral,
+`DIFERENCIA_MAYOR` — y es el mismo umbral que usa `DIFERENCIA_SISTEMATICA` para decidir si un
+empleado "difiere" de la tarifa."""
+
+_MIN_EMPLEADOS_DIFERENCIA_SISTEMATICA = 3
+"""§6 del diseño: con uno o dos empleados, "todos difieren igual" es trivialmente cierto y
+`DIFERENCIA_SISTEMATICA` sería ruido. Tres es la muestra mínima donde la coincidencia empieza a
+significar algo."""
 
 
 def _redondear(valor: Decimal) -> Decimal:
@@ -291,6 +346,24 @@ async def _isr_y_subsidio_cfdi(db: AsyncSession, ids: list[int]) -> tuple[dict[i
     return isr, subsidio
 
 
+async def _conceptos_deduccion(db: AsyncSession, ids: list[int]) -> dict[int, list[str]]:
+    """El texto de `concepto` de cada deducción del recibo, **sin agregar**: aquí importa lo que
+    dice el texto, no la suma. Una sola consulta para todo el universo (regla 11). Es la única
+    consulta de este informe cuyo resultado se lee como texto libre, no como un importe — la
+    necesita `PROCEDIMIENTO_ART174` (tarea 4), que busca la mención del artículo en lo que el
+    proveedor de nómina escribió, no en un catálogo."""
+    resultado: dict[int, list[str]] = {}
+    if not ids:
+        return resultado
+    filas = await db.execute(
+        select(NominaDeduccion.comprobante_id, NominaDeduccion.concepto).where(NominaDeduccion.comprobante_id.in_(ids))
+    )
+    for comprobante_id, concepto in filas:
+        if concepto:
+            resultado.setdefault(int(comprobante_id), []).append(concepto)
+    return resultado
+
+
 def _es_ordinaria(config: ConfiguracionIsr, tipo: str) -> bool:
     marca = config.marcas.get(tipo)
     return marca is not None and marca.es_ingreso_ordinario
@@ -300,6 +373,62 @@ def _base_ordinaria(config: ConfiguracionIsr, por_tipo: dict[str, Decimal]) -> D
     """B-09: `Σ importe_gravado` de los tipos ordinarios de este recibo. Nunca el gravado total
     (ver el docstring del módulo)."""
     return _redondear(sum((importe for tipo, importe in por_tipo.items() if _es_ordinaria(config, tipo)), Decimal("0")))
+
+
+def _normalizar_texto(texto: str) -> str:
+    """Minúsculas y sin acentos (mismo patrón que `app.services.anexo8._sin_acentos` y
+    `b06_centro_costo`), para que "ISR Art. 174 ajuste" y "isr art 174 ajuste" casen igual al
+    buscar la mención del artículo 174 (`PROCEDIMIENTO_ART174`, tarea 4)."""
+    sin_acentos = "".join(c for c in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(c))
+    return sin_acentos.lower()
+
+
+def _clasificar_diferencia(diferencia: Decimal) -> str:
+    """B-09.R4: los tres umbrales de comparación de `Diferencia de ISR`. Ninguno de los tres
+    nombres es una cifra fiscal — es la clasificación que este informe define (ver
+    `_UMBRAL_COINCIDE` y `_UMBRAL_DIFERENCIA_MENOR`)."""
+    absoluta = abs(diferencia)
+    if absoluta <= _UMBRAL_COINCIDE:
+        return "COINCIDE"
+    if absoluta <= _UMBRAL_DIFERENCIA_MENOR:
+        return "DIFERENCIA_MENOR"
+    return "DIFERENCIA_MAYOR"
+
+
+def _bandera_diferencia_sistematica(datos: list[tuple[str, Decimal]]) -> Bandera | None:
+    """`DIFERENCIA_SISTEMATICA` (§6 del diseño): la única bandera de la **corrida completa**, no
+    de una fila — por eso vive fuera del ciclo de recibos, y por eso su `ambito` es `"informe"`
+    en vez de un UUID.
+
+    Exige **al menos tres empleados distintos** (`_MIN_EMPLEADOS_DIFERENCIA_SISTEMATICA`) con
+    `Diferencia de ISR` comparable, y que **todos** difieran en más de un peso
+    (`_UMBRAL_DIFERENCIA_MENOR`, el mismo umbral de `DIFERENCIA_MAYOR`) y del mismo signo. Con uno
+    o dos empleados "todos difieren igual" es trivialmente cierto y la bandera sería ruido; con
+    tres o más, una diferencia pareja deja de leerse como una coincidencia y empieza a apuntar a
+    otro procedimiento (el propio art. 174, por ejemplo) o a una tarifa mal cargada — no a errores
+    sueltos de cada recibo."""
+    empleados_distintos = {num_empleado for num_empleado, _diferencia in datos}
+    if len(empleados_distintos) < _MIN_EMPLEADOS_DIFERENCIA_SISTEMATICA:
+        return None
+    if not all(abs(diferencia) > _UMBRAL_DIFERENCIA_MENOR for _num_empleado, diferencia in datos):
+        return None
+    signos = {1 if diferencia > 0 else -1 for _num_empleado, diferencia in datos}
+    if len(signos) != 1:
+        return None
+    sentido = "por encima" if signos == {1} else "por debajo"
+    return Bandera(
+        clave="DIFERENCIA_SISTEMATICA",
+        severidad="alta",
+        ambito="informe",
+        mensaje=(
+            f"Los {len(empleados_distintos)} empleados de esta corrida con ISR comparable "
+            f"difieren de la tarifa en el mismo sentido: todos {sentido} de lo que retuvo el "
+            "patrón. Esto no se ve como errores sueltos de cada recibo, sino como el proveedor "
+            "de nómina usando otro procedimiento (por ejemplo el del art. 174) o una tarifa mal "
+            "cargada — vale la pena confirmarlo con el proveedor antes de revisar recibos uno "
+            "por uno."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -324,6 +453,7 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     ids = [fila[0].comprobante_id for fila in filas_universo]
     gravado_por_tipo = await _gravado_por_tipo(db, ids)
     isr_cfdi_por_comprobante, subsidio_cfdi_por_comprobante = await _isr_y_subsidio_cfdi(db, ids)
+    conceptos_deduccion_por_comprobante = await _conceptos_deduccion(db, ids)
 
     # Lo que hace falta resolver en `configuracion_isr`: las periodicidades traducidas (la
     # traducción con `PARA_CFDI` es de este informe, porque es quien lee los recibos) y los
@@ -397,6 +527,10 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
 
     filas: list[list[Any]] = []
+    # Insumo de `DIFERENCIA_SISTEMATICA` (§6 del diseño): un par (empleado, diferencia) por cada
+    # recibo cuya `Diferencia de ISR` sí se pudo calcular. Se evalúa después del ciclo porque es
+    # la única bandera de la corrida completa, no de una fila.
+    datos_diferencia_sistematica: list[tuple[str, Decimal]] = []
     for comprobante, nomina, receptor, _totales, detalle in filas_universo:
         cid = comprobante.comprobante_id
         fecha_pago = nomina.fecha_pago
@@ -481,6 +615,26 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                     tasa = tarifa_isr.a_porcentaje(r.tasa_excedente)
                     cuota_fija = r.cuota_fija
 
+                    if dias_pagados != dias_nominales:
+                        # El recibo cubrió más o menos días que los nominales de su
+                        # periodicidad: hubo prorrateo (art. 175 del Reglamento). No es un
+                        # error en sí — es contexto para leer cualquier diferencia de ISR de
+                        # este mismo recibo (§6 del diseño).
+                        banderas.append(
+                            Bandera(
+                                clave="PERIODO_IRREGULAR",
+                                severidad="baja",
+                                ambito=f"uuid:{comprobante.uuid}",
+                                mensaje=(
+                                    f"Este recibo pagó {dias_pagados} días, distintos de los "
+                                    f"{dias_nominales} días normales de su periodicidad: hubo un "
+                                    "prorrateo, así que si el ISR retenido difiere del que marca "
+                                    "la tarifa, la causa puede ser ese prorrateo y no un error del "
+                                    "proveedor de nómina."
+                                ),
+                            )
+                        )
+
                     if config is not None and config.hay_subsidio:
                         uma_mensual = config.uma_mensual
                         factor_subsidio = config.factor_subsidio
@@ -548,6 +702,107 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
             None if subsidio_a_entregar_teorico is None else _redondear(subsidio_cfdi - subsidio_a_entregar_teorico)
         )
 
+        # -------------------------------------------------------------------------------
+        # Tarea 4 — las banderas de comparación. `COINCIDE`/`DIFERENCIA_MENOR`/
+        # `DIFERENCIA_MAYOR` e `ISR_CERO_CON_BASE` necesitan que el ISR se haya podido
+        # calcular; las dos primeras necesitan además el subsidio confirmado (`diferencia_isr`
+        # compara contra lo que de verdad se retiene, no contra el ISR determinado bruto).
+        # -------------------------------------------------------------------------------
+        if diferencia_isr is not None:
+            clave_diferencia = _clasificar_diferencia(diferencia_isr)
+            severidad_diferencia: Severidad
+            if clave_diferencia == "COINCIDE":
+                mensaje_diferencia = (
+                    f"El ISR que retuvo el patrón coincide con el que marca la tarifa (diferencia "
+                    f"de {diferencia_isr} pesos, dentro de la tolerancia de redondeo): este recibo "
+                    "no necesita revisión."
+                )
+                severidad_diferencia = "baja"
+            elif clave_diferencia == "DIFERENCIA_MENOR":
+                mensaje_diferencia = (
+                    f"El ISR retenido difiere del que marca la tarifa por {diferencia_isr} pesos: "
+                    "una diferencia de hasta un peso se explica por el redondeo acumulado entre "
+                    "dos cálculos hechos por separado, no por un error del proveedor de nómina."
+                )
+                severidad_diferencia = "baja"
+            else:
+                mensaje_diferencia = (
+                    f"El ISR retenido difiere del que marca la tarifa por {diferencia_isr} pesos, "
+                    "más de lo que explica el redondeo: vale la pena confirmarlo con el proveedor "
+                    "de nómina."
+                )
+                severidad_diferencia = "alta"
+            banderas.append(
+                Bandera(
+                    clave=clave_diferencia,
+                    severidad=severidad_diferencia,
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=mensaje_diferencia,
+                )
+            )
+            num_empleado_actual = receptor.num_empleado if receptor is not None else None
+            if num_empleado_actual is not None:
+                datos_diferencia_sistematica.append((num_empleado_actual, diferencia_isr))
+
+        if renglon is not None and renglon >= 2 and isr_cfdi == Decimal("0.00"):
+            # El caso más grave del informe (§6 del diseño): la base ya rebasó el tramo exento
+            # de la tarifa (por eso cayó en el renglón 2 o uno mayor), pero el patrón timbró
+            # 0.00 de ISR retenido. No es una diferencia de centavos: es una retención que
+            # debió calcularse y no se hizo.
+            banderas.append(
+                Bandera(
+                    clave="ISR_CERO_CON_BASE",
+                    severidad="alta",
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=(
+                        "El patrón no retuvo ISR en este recibo (0.00), pero la base gravable ya "
+                        "rebasó el tramo exento de la tarifa: es el hallazgo más grave del "
+                        "informe, porque apunta a una retención que debió calcularse y no se hizo."
+                    ),
+                )
+            )
+
+        if config is not None and any(
+            not _es_ordinaria(config, tipo) for tipo in gravado_por_tipo.get(cid, {})
+        ):
+            # Sale del dato confirmado (`es_ingreso_ordinario` en el catálogo), nunca de una
+            # lista de tipos escrita en el código (§6 del diseño): un aguinaldo, una PTU o una
+            # prima vacacional no se gravan con la tarifa del periodo, así que compararlos
+            # contra ella no prueba nada.
+            banderas.append(
+                Bandera(
+                    clave="PERCEPCIONES_EXTRAORDINARIAS",
+                    severidad="media",
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=(
+                        "Este recibo incluye una percepción que el catálogo confirmado marca "
+                        "como NO ordinaria (por ejemplo aguinaldo, PTU o prima vacacional): esas "
+                        "percepciones no se gravan con la tarifa del periodo, así que la "
+                        "comparación de ISR de este recibo no es concluyente."
+                    ),
+                )
+            )
+
+        if any("174" in _normalizar_texto(concepto) for concepto in conceptos_deduccion_por_comprobante.get(cid, [])):
+            # Detección deliberadamente laxa (§6 del diseño): busca el "174" en el concepto de
+            # cualquier deducción, normalizado. Un falso positivo solo rotula el recibo como no
+            # concluyente —el lado barato del error—; un falso negativo (un proveedor que no
+            # nombra el artículo) queda cubierto por `DIFERENCIA_SISTEMATICA`, que no depende
+            # del texto. Que una deducción diga solo "ISR" no la dispara: hace falta el "174".
+            banderas.append(
+                Bandera(
+                    clave="PROCEDIMIENTO_ART174",
+                    severidad="baja",
+                    ambito=f"uuid:{comprobante.uuid}",
+                    mensaje=(
+                        "Una deducción de este recibo menciona el artículo 174 del Reglamento de "
+                        "la LISR (ingreso mensual estimado con ajuste posterior): es un "
+                        "procedimiento legítimo distinto del que este informe reproduce, así que "
+                        "la comparación de ISR de este recibo no es concluyente."
+                    ),
+                )
+            )
+
         filas.append(
             [
                 comprobante.uuid,
@@ -576,5 +831,9 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
                 diferencia_subsidio,
             ]
         )
+
+    bandera_sistematica = _bandera_diferencia_sistematica(datos_diferencia_sistematica)
+    if bandera_sistematica is not None:
+        banderas.append(bandera_sistematica)
 
     return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas)
