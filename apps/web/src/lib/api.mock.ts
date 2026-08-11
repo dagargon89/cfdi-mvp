@@ -1707,10 +1707,12 @@ export const apiMock: ApiClient = {
     logBitacora(u.correo, 'descartar_tarifa_isr', `tarifa_isr:${ejercicio}/${periodicidad}`, { ejercicio, periodicidad });
   },
 
-  // Sin llamada de red que simular: en el mock, igual que en la implementación HTTP, es una
-  // función pura que arma una URL — el endpoint real es de la Task 11 (hoja de revisión en PDF).
-  urlHojaDeRevisionTarifa(ejercicio, periodicidad): string {
-    return `/mock/tarifa-isr/${ejercicio}-${periodicidad}-hoja-revision.pdf`;
+  // Mismo patrón que `descargarComprobantePdf`: un `Blob` fijo, no una URL — corregido en la ola
+  // de arreglos de la revisión final (2026-08-10) junto con `api.http.ts`, porque el endpoint real
+  // exige el token de administrador que un `<a href>` nunca manda.
+  async descargarHojaDeRevisionTarifa(ejercicio, periodicidad): Promise<Blob> {
+    requireAdminMock('ver la hoja de revisión de una tarifa del ISR');
+    return new Blob([`%PDF-1.4 (mock hoja de revisión ${ejercicio}/${periodicidad})`], { type: 'application/pdf' });
   },
 };
 

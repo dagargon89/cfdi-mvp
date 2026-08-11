@@ -674,8 +674,11 @@ export interface ApiClient {
   /** Solo sobre una tarifa **sin confirmar**: 409 `TARIFA_CONFIRMADA` si ya se confirmó — para
    * reemplazar una confirmada se corrige a mano o se reimporta encima, nunca se borra primero. */
   descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
-  /** URL de la hoja de revisión en PDF, para abrir o descargar (Task 11 de este mismo plan). Es
-   * la única función de este bloque que no es asíncrona: no hace la petición, solo construye la
-   * URL para un `<a href>`. `require_admin`; no escribe bitácora, es una lectura. */
-  urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
+  /** La hoja de revisión en PDF (Task 11 de este mismo plan) — lo que el dueño del Hub le manda a
+   * su contador, que no tiene cuenta aquí. `require_admin` exige `Authorization: Bearer <ID
+   * token>`, que un `<a href>`/`window.open` no puede llevar: por eso esta función **sí hace la
+   * petición** (a diferencia de una `url...` que solo arma un string) y devuelve el PDF como
+   * `Blob`, con el mismo patrón que `descargarComprobantePdf` — quien la llama lo descarga con
+   * `lib/descargarBlob`. No escribe bitácora, es una lectura. */
+  descargarHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<Blob>;
 }

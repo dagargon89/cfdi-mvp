@@ -386,8 +386,9 @@ una pantalla que multiplicara por su cuenta arriesgaría un error de escala de d
 del documento falla una de las seis pruebas del Anexo I.1, no se guarda ninguna: un Anexo 8 a medio
 cargar no se distingue de uno que legítimamente traía menos tablas.
 
-**413** si el archivo pesa más de 1 MB o trae más de 100 páginas (`ARCHIVO_DEMASIADO_GRANDE`, antes de
-intentar leerlo). **422 `DOCUMENTO_INVALIDO`** si no es un PDF legible, es un escaneo sin texto, o no
+**413** si el archivo pesa más de 10 MB o trae más de 100 páginas (`ARCHIVO_DEMASIADO_GRANDE`). El
+archivo se lee entero en memoria antes de comprobar el tamaño — no en trozos —, así que el límite
+protege contra un PDF absurdamente grande, no contra la lectura misma. **422 `DOCUMENTO_INVALIDO`** si no es un PDF legible, es un escaneo sin texto, o no
 contiene ninguna tarifa de sueldos reconocible. **422 `TARIFA_INVALIDA`** si una tabla sí se reconoce
 pero no pasa las seis pruebas de continuidad/monotonía del Anexo I.1. **409 `CORRECCION_MANUAL`** si el
 documento trae una tarifa que ya se corrigió a mano y dice algo distinto — no se pisa una corrección con
@@ -659,10 +660,13 @@ export interface ApiClient {
   /** Solo sobre una tarifa sin confirmar: 409 TARIFA_CONFIRMADA si ya se confirmó — para
    * reemplazar una confirmada se corrige a mano o se reimporta encima, no se borra primero. */
   descartarTarifaIsr(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<void>;
-  /** URL de la hoja de revisión en PDF (Task 11 de este mismo plan): no hace la petición, solo
-   * arma la URL para un `<a href>`. `GET .../tarifa-isr/{ejercicio}/{periodicidad}/hoja-revision`,
-   * `require_admin`, no escribe bitácora (es una lectura). */
-  urlHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): string;
+  /** La hoja de revisión en PDF (Task 11 de este mismo plan; corregido en la ola de arreglos de
+   * la revisión final, 2026-08-10): el endpoint exige `Authorization: Bearer <ID token>`
+   * (`require_admin`), que un `<a href>`/`window.open` no puede llevar, así que esta función hace
+   * la petición autenticada con `requestBlob` (mismo patrón que `descargarComprobantePdf`) y
+   * devuelve el PDF como `Blob` para que quien llama lo descargue con `descargarBlob`.
+   * `GET .../tarifa-isr/{ejercicio}/{periodicidad}/hoja-revision`, no escribe bitácora (lectura). */
+  descargarHojaDeRevisionTarifa(ejercicio: number, periodicidad: PeriodicidadTarifaIsr): Promise<Blob>;
 }
 ```
 

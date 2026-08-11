@@ -140,7 +140,7 @@ type ApiClientHttpSubset = Pick<
   | 'corregirTarifaIsr'
   | 'confirmarTarifaIsr'
   | 'descartarTarifaIsr'
-  | 'urlHojaDeRevisionTarifa'
+  | 'descargarHojaDeRevisionTarifa'
 >;
 
 export const apiHttp: ApiClientHttpSubset = {
@@ -341,8 +341,10 @@ export const apiHttp: ApiClientHttpSubset = {
   descartarTarifaIsr: (ejercicio, periodicidad) =>
     request<void>(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}`, { method: 'DELETE' }),
 
-  // Construye la URL, no la pide: el endpoint es de la Task 11 (hoja de revisión en PDF),
-  // `require_admin`, y no escribe bitácora (es una lectura). Ruta confirmada por esa tarea.
-  urlHojaDeRevisionTarifa: (ejercicio, periodicidad) =>
-    `${BASE_URL}/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}/hoja-revision`,
+  // `require_admin` exige `Authorization: Bearer <ID token>`; un `<a href>`/`window.open` no lo
+  // manda, así que esto **sí pide** el PDF (con `requestBlob`, no `request`) en vez de solo armar
+  // una URL — corregido en la ola de arreglos de la revisión final (2026-08-10): antes esta
+  // función devolvía una URL desnuda que un clic disparaba sin token y el servidor respondía 401.
+  descargarHojaDeRevisionTarifa: (ejercicio, periodicidad) =>
+    requestBlob(`/v1/configuracion/tarifa-isr/${ejercicio}/${periodicidad}/hoja-revision`),
 };

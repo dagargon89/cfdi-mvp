@@ -30,6 +30,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   ExternalLink,
+  FileDown,
   FileWarning,
   Info,
   Plus,
@@ -44,6 +45,7 @@ import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError } from '@/lib/api';
 import type { ComprobacionTarifa, PeriodicidadTarifaIsr, TarifaIsr, TarifaIsrRenglon, TarifaIsrRenglonIn } from '@/lib/api';
 import { api } from '@/lib/client';
+import { descargarBlob } from '@/lib/descargarBlob';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
 import { fechaHoraLegible, fechaLegible, importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
 
@@ -78,8 +80,10 @@ const TEXTO_ESTADO_TARIFA: Record<EstadoFiscal, string> = {
   ausente: 'Sin capturar',
 };
 
+// Sin `tono`: las únicas dos llamadas a `setAviso` de este panel avisan de un error (`onError` de
+// `importar`/`confirmar`), así que un campo que solo tomó el valor `'warning'` no discriminaba
+// nada — la rama `'info'` era código muerto (revisión final de la ola de arreglos, 2026-08-10).
 interface Aviso {
-  tono: 'warning' | 'info';
   texto: string;
 }
 
@@ -105,7 +109,7 @@ export function TarifaIsrPanel() {
       invalidar();
       toast(`Anexo 8 importado: ${r.tarifas.length} tarifas de nómina quedaron sin confirmar, listas para revisar.`, 'ok');
     },
-    onError: (e) => setAviso({ tono: 'warning', texto: e instanceof ApiError ? e.message : 'No se pudo importar el documento.' }),
+    onError: (e) => setAviso({ texto: e instanceof ApiError ? e.message : 'No se pudo importar el documento.' }),
   });
 
   const confirmar = useMutation({
@@ -120,7 +124,7 @@ export function TarifaIsrPanel() {
       // persona la corrigió, o llegó una reimportación). Se recarga y se muestra el mensaje del
       // servidor tal cual — ya dice qué hacer, reescribirlo no ayudaría.
       if (e instanceof ApiError && e.codigo === 'TARIFA_CAMBIO') invalidar();
-      setAviso({ tono: 'warning', texto: e instanceof ApiError ? e.message : 'No se pudo confirmar la tarifa.' });
+      setAviso({ texto: e instanceof ApiError ? e.message : 'No se pudo confirmar la tarifa.' });
     },
   });
 
@@ -192,10 +196,7 @@ export function TarifaIsrPanel() {
       </div>
 
       {aviso && (
-        <div
-          role="alert"
-          className={`rounded-md px-3 py-2.5 text-[13px] flex items-start gap-2 ${aviso.tono === 'warning' ? 'bg-warning-soft text-warning' : 'bg-info-soft text-info'}`}
-        >
+        <div role="alert" className="rounded-md px-3 py-2.5 text-[13px] flex items-start gap-2 bg-warning-soft text-warning">
           <AlertTriangle className="size-4 shrink-0 mt-0.5" aria-hidden />
           <span className="text-pretty">{aviso.texto}</span>
         </div>
@@ -299,14 +300,30 @@ function TarjetaTarifa({
   onCorregir: () => void;
   onDescartar: () => void;
 }) {
+  const { toast } = useToast();
   // La que aplica a la nómina arranca expandida; las demás, colapsadas — no compiten por la
   // atención de quien solo necesita revisar la que de verdad usa.
   const [expandida, setExpandida] = useState(tarifa.aplica_a_la_nomina);
+  const [descargandoHoja, setDescargandoHoja] = useState(false);
   const estado: EstadoFiscal = tarifa.confirmada ? 'confirmado' : 'propuesto';
   const { texto: fuenteTexto, url: fuenteUrl } = partirFuente(tarifa.fuente);
 
   function alternar() {
     setExpandida((v) => !v);
+  }
+
+  // Disponible esté confirmada o no (§7.4 del diseño): el contador tiene que revisarla ANTES de
+  // que el dueño del Hub confirme, así que la hoja no puede depender de que ya se haya confirmado.
+  async function descargarHoja() {
+    setDescargandoHoja(true);
+    try {
+      const blob = await api.descargarHojaDeRevisionTarifa(tarifa.ejercicio, tarifa.periodicidad);
+      descargarBlob(blob, `tarifa-isr-${tarifa.ejercicio}-${tarifa.periodicidad.toLowerCase()}.pdf`);
+    } catch {
+      toast('No se pudo generar la hoja de revisión.', 'error');
+    } finally {
+      setDescargandoHoja(false);
+    }
   }
 
   return (
@@ -405,6 +422,9 @@ function TarjetaTarifa({
             )}
             <Button type="button" variant="secondary" onClick={onCorregir}>
               {tarifa.confirmada ? 'Corregir' : 'Corregir los renglones'}
+            </Button>
+            <Button type="button" variant="secondary" disabled={descargandoHoja} loading={descargandoHoja} onClick={descargarHoja}>
+              <FileDown className="size-4" aria-hidden /> Hoja de revisión para tu contador (PDF)
             </Button>
             {!tarifa.confirmada && (
               <Button type="button" variant="danger" onClick={onDescartar}>
