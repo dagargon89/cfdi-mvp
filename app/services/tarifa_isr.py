@@ -227,7 +227,18 @@ def subsidio_del_periodo(
     **El tope se compara de forma inclusiva (`<=`)**, porque el decreto dice que el ingreso no debe
     "exceder" el tope: justo en el tope todavía hay derecho a subsidio, y un `<` estricto lo negaría
     injustamente a quien gana exactamente esa cifra.
+
+    **Reutiliza `TarifaInvalida` para días pagados en cero o negativos, igual que
+    `isr_del_periodo` y por la misma razón:** esta función también divide entre `dias_pagados`
+    al mensualizar, así que sin este guard la librería lanzaría `decimal.DivisionByZero` —una
+    excepción interna, no un mensaje de dominio— en vez del error legible que este módulo le debe
+    a quien lo llama.
     """
+    if dias_pagados <= 0:
+        raise TarifaInvalida(
+            f"El recibo dice {dias_pagados} días pagados, así que no se puede calcular el subsidio "
+            "del periodo. Revisa el CFDI: un recibo sin días pagados no debería traer sueldo gravado."
+        )
     dias_mes: Final = DIAS_NOMINALES[PeriodicidadTarifa.MENSUAL]
     mensualizado = (gravado * dias_mes / dias_pagados).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
     if mensualizado > tope:

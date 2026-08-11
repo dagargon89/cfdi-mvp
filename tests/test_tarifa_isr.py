@@ -206,10 +206,13 @@ def test_por_encima_del_tope_no_hay_subsidio() -> None:
 
 def test_el_tope_se_compara_por_igualdad_inclusiva() -> None:
     """Justo en el tope todavía hay subsidio: el decreto dice «no exceda». Gravado quincenal
-    5746.33 → mensualizado 11492.66 = tope exacto."""
+    5746.33 → mensualizado 11492.66 = tope exacto. El subsidio no depende del gravado una vez
+    que la comparación con el tope ya pasó — solo depende de la UMA, el factor y los días —,
+    así que el valor exacto es el mismo 267.83 del caso de 5000.00: 0.1502 × 3566.22 = 535.6462…
+    → 535.65 mensual → 535.65 × 15/30 = 267.825 → 267.83."""
     assert t.subsidio_del_periodo(
         Decimal("5746.33"), Decimal("15"), Decimal("3566.22"), Decimal("0.1502"), Decimal("11492.66")
-    ) > Decimal("0")
+    ) == Decimal("267.83")
 
 
 def test_el_isr_a_retener_y_el_subsidio_a_entregar_nunca_son_negativos() -> None:
@@ -226,3 +229,28 @@ def test_cero_dias_pagados_no_divide_entre_cero() -> None:
     con un mensaje que diga qué pasa, no reventar con ZeroDivisionError."""
     with pytest.raises(t.TarifaInvalida, match="días"):
         t.isr_del_periodo(_quincenal_real(), Decimal("1000.00"), Decimal("0"), Decimal("15"))
+
+
+def test_cero_dias_pagados_en_el_subsidio_tampoco_divide_entre_cero() -> None:
+    """El mismo recibo sin días pagados también rompería `subsidio_del_periodo`, que mensualiza
+    dividiendo entre `dias_pagados`. Sin este guard, la librería lanzaría
+    `decimal.DivisionByZero` — una excepción interna, no un mensaje de dominio — en un módulo
+    cuyo contrato es fallar con algo que una persona pueda leer."""
+    with pytest.raises(t.TarifaInvalida, match="días"):
+        t.subsidio_del_periodo(
+            Decimal("1000.00"), Decimal("0"), Decimal("3566.22"), Decimal("0.1502"), Decimal("11492.66")
+        )
+
+
+def test_la_base_elevada_se_redondea_antes_de_aplicar_la_tarifa() -> None:
+    """7 días de una quincena con un gravado que no eleva limpio, para que el redondeo
+    intermedio de la base elevada sí importe (a diferencia de 3000.00 × 15/9, que da exacto).
+
+    Elevada: 1500.00 × 15/7 = 3214.2857142857… → redondeada a 3214.29 (renglón 2).
+    Completo: 7.95 + (3214.29 − 416.71) × 0.0640 = 7.95 + 179.04512 → 7.95 + 179.05 = 187.00.
+    Prorrateado: 187.00 × 7/15 = 87.2666… → 87.27.
+
+    Sin redondear la base elevada, el marginal sale 7.95 + 179.0448457… → 7.95 + 179.04 = 186.99,
+    y el prorrateo da 186.99 × 7/15 = 87.262 → 87.26: un centavo menos, exactamente la magnitud
+    que B-09 reporta como diferencia."""
+    assert t.isr_del_periodo(_quincenal_real(), Decimal("1500.00"), Decimal("7"), Decimal("15")) == Decimal("87.27")
