@@ -210,6 +210,29 @@ real (el contador de la organización, vía D2 en Sprint 3) hizo evidente que ha
   recibo real de la empresa 11, dejando la base como la encontró). Spec y plan:
   `docs/superpowers/specs/2026-08-10-tarifa-isr-design.md`,
   `docs/superpowers/plans/2026-08-10-tarifa-isr.md`.
+- **B-09 y las columnas anuales de B-05 (2026-08-11) — 6 tareas:** el consumidor de la tarifa del
+  ISR que la entrega anterior dejó pendiente a propósito. **B-09** ("Recálculo de ISR y subsidio al
+  empleo") recalcula el ISR de cada recibo de nómina con la tarifa quincenal/mensual confirmada del
+  Anexo 8 y lo compara contra lo que el patrón timbró, con ocho banderas que separan un hallazgo
+  real (`ISR_CERO_CON_BASE`, `DIFERENCIA_SISTEMATICA` sobre al menos 3 empleados) de un contexto que
+  no lo es (`PERIODO_IRREGULAR`, `PERCEPCIONES_EXTRAORDINARIAS`, indicio del art. 174) — nunca
+  usa el gravado total del recibo como base, para no producir un número que a veces está mal sin
+  que nadie pueda saberlo (§5 del diseño). **B-05** suma tres columnas del bloque anual del art. 97
+  LISR ("ISR anual teórico", "Subsidio anual acreditable", "Diferencia a cargo / favor"), que
+  desbloquea la tarifa `EJERCICIO` del mismo Anexo 8. Verificado en vivo el 2026-08-11 con
+  `scripts/verificar_b09.py`: con la configuración fiscal sin confirmar, B-09 no genera ninguna fila
+  y dice qué falta y dónde cargarlo; confirmando la tarifa quincenal/anual de 2026 y las dos marcas
+  de percepción que la nómina real usa (`001`, `005`) pero sin el subsidio al empleo, los 8 CFDI de
+  la empresa 11 producen 8 filas con el ISR determinado y las columnas del subsidio vacías (con una
+  nota, no una bandera silenciosa); confirmando también el subsidio, las mismas 8 filas quedan
+  completas y el ISR de un recibo real coincidió, a un centavo, con un cálculo hecho a mano en el
+  propio script; y las tres columnas anuales de B-05 aparecen vacías sin marcas/tarifa y calculadas
+  con todo confirmado. La limpieza (tarifas descartadas, marcas y tramos del subsidio devueltos a
+  sin confirmar) se probó inyectando temporalmente una excepción antes del paso de reversión: la
+  base quedó igual de limpia, comprobado por SQL directo. **No construye** (decisión razonada, no
+  un olvido, §10 del diseño): el modelo histórico del subsidio (`tabla_subsidio`), el procedimiento
+  opcional del art. 174, B-11/B-12/B-13, ni los grupos A/C/D/E de percepciones. Spec y plan:
+  `docs/superpowers/specs/2026-08-11-b09-isr-design.md`, `docs/superpowers/plans/2026-08-11-b09-isr.md`.
 
 Las cuatro entregas comparten el mismo spec de diseño para los informes
 (`docs/superpowers/specs/2026-08-05-informes-cfdi-nomina-design.md`, que la tarea de subsidio/UMA
