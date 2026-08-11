@@ -190,6 +190,25 @@ _MIN_EMPLEADOS_DIFERENCIA_SISTEMATICA = 3
 `DIFERENCIA_SISTEMATICA` sería ruido. Tres es la muestra mínima donde la coincidencia empieza a
 significar algo."""
 
+_NOTA_SIN_SUBSIDIO = (
+    "Este informe se generó, pero no se pudo comparar lo que retuvo el patrón contra lo que en "
+    "realidad correspondía: falta confirmar en el sistema los datos del apoyo que la ley da a los "
+    "sueldos más bajos (el subsidio al empleo), y sin ellos no se puede saber cuánto debió "
+    "retenerse. Por eso las columnas de comparación de este informe (Subsidio, ISR a retener "
+    "teórico, Diferencia de ISR) quedaron vacías. Que este informe no traiga banderas de "
+    "diferencia NO significa que las retenciones estén correctas: significa que todavía no se "
+    "pudieron comparar. Confirma la UMA mensual, el factor y el tope del subsidio en "
+    "Configuración → Fiscal para que la comparación empiece a funcionar."
+)
+"""Ronda de corrección de la tarea 4: `BANDERA_SIN_SUBSIDIO` (`configuracion_isr`) se descarta de
+la lista de bloqueo (§5 del diseño: sin subsidio el informe sí se genera) pero antes no se
+reintroducía en ningún lado — ni bandera, ni aviso, ni nota. Eso deja al usuario con un informe
+de cero banderas de comparación (todas dependen de `isr_a_retener_teorico`, y esa columna
+depende del subsidio) sin ninguna explicación, que se lee como "todo está bien" cuando la verdad
+es que no se comparó nada. Va a `ResultadoInforme.notas`, no a `aviso` (que desaparece cuando la
+corrida sale bien: aquí sale bien) ni a una `Bandera` (no es un hallazgo que se filtre por
+recibo, es un calificador permanente de la corrida completa mientras falte confirmar)."""
+
 
 def _redondear(valor: Decimal) -> Decimal:
     return valor.quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
@@ -512,16 +531,24 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
 
     # La degradación es por partes (§5 del diseño): sin tarifa o sin marcas, nada se genera y el
     # aviso es literalmente el texto de `configuracion_isr` (nunca reescrito aquí). Sin subsidio
-    # sí se genera — su texto (`BANDERA_SIN_SUBSIDIO`) se descarta de la lista de bloqueo.
+    # sí se genera — su texto (`BANDERA_SIN_SUBSIDIO`) se descarta de la lista de bloqueo, pero
+    # no desaparece: se reintroduce abajo como nota (`_NOTA_SIN_SUBSIDIO`), porque sin él ninguna
+    # de las banderas de comparación de la tarea 4 puede dispararse y el usuario necesita saber
+    # que la ausencia de hallazgos no significa que todo esté correcto.
     bloqueantes: list[str] = []
     vistos: set[str] = set()
+    sin_subsidio_confirmado = False
     for config_ejercicio in configs.values():
+        if configuracion_isr.BANDERA_SIN_SUBSIDIO in config_ejercicio.faltantes:
+            sin_subsidio_confirmado = True
         for falta in config_ejercicio.faltantes:
             if falta != configuracion_isr.BANDERA_SIN_SUBSIDIO and falta not in vistos:
                 vistos.add(falta)
                 bloqueantes.append(falta)
     if bloqueantes:
         return ResultadoInforme(columnas=_columnas(), banderas=banderas_fuera, aviso=" ".join(bloqueantes))
+
+    notas: list[str] = [_NOTA_SIN_SUBSIDIO] if sin_subsidio_confirmado else []
 
     banderas: list[Bandera] = list(banderas_fuera)
     banderas.extend(universo_nomina.banderas_de_estatus(universo_nomina.comprobantes_y_detalles(filas_universo)))
@@ -836,4 +863,4 @@ async def consultar(db: AsyncSession, empresa_id: int, p: Parametros) -> Resulta
     if bandera_sistematica is not None:
         banderas.append(bandera_sistematica)
 
-    return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas)
+    return ResultadoInforme(columnas=_columnas(), filas=filas, banderas=banderas, notas=notas)

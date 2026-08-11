@@ -269,6 +269,10 @@ async def test_con_todo_confirmado_una_fila_por_recibo(db: AsyncSession) -> None
     assert fila_101[_COL_NOMBRE_EMPLEADO] == "JUANA INVENTADA DE PRUEBA"
     assert fila_101[_COL_NUM_EMPLEADO] == "101"
 
+    # Con el subsidio confirmado (`_empresa_con_configuracion_confirmada`), la nota de
+    # `BANDERA_SIN_SUBSIDIO` no debe aparecer: la comparación sí se pudo hacer.
+    assert resultado.notas == []
+
 
 # --------------------------------------------------------------------------------------
 # 4. La prueba central: la base gravable excluye lo no ordinario
@@ -373,7 +377,13 @@ async def test_sin_subsidio_confirmado_las_columnas_del_subsidio_van_vacias_pero
     """El subsidio al empleo no bloquea el ISR determinado (§5 del diseño): sin `UMA_MENSUAL`,
     `SUBSIDIO_FACTOR_UMA` ni `SUBSIDIO_TOPE_INGRESO` confirmados, el informe se genera igual,
     con las tres columnas del subsidio vacías. El ISR determinado es el mismo 366.91 de la
-    prueba anterior: no depende del subsidio."""
+    prueba anterior: no depende del subsidio.
+
+    Ronda de corrección de la tarea 4: sin subsidio, `isr_a_retener_teorico` es `None` en toda
+    fila, así que ninguna de `COINCIDE`/`DIFERENCIA_MENOR`/`DIFERENCIA_MAYOR`/
+    `DIFERENCIA_SISTEMATICA` puede dispararse — el informe sale con cero banderas de
+    comparación. Sin una nota que lo diga, eso se lee como "todo coincide" cuando la verdad es
+    que no se comparó nada; `resultado.notas` tiene que decirlo en español llano."""
     empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
     await _sembrar_tarifa_quincenal(db)
     await _sembrar_marca(db, "001", ordinario=True)
@@ -393,6 +403,15 @@ async def test_sin_subsidio_confirmado_las_columnas_del_subsidio_van_vacias_pero
     assert fila[_COL_SUBSIDIO_TEORICO] is None
     assert fila[_COL_ISR_A_RETENER_TEORICO] is None
     assert fila[_COL_SUBSIDIO_A_ENTREGAR_TEORICO] is None
+
+    # Ninguna bandera de comparación pudo dispararse (todas dependen del subsidio), y eso tiene
+    # que quedar explicado, no silencioso.
+    assert [b for b in resultado.banderas if b.clave in ("COINCIDE", "DIFERENCIA_MENOR", "DIFERENCIA_MAYOR")] == []
+    assert len(resultado.notas) == 1
+    nota = resultado.notas[0]
+    assert "no" in nota.lower() and "significa" in nota.lower()
+    assert "subsidio" in nota.lower()
+    assert "BANDERA_SIN_SUBSIDIO" not in nota
 
 
 # --------------------------------------------------------------------------------------
