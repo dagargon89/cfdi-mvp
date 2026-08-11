@@ -17,6 +17,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import EstatusCfdi, OrigenTarifa, PeriodicidadTarifa
+from app.models.nomina import Nomina
 from app.repositories.tarifa_isr import TarifaGuardada
 from app.services import comprobacion_tarifa
 from app.services import tarifa_isr as t
@@ -189,6 +190,45 @@ async def test_sin_recibos_de_nomina_devuelve_None(db: AsyncSession) -> None:
     await _empresa(db)
     await db.commit()
     assert await comprobacion_tarifa.comprobar(db, tarifa=_tarifa(QUINCENAL, PeriodicidadTarifa.DIAS_15)) is None
+
+
+async def test_un_recibo_sin_deduccion_de_isr_advierte_en_vez_de_dar_un_falso_positivo(db: AsyncSession) -> None:
+    """Sin esta advertencia, un recibo sin la deducción 002 deja `isr_timbrado` en 0 en silencio, y
+    la diferencia contra el ISR calculado luce como la "diferencia enorme" que el propio panel
+    enseña a leer como tarifa de otro año o de otra periodicidad — un falso positivo en la única
+    ayuda a la decisión que tiene quien no es contador."""
+    eid = await _empresa(db)
+    await insertar_nomina(
+        db, empresa_id=eid, uuid="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        total_gravado="5000.00", deducciones=[],
+    )
+
+    hecha = await comprobacion_tarifa.comprobar(db, tarifa=_tarifa(QUINCENAL, PeriodicidadTarifa.DIAS_15))
+    assert hecha is not None
+    assert hecha.isr_timbrado == Decimal("0")
+    assert any("no trae una deducción de ISR" in a for a in hecha.advertencias)
+
+
+async def test_dias_pagados_nulos_no_interpolan_none_en_la_advertencia(db: AsyncSession) -> None:
+    """`revision_tarifa._seccion_comprobacion` ya se protegió de este mismo error (`str(None)` es
+    `"None"`, no una cadena vacía). Un recibo real puede no traer `num_dias_pagados` — la columna
+    es nula en el modelo — y la advertencia no debe mostrarle a quien no es contador el texto
+    literal "None"."""
+    eid = await _empresa(db)
+    cid = await insertar_nomina(
+        db, empresa_id=eid, uuid="dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        total_gravado="5000.00", deducciones=[("002", "002", "ISR", "366.91")],
+    )
+    fila = await db.get(Nomina, cid)
+    assert fila is not None
+    fila.num_dias_pagados = None
+    await db.commit()
+
+    hecha = await comprobacion_tarifa.comprobar(db, tarifa=_tarifa(QUINCENAL, PeriodicidadTarifa.DIAS_15))
+    assert hecha is not None
+    assert hecha.dias_pagados is None
+    advertencia = next(a for a in hecha.advertencias if "prorrateado" in a)
+    assert "None" not in advertencia
 
 
 async def test_no_toma_recibos_cancelados_ni_con_error_de_normalizacion(db: AsyncSession) -> None:

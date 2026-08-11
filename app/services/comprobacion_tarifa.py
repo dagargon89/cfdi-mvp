@@ -195,9 +195,22 @@ async def comprobar(db: AsyncSession, *, tarifa: TarifaGuardada) -> Comprobacion
     isr_calculado = reglas.isr_de(tarifa.renglones, gravado)
 
     advertencias: list[str] = []
+    if isr_timbrado_bruto is None:
+        # Sin esto, un recibo sin deducción de ISR (clave 002) deja `isr_timbrado` en 0 en
+        # silencio, y eso produce la "diferencia enorme" que el propio panel enseña a leer como
+        # tarifa de otro año o de otra periodicidad — un falso positivo en la única ayuda a la
+        # decisión que tiene quien no es contador.
+        advertencias.append(
+            "Este recibo no trae una deducción de ISR (clave 002), así que el ISR timbrado se "
+            "muestra como 0.00. La diferencia de abajo no significa que la tarifa esté mal cargada."
+        )
+    # `str(None)` es `"None"`, no una cadena vacía: un `or` sobre el resultado de `str(...)` nunca
+    # dispararía, así que el `None` se comprueba antes de convertir a texto, no después — mismo
+    # cuidado que ya tiene `revision_tarifa._seccion_comprobacion` con este mismo dato.
+    dias_pagados_texto = str(dias_pagados) if dias_pagados is not None else "sin dato en el recibo"
     if dias_pagados is None or dias_pagados != dias_nominales:
         advertencias.append(
-            f"Los días pagados del recibo ({dias_pagados}) no son los {dias_nominales} de la "
+            f"Los días pagados del recibo ({dias_pagados_texto}) no son los {dias_nominales} de la "
             "periodicidad, así que el importe está prorrateado y la diferencia es esperada."
         )
     if tarifa.periodicidad is PeriodicidadTarifa.EJERCICIO:
