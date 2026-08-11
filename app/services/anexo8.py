@@ -277,14 +277,23 @@ def extraer(pdf: bytes) -> list[TarifaExtraida]:
             renglones = _renglones_desde(texto, columnas.end())
             if not renglones:
                 continue
-            tarifa_isr.validar(list(renglones))
             ejercicio = int(m.group("ejercicio"))
+            try:
+                tarifa_isr.validar(list(renglones))
+            except tarifa_isr.TarifaInvalida as exc:
+                # Sin nombrar la tarifa y el ejercicio, el mensaje original ("El renglón 4 debe
+                # empezar...") no dice cuál de las 7 tablas del documento está mal: el número de
+                # renglón por sí solo no identifica la tabla (§10 del diseño).
+                raise tarifa_isr.TarifaInvalida(
+                    f"La tarifa {tarifa_isr.ETIQUETAS_TARIFA[ancla.periodicidad]} de {ejercicio} del "
+                    f"documento no cuadra: {exc}"
+                ) from exc
             clave = (ejercicio, ancla.periodicidad)
             if clave in vistas:
                 raise DocumentoInvalido(
-                    f"Encontré más de una tarifa {ancla.periodicidad.value.lower()} del ejercicio "
-                    f"{ejercicio} en este archivo. Un Anexo 8 no trae dos veces la misma tabla; revisa "
-                    "que el PDF no esté dañado, duplicado o mezclado con otro documento."
+                    f"Encontré más de una tarifa {tarifa_isr.ETIQUETAS_TARIFA[ancla.periodicidad]} del "
+                    f"ejercicio {ejercicio} en este archivo. Un Anexo 8 no trae dos veces la misma tabla; "
+                    "revisa que el PDF no esté dañado, duplicado o mezclado con otro documento."
                 )
             vistas.add(clave)
             encontradas.append(

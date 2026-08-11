@@ -173,3 +173,58 @@ def test_un_pdf_legible_que_no_es_el_anexo_8_no_importa_nada_y_dice_que_esperaba
 def test_un_archivo_mas_grande_que_el_limite_se_rechaza_antes_de_abrirlo() -> None:
     with pytest.raises(anexo8.DocumentoInvalido, match="grande"):
         anexo8.extraer(b"x" * (anexo8.MAXIMO_BYTES + 1))
+
+
+# Una tabla sintética mínima que sí pasa las seis pruebas del Anexo I.1 (dos renglones: el primero
+# 0.01→416.70 con cuota 0 y tasa 1.92 %, el segundo abierto ("En adelante") con tasa 35 %, dentro
+# del rango [30, 40] que exige la prueba de la tasa tope). Sirve para las dos pruebas de abajo sin
+# depender de que el PDF real tenga, por casualidad, una tarifa duplicada o inválida — no la tiene,
+# a propósito, porque un documento real así se rechazaría entero.
+_TABLA_DIARIA_2026_SINTETICA = (
+    "cantidad de trabajo realizado correspondiente a 2026, calculada en dias 96 de la Ley del ISR "
+    "y 175 de su Reglamento Limite inferior Limite superior Cuota fija Por ciento para aplicarse "
+    "sobre el excedente del limite inferior $ $ $ % 0.01 416.70 0.00 1.92 416.71 En adelante 660.75 "
+    "35.00 "
+)
+
+
+def test_una_tarifa_duplicada_se_rechaza_nombrando_la_tarifa_con_su_etiqueta_no_el_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red que atrapa un fallo silencioso del ancla (docstring de `extraer`): si la misma
+    periodicidad y el mismo ejercicio salen dos veces, algo se enganchó donde no debía. El mensaje
+    tiene que nombrar la tarifa con su etiqueta legible ("Diaria..."), nunca con el nombre crudo
+    del enum (`DIARIA`) — se parchea `_texto_plano` para no depender de que el PDF real tenga, por
+    casualidad, una tabla duplicada."""
+    monkeypatch.setattr(
+        anexo8, "_texto_plano", lambda pdf: _TABLA_DIARIA_2026_SINTETICA + _TABLA_DIARIA_2026_SINTETICA
+    )
+
+    with pytest.raises(anexo8.DocumentoInvalido) as exc:
+        anexo8.extraer(b"no se usa: _texto_plano esta parchado")
+    mensaje = str(exc.value)
+    assert "2026" in mensaje
+    assert t.ETIQUETAS_TARIFA[PeriodicidadTarifa.DIARIA] in mensaje
+    assert "DIARIA" not in mensaje
+
+
+def test_una_tarifa_invalida_se_envuelve_nombrando_la_tarifa_y_el_ejercicio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin esto, el mensaje original de `tarifa_isr.validar` ("El renglón 4 debe empezar...")
+    nombra el renglón pero no la tabla, y con 7 tablas en el documento quien lo lee no sabe cuál
+    mirar (§10 del diseño). Se fuerza el fallo parchando `tarifa_isr.validar` para no depender de
+    que el PDF real traiga, por casualidad, una tabla inválida."""
+
+    def _falla_siempre(renglones: object) -> None:
+        raise t.TarifaInvalida("El renglón 4 debe empezar exactamente un centavo después de donde termina el 3.")
+
+    monkeypatch.setattr(anexo8.tarifa_isr, "validar", _falla_siempre)
+
+    with pytest.raises(t.TarifaInvalida) as exc:
+        anexo8.extraer(ANEXO_2026.read_bytes())
+    mensaje = str(exc.value)
+    assert "El renglón 4 debe empezar" in mensaje
+    assert "2026" in mensaje
+    assert t.ETIQUETAS_TARIFA[PeriodicidadTarifa.DIARIA] in mensaje
+    assert "DIARIA" not in mensaje

@@ -952,7 +952,13 @@ async def _tarifa_a_salida(
         # documento, `guardar_importadas` la habría regresado a `IMPORTADA` en silencio (caso
         # 6 del docstring del repositorio).
         difiere_del_documento=tarifa.origen is OrigenTarifa.MANUAL,
-        aplica_a_la_nomina=dominante is not None and tarifa.periodicidad is dominante,
+        # `and tarifa.ejercicio == date.today().year`: sin el ejercicio, importar el Anexo 8 de
+        # 2027 mientras el de 2026 sigue vigente marcaría las DOS tarjetas de la misma
+        # periodicidad como "la que aplica a tu nómina", ambas expandidas — el mismo criterio que
+        # ya usa la alarma de vigencia para decidir qué año es "el de hoy".
+        aplica_a_la_nomina=(
+            dominante is not None and tarifa.periodicidad is dominante and tarifa.ejercicio == date.today().year
+        ),
         huella=tarifa.huella,
         renglones=[_renglon_a_salida(r) for r in tarifa.renglones],
         comprobacion=_comprobacion_a_salida(comprobacion) if comprobacion is not None else None,

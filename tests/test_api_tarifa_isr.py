@@ -14,6 +14,7 @@ vez de un escalar. Dos cosas nuevas que ese precedente no cubre:
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -359,6 +360,38 @@ async def test_listar_incluye_la_comprobacion_y_la_periodicidad_que_aplica(clien
     assert quincenal["comprobacion"]["uuid"] == "11111111-1111-4111-8111-111111111111"
     assert quincenal["comprobacion"]["isr_timbrado"] == "366.910000"
     assert r.json()["periodicidades_sin_tarifa"] == []
+
+
+async def test_aplica_a_la_nomina_exige_tambien_el_ejercicio_actual(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
+    """En cuanto convivan el Anexo 8 de dos ejercicios para la misma periodicidad —lo normal en
+    diciembre, cuando se importa el del año que entra sin haber descartado el del que termina—,
+    solo la del ejercicio en curso puede decir "es la que aplica a tu nómina". Sin el ejercicio en
+    la comparación, las dos tarjetas de la misma periodicidad lo dirían a la vez, las dos
+    expandidas."""
+    await _admin(db)
+    anio_actual = date.today().year
+    anio_pasado = anio_actual - 1
+    empresa = await factories.crear_empresa(db, rfc="CHL960913IX9")
+    await insertar_nomina(
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="33333333-3333-4333-8333-333333333333",
+        periodicidad="04",  # quincenal → DIAS_15
+        total_gravado="5000.00",
+        deducciones=[("002", "002", "ISR", "366.91")],
+    )
+    await db.commit()
+
+    r = await client.put(f"/v1/configuracion/tarifa-isr/{anio_actual}/DIAS_15", json=_cuerpo(_quincenal()), headers=ADMIN)
+    assert r.status_code == 200, r.text
+    r = await client.put(f"/v1/configuracion/tarifa-isr/{anio_pasado}/DIAS_15", json=_cuerpo(_quincenal()), headers=ADMIN)
+    assert r.status_code == 200, r.text
+
+    r = await client.get("/v1/configuracion/tarifa-isr", headers=ADMIN)
+    assert r.status_code == 200, r.text
+    tarifas = {x["ejercicio"]: x for x in r.json()["tarifas"]}
+    assert tarifas[anio_actual]["aplica_a_la_nomina"] is True
+    assert tarifas[anio_pasado]["aplica_a_la_nomina"] is False
 
 
 async def test_listar_avisa_cuando_la_nomina_usa_una_periodicidad_sin_tarifa_publicada(client, db: AsyncSession) -> None:  # type: ignore[no-untyped-def]
