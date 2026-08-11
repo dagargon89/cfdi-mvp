@@ -47,7 +47,9 @@ def test_el_primer_renglon_tiene_que_arrancar_en_un_centavo() -> None:
         t.validar(malos)
 
 
-def test_un_hueco_entre_renglones_se_rechaza_con_el_valor_esperado() -> None:
+def test_un_solape_entre_renglones_se_rechaza_con_el_valor_esperado() -> None:
+    """El renglón 4 arranca en 6216.00, dentro del rango del renglón 3 (hasta 6216.15): es un
+    solape, no un hueco — el nombre de una prueba es su especificación."""
     malos = _quincenal()
     malos[3] = _r(4, "6216.00", "7225.95", "499.20", "0.1600")
     with pytest.raises(t.TarifaInvalida) as exc:
