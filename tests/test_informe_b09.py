@@ -586,7 +586,7 @@ async def test_un_recibo_sin_receptor_o_sin_dias_pagados_cae_en_no_calculable(db
 #
 #   ISR determinado (renglón 3): 207.75 + (5000.00 − 3537.16) × 0.1088 = 366.91
 #   Subsidio mensualizado: 5000.00 × 30 / 15 = 10000.00 ≤ 11492.66 (tope) → sí aplica
-#   Subsidio mensual: 0.1502 × 3566.22 = 535.646844 → 535.65 (ROUND_HALF_UP)
+#   Subsidio mensual: 0.1502 × 3566.22 = 535.646244 → 535.65 (ROUND_HALF_UP)
 #   Subsidio del periodo: 535.65 × 15 / 30 = 267.825 → 267.83 (ROUND_HALF_UP)
 #   ISR a retener teórico: max(0, 366.91 − 267.83) = 99.08
 # --------------------------------------------------------------------------------------
