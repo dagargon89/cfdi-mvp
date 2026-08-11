@@ -74,6 +74,26 @@ const NOMBRE_PERIODICIDAD_CFDI: Record<string, string> = {
   '99': 'de otra periodicidad',
 };
 
+/** El slug legible para el nombre del PDF que se descarga (Task 11 + arreglo de la revisión
+ * manual del 2026-08-10): antes de este arreglo, `descargarHoja` armaba el nombre con
+ * `tarifa.periodicidad.toLowerCase()` y producía `tarifa-isr-2026-dias_15.pdf` — el nombre del
+ * enum, tal cual, en un archivo que el dueño del Hub le manda a su contador por correo. El
+ * servidor ya manda un slug legible en `Content-Disposition` (`_SLUG_ARCHIVO_TARIFA` en
+ * `app/api/v1/configuracion.py`), pero `requestBlob` (`api.http.ts`) devuelve solo el `Blob`,
+ * sin cabeceras — el mismo patrón que el resto de las descargas de este proyecto
+ * (`ComprobanteDrawer.tsx`, `JobDrawer.tsx`): el nombre del archivo lo decide siempre quien
+ * dispara la descarga, no la respuesta HTTP. Este mapa duplica a propósito los mismos seis
+ * valores que `_SLUG_ARCHIVO_TARIFA`, con el mismo criterio (sin acentos, sin espacios, y nunca
+ * el nombre del enum). */
+const SLUG_ARCHIVO_TARIFA: Record<PeriodicidadTarifaIsr, string> = {
+  DIARIA: 'diaria',
+  DIAS_7: 'semanal',
+  DIAS_10: 'decenal',
+  DIAS_15: 'quincenal',
+  MENSUAL: 'mensual',
+  EJERCICIO: 'anual',
+};
+
 const TEXTO_ESTADO_TARIFA: Record<EstadoFiscal, string> = {
   confirmado: 'Confirmada · calcula',
   propuesto: 'Propuesta · sin confirmar',
@@ -87,12 +107,43 @@ interface Aviso {
   texto: string;
 }
 
+/** La clave estable de una tarifa, para las dos cosas que necesitan una: la `key` de React de su
+ * tarjeta y la entrada de `expandidas` que guarda si el usuario la abrió o la cerró a mano. */
+function claveTarifa(t: TarifaIsr): string {
+  return `${t.ejercicio}-${t.periodicidad}`;
+}
+
 export function TarifaIsrPanel() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [aviso, setAviso] = useState<Aviso | null>(null);
   const [enCorreccion, setEnCorreccion] = useState<TarifaIsr | null>(null);
   const [enDescarte, setEnDescarte] = useState<TarifaIsr | null>(null);
+  // Qué tarjetas están abiertas, como *excepciones* al criterio por defecto ("la que aplica a
+  // la nómina, expandida; las demás, colapsadas") — no como el estado completo. Sin entrada
+  // aquí, una tarjeta usa el criterio por defecto; con entrada, usa lo que el usuario decidió.
+  //
+  // Este estado vive AQUÍ y no en `TarjetaTarifa` — el bug que reportó el dueño del Hub— porque
+  // la `key` de cada tarjeta (`claveTarifa`, antes `${ejercicio}-${periodicidad}` inline) es
+  // **estable** entre una importación y la siguiente: la periodicidad no cambia solo porque se
+  // reimportó el documento. Un `useState` local en `TarjetaTarifa` inicializado una sola vez con
+  // `useState(tarifa.aplica_a_la_nomina)` sobrevive a React reutilizando la instancia — así que
+  // si el usuario abrió la tarjeta "Diaria" una vez, se queda abierta para siempre, incluso tras
+  // descartar las 7 tarifas y reimportar de cero. Ese fue exactamente el reporte: no es que la
+  // Diaria se expanda sola, es que nunca se cerraba.
+  //
+  // La solución NO es forzar un remount con una `key` que incluya `importado_en` o la huella:
+  // `invalidar()` se llama también al confirmar y al corregir, que son refetches del MISMO
+  // conjunto de tarifas — remontar ahí le cerraría al usuario una tarjeta que abrió a propósito
+  // hace dos segundos. Lo que hace falta es distinguir dos eventos que ambos disparan un
+  // refetch pero significan cosas distintas:
+  //   - "la lista se reemplazó" (una importación nueva trae otro documento, o un descarte quita
+  //     una tarifa): aquí SÍ hay que reiniciar la expansión a su punto de partida.
+  //   - "la lista se volvió a pedir" (confirmar, corregir, o cualquier otra invalidación): aquí
+  //     NO hay que tocar nada de lo que el usuario decidió.
+  // Por eso el reinicio (`setExpandidas({})`) va explícito en los dos `onSuccess` que
+  // corresponden al primer caso —`importar` y `ModalDescartarTarifa`— y en ningún otro lugar.
+  const [expandidas, setExpandidas] = useState<Record<string, boolean>>({});
   const fileRef = useRef<HTMLInputElement>(null);
 
   const { data, isLoading, isError, error } = useQuery({
@@ -107,6 +158,9 @@ export function TarifaIsrPanel() {
     onSuccess: (r) => {
       setAviso(null);
       invalidar();
+      // El conjunto de tarifas se reemplazó (documento nuevo): la expansión vuelve a su punto
+      // de partida, no a lo que quedó abierto de la importación anterior.
+      setExpandidas({});
       toast(`Anexo 8 importado: ${r.tarifas.length} tarifas de nómina quedaron sin confirmar, listas para revisar.`, 'ok');
     },
     onError: (e) => setAviso({ texto: e instanceof ApiError ? e.message : 'No se pudo importar el documento.' }),
@@ -218,20 +272,29 @@ export function TarifaIsrPanel() {
           {periodicidadesSinTarifa.length > 0 && <AvisoSinTarifa claves={periodicidadesSinTarifa} />}
 
           <div className="flex flex-col gap-2.5">
-            {tarifas.map((tarifa) => (
-              <TarjetaTarifa
-                key={`${tarifa.ejercicio}-${tarifa.periodicidad}`}
-                tarifa={tarifa}
-                confirmando={
-                  confirmar.isPending &&
-                  confirmar.variables?.ejercicio === tarifa.ejercicio &&
-                  confirmar.variables?.periodicidad === tarifa.periodicidad
-                }
-                onConfirmar={() => { setAviso(null); confirmar.mutate(tarifa); }}
-                onCorregir={() => { setAviso(null); setEnCorreccion(tarifa); }}
-                onDescartar={() => { setAviso(null); setEnDescarte(tarifa); }}
-              />
-            ))}
+            {tarifas.map((tarifa) => {
+              const clave = claveTarifa(tarifa);
+              return (
+                <TarjetaTarifa
+                  key={clave}
+                  tarifa={tarifa}
+                  // Sin entrada en `expandidas`: el criterio por defecto (la que aplica a la
+                  // nómina, expandida). Con entrada: lo que el usuario decidió a mano.
+                  expandida={expandidas[clave] ?? tarifa.aplica_a_la_nomina}
+                  onAlternar={() =>
+                    setExpandidas((e) => ({ ...e, [clave]: !(e[clave] ?? tarifa.aplica_a_la_nomina) }))
+                  }
+                  confirmando={
+                    confirmar.isPending &&
+                    confirmar.variables?.ejercicio === tarifa.ejercicio &&
+                    confirmar.variables?.periodicidad === tarifa.periodicidad
+                  }
+                  onConfirmar={() => { setAviso(null); confirmar.mutate(tarifa); }}
+                  onCorregir={() => { setAviso(null); setEnCorreccion(tarifa); }}
+                  onDescartar={() => { setAviso(null); setEnDescarte(tarifa); }}
+                />
+              );
+            })}
           </div>
         </>
       )}
@@ -256,6 +319,9 @@ export function TarifaIsrPanel() {
             const etiqueta = enDescarte.etiqueta;
             setEnDescarte(null);
             invalidar();
+            // El conjunto de tarifas se reemplazó (una tarifa desapareció): mismo reinicio que
+            // al importar, para la misma razón — ver el comentario junto a `expandidas`.
+            setExpandidas({});
             toast(`${etiqueta}: importación descartada.`, 'ok');
           }}
         />
@@ -289,28 +355,27 @@ function AvisoSinTarifa({ claves }: { claves: string[] }) {
 
 function TarjetaTarifa({
   tarifa,
+  expandida,
+  onAlternar,
   confirmando,
   onConfirmar,
   onCorregir,
   onDescartar,
 }: {
   tarifa: TarifaIsr;
+  /** Controlado por `TarifaIsrPanel`, no por esta tarjeta: ver el comentario junto a
+   * `expandidas` en el padre para por qué el estado no puede vivir aquí. */
+  expandida: boolean;
+  onAlternar: () => void;
   confirmando: boolean;
   onConfirmar: () => void;
   onCorregir: () => void;
   onDescartar: () => void;
 }) {
   const { toast } = useToast();
-  // La que aplica a la nómina arranca expandida; las demás, colapsadas — no compiten por la
-  // atención de quien solo necesita revisar la que de verdad usa.
-  const [expandida, setExpandida] = useState(tarifa.aplica_a_la_nomina);
   const [descargandoHoja, setDescargandoHoja] = useState(false);
   const estado: EstadoFiscal = tarifa.confirmada ? 'confirmado' : 'propuesto';
   const { texto: fuenteTexto, url: fuenteUrl } = partirFuente(tarifa.fuente);
-
-  function alternar() {
-    setExpandida((v) => !v);
-  }
 
   // Disponible esté confirmada o no (§7.4 del diseño): el contador tiene que revisarla ANTES de
   // que el dueño del Hub confirme, así que la hoja no puede depender de que ya se haya confirmado.
@@ -318,7 +383,7 @@ function TarjetaTarifa({
     setDescargandoHoja(true);
     try {
       const blob = await api.descargarHojaDeRevisionTarifa(tarifa.ejercicio, tarifa.periodicidad);
-      descargarBlob(blob, `tarifa-isr-${tarifa.ejercicio}-${tarifa.periodicidad.toLowerCase()}.pdf`);
+      descargarBlob(blob, `tarifa-isr-${tarifa.ejercicio}-${SLUG_ARCHIVO_TARIFA[tarifa.periodicidad]}.pdf`);
     } catch {
       toast('No se pudo generar la hoja de revisión.', 'error');
     } finally {
@@ -335,11 +400,11 @@ function TarjetaTarifa({
       <div
         role="button"
         tabIndex={0}
-        onClick={alternar}
+        onClick={onAlternar}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            alternar();
+            onAlternar();
           }
         }}
         aria-expanded={expandida}
@@ -389,11 +454,17 @@ function TarjetaTarifa({
           </p>
 
           {tarifa.difiere_del_documento && (
+            // El sistema sabe que hubo una edición manual (guardar el modal de corrección sin
+            // tocar nada también deja `origen: MANUAL`, a propósito), pero no guarda qué renglón
+            // cambió de valor y cuál no — así que este aviso no puede afirmar que algo cambió,
+            // solo que podría haber cambiado. Mismo defecto y mismo criterio que el aviso
+            // equivalente de `app/services/revision_tarifa.py` (`_tabla_renglones`).
             <p className="m-0 text-[12px] bg-warning-soft text-warning rounded-md px-3 py-2 text-pretty flex items-start gap-2">
               <AlertTriangle className="size-3.5 shrink-0 mt-0.5" aria-hidden />
               <span>
-                <strong>Los renglones de esta tarifa se corrigieron a mano</strong> y ya no son exactamente los del
-                último documento importado. Revísalos contra el Anexo 8 antes de confirmar.
+                <strong>Esta tarifa se editó a mano después de importarla.</strong> El sistema no guarda qué se
+                cambió, así que puede que algún renglón ya no coincida con el documento citado arriba: compara la
+                tabla completa contra el Anexo 8 antes de confirmar.
               </span>
             </p>
           )}
