@@ -147,3 +147,82 @@ def test_el_mapa_de_periodicidades_del_cfdi_respeta_el_catalogo_del_sat() -> Non
     assert t.PARA_CFDI["05"] is PeriodicidadTarifa.MENSUAL
     assert t.PARA_CFDI["03"] is None
     assert t.PARA_CFDI["06"] is None
+
+
+def _quincenal_real() -> list[t.Renglon]:
+    """Los cinco primeros renglones de la tarifa de 15 días del Anexo 8 de 2026, con el
+    quinto abierto para que `validar` la acepte."""
+    return [
+        _r(1, "0.01", "416.70", "0.00", "0.0192"),
+        _r(2, "416.71", "3537.15", "7.95", "0.0640"),
+        _r(3, "3537.16", "6216.15", "207.75", "0.1088"),
+        _r(4, "6216.16", "7225.95", "499.20", "0.1600"),
+        _r(5, "7225.96", None, "660.75", "0.3500"),
+    ]
+
+
+def test_el_isr_del_periodo_completo_es_el_calculo_directo() -> None:
+    """15 días de 15: no hay prorrateo. Renglón 3:
+    207.75 + (5000.00 − 3537.16) × 0.1088 = 207.75 + 159.156992 → 366.91"""
+    assert t.isr_del_periodo(_quincenal_real(), Decimal("5000.00"), Decimal("15"), Decimal("15")) == Decimal("366.91")
+
+
+def test_un_centavo_de_base_cruza_de_renglon_y_mueve_el_isr() -> None:
+    """La frontera exacta entre el renglón 2 y el 3, que es donde un error de agregación se
+    delata. 3537.15 → 7.95 + (3537.15 − 416.71) × 0.0640 = 7.95 + 199.70816 → 207.66.
+    3537.16 → 207.75 + 0 = 207.75. Nueve centavos de diferencia por un centavo de base."""
+    tarifa = _quincenal_real()
+    assert t.isr_del_periodo(tarifa, Decimal("3537.15"), Decimal("15"), Decimal("15")) == Decimal("207.66")
+    assert t.isr_del_periodo(tarifa, Decimal("3537.16"), Decimal("15"), Decimal("15")) == Decimal("207.75")
+
+
+def test_un_periodo_parcial_se_eleva_se_aplica_y_se_baja() -> None:
+    """9 días de una quincena, art. 175 del Reglamento (decisión 2 del diseño):
+    base elevada 3000.00 × 15/9 = 5000.00 → ISR del periodo completo 366.91
+    → prorrateado 366.91 × 9/15 = 220.146 → 220.15.
+
+    Sin elevar, 3000.00 caería en el renglón 2 y daría 7.95 + (3000.00 − 416.71) × 0.0640
+    = 173.28: el error que este procedimiento existe para evitar."""
+    assert t.isr_del_periodo(_quincenal_real(), Decimal("3000.00"), Decimal("9"), Decimal("15")) == Decimal("220.15")
+
+
+def test_el_subsidio_se_mensualiza_para_compararlo_con_el_tope_y_se_prorratea_de_vuelta() -> None:
+    """UMA mensual 3566.22, factor 0.1502, tope 11492.66 (los valores de 2026).
+    Gravado quincenal 5000.00 → mensualizado 5000 × 30/15 = 10000.00 ≤ tope.
+    Subsidio mensual: 0.1502 × 3566.22 = 535.6462… → 535.65.
+    Del periodo: 535.65 × 15/30 = 267.825 → 267.83."""
+    assert t.subsidio_del_periodo(
+        Decimal("5000.00"), Decimal("15"), Decimal("3566.22"), Decimal("0.1502"), Decimal("11492.66")
+    ) == Decimal("267.83")
+
+
+def test_por_encima_del_tope_no_hay_subsidio() -> None:
+    """Gravado 6000.00 → mensualizado 12000.00 > 11492.66 → cero. Es cero de verdad, no
+    ausencia: quien gana de más no tiene subsidio, y eso es un hecho, no un dato que falte."""
+    assert t.subsidio_del_periodo(
+        Decimal("6000.00"), Decimal("15"), Decimal("3566.22"), Decimal("0.1502"), Decimal("11492.66")
+    ) == Decimal("0.00")
+
+
+def test_el_tope_se_compara_por_igualdad_inclusiva() -> None:
+    """Justo en el tope todavía hay subsidio: el decreto dice «no exceda». Gravado quincenal
+    5746.33 → mensualizado 11492.66 = tope exacto."""
+    assert t.subsidio_del_periodo(
+        Decimal("5746.33"), Decimal("15"), Decimal("3566.22"), Decimal("0.1502"), Decimal("11492.66")
+    ) > Decimal("0")
+
+
+def test_el_isr_a_retener_y_el_subsidio_a_entregar_nunca_son_negativos() -> None:
+    """366.91 − 267.83 = 99.08 a retener, nada que entregar. Y al revés cuando el subsidio
+    supera al impuesto: se entrega la diferencia y no se retiene nada."""
+    assert t.isr_a_retener(Decimal("366.91"), Decimal("267.83")) == Decimal("99.08")
+    assert t.subsidio_a_entregar(Decimal("366.91"), Decimal("267.83")) == Decimal("0.00")
+    assert t.isr_a_retener(Decimal("100.00"), Decimal("267.83")) == Decimal("0.00")
+    assert t.subsidio_a_entregar(Decimal("100.00"), Decimal("267.83")) == Decimal("167.83")
+
+
+def test_cero_dias_pagados_no_divide_entre_cero() -> None:
+    """Un recibo con 0 días pagados existe (una baja el día 1). Debe lanzar `TarifaInvalida`
+    con un mensaje que diga qué pasa, no reventar con ZeroDivisionError."""
+    with pytest.raises(t.TarifaInvalida, match="días"):
+        t.isr_del_periodo(_quincenal_real(), Decimal("1000.00"), Decimal("0"), Decimal("15"))

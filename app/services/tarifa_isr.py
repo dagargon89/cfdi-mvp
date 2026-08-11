@@ -175,6 +175,80 @@ def isr_de(renglones: Sequence[Renglon], base: Decimal) -> Decimal:
     return r.cuota_fija + marginal
 
 
+def isr_del_periodo(
+    renglones: Sequence[Renglon], gravado: Decimal, dias_pagados: Decimal, dias_nominales: Decimal
+) -> Decimal:
+    """ISR de un periodo, prorrateando cuando cubre menos días que los nominales.
+
+    **Vía elegida, declarada como exige B-09.R3:** la del art. 175 del Reglamento — se eleva la
+    base al periodo completo, se aplica la tarifa de esa periodicidad, y el impuesto se reduce en
+    la misma proporción. La alternativa (tarifa diaria por los días pagados) también es legal,
+    pero exige tener cargada la tarifa diaria y da resultados que difieren por redondeo de los que
+    produce la mayoría de los sistemas de nómina — y este informe existe para compararse con lo
+    que un sistema de nómina timbró.
+
+    Sin elevar, un sueldo de menos días que los nominales caería directo en el renglón que le
+    tocaría al monto ya reducido —uno más bajo del que le corresponde a su nivel real de
+    ingreso— y el ISR saldría por debajo del correcto. Elevar primero coloca la base en el
+    renglón que de verdad le toca.
+
+    **`TarifaInvalida` se reutiliza aquí, en vez de crear una excepción nueva, porque unos días
+    pagados en cero o negativos ya significan exactamente lo que esa excepción dice: "no se puede
+    calcular con estos datos".** Crear una jerarquía aparte para este caso no le agrega
+    información a quien la atrapa; la tarea 3 la convierte en una bandera del recibo sin importar
+    cuál de las dos causas la disparó.
+    """
+    if dias_pagados <= 0:
+        raise TarifaInvalida(
+            f"El recibo dice {dias_pagados} días pagados, así que no se puede calcular el ISR del "
+            "periodo. Revisa el CFDI: un recibo sin días pagados no debería traer sueldo gravado."
+        )
+    if dias_pagados == dias_nominales:
+        return isr_de(renglones, gravado)
+    elevada = (gravado * dias_nominales / dias_pagados).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+    completo = isr_de(renglones, elevada)
+    return (completo * dias_pagados / dias_nominales).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+
+
+def subsidio_del_periodo(
+    gravado: Decimal, dias_pagados: Decimal, uma_mensual: Decimal, factor: Decimal, tope: Decimal
+) -> Decimal:
+    """Subsidio al empleo del Anexo I.3, con el modelo de monto fijo (Decreto de estímulos):
+    `factor × UMA mensual`, sujeto a un tope de ingreso mensualizado.
+
+    El subsidio se define en términos mensuales, así que primero hay que mensualizar el gravado
+    del periodo para compararlo contra el tope, y al final hay que volver a prorratear el
+    resultado al periodo. **El mes se mensualiza con `DIAS_NOMINALES[PeriodicidadTarifa.MENSUAL]`
+    (30 días), nunca con los días naturales del mes en curso:** con 28 o 31 días, el mismo sueldo
+    quincenal produciría un subsidio distinto en febrero que en marzo, y B-09 reportaría esa
+    diferencia como si fuera un hallazgo del cálculo del patrón, cuando sería un artefacto de nuestra
+    propia conversión.
+
+    **El tope se compara de forma inclusiva (`<=`)**, porque el decreto dice que el ingreso no debe
+    "exceder" el tope: justo en el tope todavía hay derecho a subsidio, y un `<` estricto lo negaría
+    injustamente a quien gana exactamente esa cifra.
+    """
+    dias_mes: Final = DIAS_NOMINALES[PeriodicidadTarifa.MENSUAL]
+    mensualizado = (gravado * dias_mes / dias_pagados).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+    if mensualizado > tope:
+        return Decimal("0.00")
+    subsidio_mensual = (factor * uma_mensual).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+    return (subsidio_mensual * dias_pagados / dias_mes).quantize(_DOS_DECIMALES, rounding=ROUND_HALF_UP)
+
+
+def isr_a_retener(isr: Decimal, subsidio: Decimal) -> Decimal:
+    """Lo que de verdad se retiene (Anexo I.3): `max(0, isr − subsidio)`. Cuando el subsidio supera
+    al impuesto no se retiene nada — el excedente se entrega, no se descuenta de aquí con signo
+    negativo."""
+    return max(isr - subsidio, Decimal("0.00"))
+
+
+def subsidio_a_entregar(isr: Decimal, subsidio: Decimal) -> Decimal:
+    """Lo que se le entrega al trabajador cuando el subsidio supera al ISR (Anexo I.3):
+    `max(0, subsidio − isr)`. Cuando el ISR es mayor no hay nada que entregar."""
+    return max(subsidio - isr, Decimal("0.00"))
+
+
 def a_porcentaje(tasa: Decimal) -> Decimal:
     """La tasa como número que un contador lee (`21.36`), no la fracción cruda que guarda la
     columna (`0.2136`). Es el único número de toda la tarifa donde equivocar la escala cambia el
