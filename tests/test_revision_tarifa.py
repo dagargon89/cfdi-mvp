@@ -128,20 +128,39 @@ def test_la_hoja_cita_el_documento_y_su_huella() -> None:
     assert ("a" * 64) in html
 
 
-def test_la_hoja_marca_los_renglones_corregidos_a_mano() -> None:
+def test_la_hoja_marca_los_renglones_editados_a_mano() -> None:
     """El aviso es **a nivel de tarifa, no por renglón**: `_escribir` (Task 4) reemplaza los
     renglones completos en cada corrección, así que no hay forma de saber cuál cambió de valor y
     cuál no. Marcar cada fila afirmaría que las tres cambiaron, que puede ser falso — por eso el
     aviso aparece una sola vez, no una por renglón (antes de este arreglo aparecía tres veces,
     una por fila de `_RENGLONES`)."""
     html = revision_tarifa.hoja_html(_tarifa_manual(), None)
-    assert "corregido a mano" in html.lower()
-    assert html.lower().count("corregido a mano") == 1
+    assert "editado a mano" in html.lower()
+    assert html.lower().count("editado a mano") == 1
 
 
-def test_la_hoja_no_dice_corregido_a_mano_si_la_tarifa_es_importada() -> None:
+def test_la_hoja_no_dice_editado_a_mano_si_la_tarifa_es_importada() -> None:
     html = revision_tarifa.hoja_html(_tarifa(), None)
-    assert "corregido a mano" not in html.lower()
+    assert "editado a mano" not in html.lower()
+
+
+def test_el_aviso_de_edicion_manual_no_afirma_que_algun_renglon_cambio() -> None:
+    """Guardar el modal de corrección sin tocar ningún valor también deja `origen: MANUAL`
+    (comportamiento correcto y deliberado). El sistema no conserva cuál renglón cambió y cuál
+    no, así que lo único que sabe de verdad es que hubo una edición manual — **no** que algún
+    renglón tenga hoy un valor distinto del documento. Este defecto se detectó comparando un PDF
+    real, renglón por renglón, contra el Anexo 8 oficial: los 11 renglones eran idénticos y el
+    aviso, aun así, decía que "uno o más ya no son los del documento" — una afirmación falsa en
+    un documento cuyo propósito es que el contador confíe en él sin poder mirar el sistema por
+    dentro. El texto correcto solo afirma el hecho conocido (edición manual) y plantea la
+    posibilidad de una diferencia, nunca la certeza."""
+    html = revision_tarifa.hoja_html(_tarifa_manual(), None).lower()
+    # Ninguna forma que afirme el hecho como consumado: "ya no son", "cambiaron", "ya no es".
+    assert "ya no son" not in html
+    assert "cambiaron" not in html
+    # El texto sí tiene que dejar la posibilidad abierta y decir qué hacer al respecto.
+    assert "puede que" in html
+    assert "compara la tabla completa" in html
 
 
 def test_la_hoja_muestra_la_fuente_y_la_fecha_de_importacion() -> None:

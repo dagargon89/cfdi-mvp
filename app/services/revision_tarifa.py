@@ -94,14 +94,24 @@ def _tabla_renglones(tarifa: TarifaGuardada) -> str:
     una corrección reemplaza los renglones **completos** aunque solo uno haya cambiado de valor,
     así que un distintivo por renglón afirmaría que los cinco cambiaron cuando pudo haber sido
     uno solo — información falsa en un documento cuyo propósito es que el contador confíe en él
-    sin entrar al sistema. El aviso, en cambio, es honesto sobre lo que sí se sabe (que *algo* en
-    esta tarifa no es el documento) y dice qué hacer (comparar la tabla completa).
+    sin entrar al sistema.
+
+    **El aviso a nivel de tarifa tiene el mismo límite y hay que redactarlo con el mismo
+    cuidado.** Guardar el modal de corrección sin tocar ningún valor también deja `origen:
+    MANUAL` (comportamiento correcto: guardar es una afirmación, y limpia la confirmación
+    anterior), así que "hubo una edición manual" no implica "algún renglón cambió de valor" — lo
+    único que el sistema sabe de verdad es que alguien abrió el modal y guardó, no qué guardó.
+    Un aviso que afirmara "uno o más renglones ya no son los del documento" sería falso en ese
+    caso, y esta hoja existe justo para que el contador confíe en lo que dice sin poder mirar el
+    sistema por dentro — una afirmación falsa aquí es peor que no decir nada. Por eso el texto
+    solo afirma el hecho conocido (que se editó a mano) y deja la posibilidad —no la certeza— de
+    que algo difiera, con la instrucción de qué hacer al respecto.
     """
     aviso = (
-        '<p class="aviso-manual"><strong>Origen: corregido a mano.</strong> Esta tarifa se '
-        "corrigió a mano después de importarla, así que uno o más de sus renglones ya no son "
-        "los del documento citado abajo — el sistema no conserva cuál renglón cambió y cuál no. "
-        "Compara la tabla completa contra el Anexo 8 antes de validarla.</p>"
+        '<p class="aviso-manual"><strong>Origen: editado a mano.</strong> Esta tarifa se editó '
+        "a mano después de importarla. El sistema no guarda qué se cambió, así que puede que "
+        "algún renglón ya no coincida con el documento citado arriba: compara la tabla completa "
+        "contra el Anexo 8 antes de validarla.</p>"
         if tarifa.origen is OrigenTarifa.MANUAL
         else ""
     )
