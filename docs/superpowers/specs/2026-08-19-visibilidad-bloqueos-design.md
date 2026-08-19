@@ -170,22 +170,29 @@ toma atómica es lo que vuelve seguro el margen de error.
 El tablero. Su etiqueta "Jobs activos · en proceso ahora" ya es honesta y excluye `NUEVO` a
 propósito. Con la recuperación no hay jobs muertos que reportar.
 
-### 4.5 Los cuatro jobs de hoy
+### 4.5 Los cuatro jobs de hoy (resuelto el 2026-08-19)
 
 **Decisión de David: marcarlos `ERROR` antes de desplegar**, para que la recuperación arranque con
-la casa limpia y no dispare cuatro solicitudes al SAT por una ventana de julio.
+la casa limpia y no dispare cuatro solicitudes al SAT por una ventana de julio. **Hecho** el
+2026-08-19: los jobs 16-19 pasaron `NUEVO → ERROR` (T2) por `jobs_repo.transicion`, con un mensaje
+que explica que nunca se enviaron al SAT.
 
-**Consecuencia no obvia, y su mitigación.** `ultima_ventana_sincronizada` **excluye** los jobs en
-`ERROR` (`jobs.py:75-95`). Al marcarlos:
+**La consecuencia que este diseño advertía no se materializó, y conviene dejar escrito por qué.**
+`ultima_ventana_sincronizada` excluye los jobs en `ERROR` (`jobs.py:75-95`), así que marcar el job
+17 dejaba a la combinación `emitido/METADATA` sin ningún job no-`ERROR`: `ultima` habría pasado a
+`None` y la sync siguiente habría arrancado en `ayer - 1 día`, dejando sin pedir la metadata de
+emitidos desde el 2026-07-28.
 
-- `emitido/CFDI`, `recibido/CFDI`, `recibido/METADATA` conservan jobs `DESCARGADO` con
-  `fecha_final = 2026-07-28`, así que la sync siguiente arranca ahí y cubre el hueco.
-- `emitido/METADATA` se queda **sin ningún job no-`ERROR`** (los jobs 9 y 13 ya están en `ERROR`).
-  `ultima` pasa a `None` y la sync arrancaría en `ayer - 1 día`, **dejando sin pedir la metadata de
-  emitidos del 2026-07-28 en adelante**.
+No ocurrió porque el orden de los hechos fue el contrario: David reactivó `auto_sync_diaria` a las
+15:37 y el `beat` de las 16:00 disparó la sync **antes** del marcado. La corrida pidió la ventana
+2026-07-29 → 2026-08-18 en las cuatro combinaciones (jobs 23-26), incluida `emitido/METADATA`, y
+trajo 75 comprobantes nuevos (426 en total). Con esos jobs en la base, cada combinación conserva su
+propia `fecha_final = 2026-08-18` y el marcado de los huérfanos ya no borra la única referencia de
+nadie. **No hace falta la descarga manual de reparación.**
 
-Mitigación: al reactivar la sync diaria, lanzar **una descarga manual** de `emitido/METADATA` para
-la ventana 2026-07-28 → ayer. Es una acción de la UI, no código.
+La lección que sí vale guardar: el riesgo era real y dependía del orden. Un marcado masivo a `ERROR`
+puede borrar la última referencia de sincronización de una combinación, y conviene comprobar por
+combinación —no en agregado— qué queda no-`ERROR` antes de marcar.
 
 ## 5. Pruebas
 
