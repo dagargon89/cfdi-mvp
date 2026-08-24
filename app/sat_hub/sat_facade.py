@@ -25,12 +25,14 @@ estatus. El ``Engine`` traduce las excepciones que surjan aquí a la jerarquía
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from .domain import Job, Tipo
-from .errors import SatRechazoError
+from .errors import SatRechazoError, SatReintentableError
 
 # --------------------------------------------------------------------------- #
 # EstadoSolicitud (espejo congelado de satcfdi.pacs.sat.EstadoSolicitud).
@@ -117,6 +119,36 @@ def parse_cfdi(xml: bytes) -> CamposCFDI:
     )
 
 
+@contextmanager
+def _traduce_fallos_de_red(operacion: str) -> Iterator[None]:
+    """Convierte cualquier fallo de transporte hacia el SAT en `SatReintentableError`.
+
+    Sin esta traducción, un hipo de red sale del facade como la excepción cruda de
+    ``requests`` (`ConnectionError`, `Timeout`, `SSLError`…), que **no** coincide con el
+    ``autoretry_for=(SatReintentableError,)`` de `app.worker.tasks.ejecutar_job`: la tarea muere
+    con una excepción no controlada y el job se queda **congelado en su estado, sin mensaje y
+    sin nadie que lo retome** — el mismo huérfano que hay que limpiar a mano después.
+
+    Visto en producción el 2026-08-20: el `worker` perdió la resolución de DNS y
+    `requests.exceptions.ConnectionError` ("Temporary failure in name resolution") escapó por
+    los sondeos de estatus. El backoff de Celery estaba escrito desde el principio, pero
+    ninguna ruta real levantaba la excepción que lo dispara: `SatReintentableError` solo
+    existía en los dobles de las pruebas.
+
+    Es deliberadamente ancho — se captura `RequestException`, la raíz de la jerarquía de
+    ``requests``. Un fallo de transporte nunca es información sobre la solicitud: no dice que
+    el SAT la rechazara ni que los datos estén mal, solo que no se pudo preguntar. Reintentar
+    es la única respuesta correcta, y el tope de reintentos del job (`max_reintentos`) es lo
+    que evita que un corte permanente sondee para siempre.
+    """
+    import requests  # import perezoso, igual que ``satcfdi``
+
+    try:
+        yield
+    except requests.RequestException as exc:
+        raise SatReintentableError(f"No se pudo {operacion}: la red hacia el SAT falló ({exc.__class__.__name__}).") from exc
+
+
 class SatFacade:
     """Envoltura delgada sobre ``satcfdi.pacs.sat.SAT``.
 
@@ -155,10 +187,11 @@ class SatFacade:
             # "cancelación tardía"), nunca volviendo a pedirlos en la descarga masiva.
             estado_comprobante=EstadoComprobante.VIGENTE,
         )
-        if job.tipo is Tipo.RECIBIDO:
-            resp = self._sat.recover_comprobante_received_request(rfc_receptor=self._rfc, **comun)
-        else:
-            resp = self._sat.recover_comprobante_emitted_request(rfc_emisor=self._rfc, **comun)
+        with _traduce_fallos_de_red("enviar la solicitud de descarga"):
+            if job.tipo is Tipo.RECIBIDO:
+                resp = self._sat.recover_comprobante_received_request(rfc_receptor=self._rfc, **comun)
+            else:
+                resp = self._sat.recover_comprobante_emitted_request(rfc_emisor=self._rfc, **comun)
 
         id_solicitud = resp.get("IdSolicitud")
         if not id_solicitud:
@@ -171,7 +204,8 @@ class SatFacade:
 
     def verificar(self, id_solicitud: str) -> ResultadoVerificacion:
         """Consulta el estatus de la solicitud (polling)."""
-        st = self._sat.recover_comprobante_status(id_solicitud)
+        with _traduce_fallos_de_red("consultar el estatus de la solicitud"):
+            st = self._sat.recover_comprobante_status(id_solicitud)
         return ResultadoVerificacion(
             estado_solicitud=int(st["EstadoSolicitud"]),
             ids_paquetes=list(st.get("IdsPaquetes", []) or []),
@@ -191,7 +225,8 @@ class SatFacade:
         (el motivo llega en ``meta`` como ``CodEstatus``/``Mensaje``); quien
         consume decide qué hacer con ese caso.
         """
-        meta, paquete_b64 = self._sat.recover_comprobante_download(id_paquete)
+        with _traduce_fallos_de_red("descargar el paquete"):
+            meta, paquete_b64 = self._sat.recover_comprobante_download(id_paquete)
         return meta, paquete_b64
 
     # ---- Validación de estatus (sin captcha · Fase 2) ------------------- #
