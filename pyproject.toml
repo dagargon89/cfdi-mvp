@@ -12,7 +12,11 @@ dependencies = [
     "celery>=5.4,<6",
     "redis>=5.1,<6",
     "firebase-admin>=6.5,<7",
-    "cryptography>=48,<49",
+    # Techo movido a <51 el 2026-08-20 por PYSEC-2026-3552/3553/3554 (oráculo de
+    # Bleichenbacher en PKCS#7, construcción exponencial de rutas, comodines DNS en
+    # `permittedSubtrees`), sin arreglo por debajo de 49. `pyopenssl` 26.4.0 exige
+    # `cryptography>=49,<51`, así que las dos suben juntas o ninguna.
+    "cryptography>=49,<51",
     "pyopenssl>=26,<27",
     "pydantic[email]>=2.9,<3",
     "pydantic-settings>=2.5,<3",
