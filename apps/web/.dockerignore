@@ -1,0 +1,7 @@
+# Los .env locales NO entran a la imagen: traen la configuración de desarrollo
+# (VITE_API_BASE_URL=http://localhost:8000) y podrían colarse en la build de producción.
+.env
+.env.*
+!.env.example
+node_modules/
+dist/

@@ -6,6 +6,7 @@ import { Link } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { ApiError } from '@/lib/api';
 import { api } from '@/lib/client';
+import { SeccionIncompleta } from '@/components/ui/SeccionIncompleta';
 import { getFirebaseAuth } from '@/lib/firebase';
 import { AuthLayout } from './AuthLayout';
 
@@ -64,6 +65,8 @@ export function RegistroPage() {
         <h1 className="m-0 text-[22px] font-bold tracking-tight">Crear cuenta</h1>
         <p className="m-0 text-[13px] text-text-muted">Solicita acceso a Hub CFDI.</p>
       </div>
+
+      <SeccionIncompleta id="registro" />
 
       {ok ? (
         <div className="flex flex-col gap-4">

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { api } from '@/lib/client';
+import { SeccionIncompleta } from '@/components/ui/SeccionIncompleta';
 import type { TipoEvento } from '@/lib/api';
 
 const EVENTOS_LABEL: Record<TipoEvento, string> = {
@@ -55,6 +56,7 @@ export function NotificacionesPage() {
 
   return (
     <div className="flex flex-col gap-4 max-w-[900px]">
+      <SeccionIncompleta id="notificaciones" />
       <div className="bg-surface border border-border rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-border"><h3 className="m-0 text-[15px] font-semibold">Destinos de notificación</h3></div>
         <table>

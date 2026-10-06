@@ -1,0 +1,23 @@
+# Contexto de construcción de la imagen del backend. El Dockerfile copia solo lo que necesita,
+# pero TODO lo que no se excluya aquí viaja al daemon de Docker en cada build. Sin este archivo,
+# eso incluía `secrets/` (la KEK y la cuenta de servicio de Firebase) y los `.env`.
+secrets/
+.env
+.env.*
+!.env.example
+!.env.production.example
+storage/
+respaldos/
+.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.git/
+apps/
+docs/
+Hub_CFDI_docs/
+tests/

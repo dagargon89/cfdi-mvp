@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { FileSpreadsheet } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/Button';
+import { MarcaIncompleta, SeccionIncompleta } from '@/components/ui/SeccionIncompleta';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { ApiError } from '@/lib/api';
@@ -157,6 +158,7 @@ export function InformesPage() {
                     style={{ background: informe.clave === claveSeleccionada ? 'var(--primary-soft)' : 'transparent' }}
                   >
                     <span className="text-[13px] font-semibold">{informe.nombre}</span>
+                    <MarcaIncompleta id={`informe-${informe.clave}`} />
                     <span className="text-xs text-text-muted text-pretty">{informe.descripcion}</span>
                   </button>
                 ))}
@@ -174,6 +176,8 @@ export function InformesPage() {
                 <h3 className="m-0 text-[15px] font-semibold">{informeSeleccionado.nombre}</h3>
                 <p className="m-0 mt-1 text-xs text-text-muted text-pretty">{informeSeleccionado.descripcion}</p>
               </div>
+
+              <SeccionIncompleta id={`informe-${informeSeleccionado.clave}`} />
 
               <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
                 {Object.entries(propiedades).map(([clave, prop]) => {

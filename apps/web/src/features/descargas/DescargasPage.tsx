@@ -5,6 +5,7 @@ import { useNavigate, useParams } from 'react-router';
 import { Button } from '@/components/ui/Button';
 import { EstadoChip } from '@/components/ui/EstadoChip';
 import { Paginador, type TamañoPagina } from '@/components/ui/Paginador';
+import { SeccionIncompleta } from '@/components/ui/SeccionIncompleta';
 import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
@@ -99,6 +100,8 @@ export function DescargasPage() {
               <input id="d-hasta" type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="h-9 border border-border rounded px-2" />
             </div>
           </div>
+
+          {solicitud === 'METADATA' && <SeccionIncompleta id="descargas-metadata" />}
 
           <div className="bg-surface-alt rounded-md p-3 flex flex-col gap-2">
             <span className="text-xs font-semibold text-text-muted">{previewTitulo}</span>

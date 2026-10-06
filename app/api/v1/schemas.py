@@ -70,6 +70,15 @@ class BootstrapStatusOut(BaseModel):
     needs_bootstrap: bool
 
 
+class ParametroOperativoOut(BaseModel):
+    """Forma de `ConfiguracionItem` del frontend (`apps/web/src/lib/api.ts`)."""
+
+    clave: str
+    ejercicio_fiscal: str
+    valor: str
+    descripcion: str
+
+
 class AutomatizacionesConfig(BaseModel):
     """Interruptores de las tareas automáticas (beat). True = activa (comportamiento por defecto)."""
 

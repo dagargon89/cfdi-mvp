@@ -4,6 +4,7 @@ import { AlertTriangle } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate } from 'react-router';
 import { Button } from '@/components/ui/Button';
+import { SeccionIncompleta } from '@/components/ui/SeccionIncompleta';
 import { useAuth } from '@/auth/AuthContext';
 import { AuthLayout } from './AuthLayout';
 
@@ -90,6 +91,9 @@ export function LoginPage() {
             ¿No tienes cuenta? <Link to="/registro" className="text-primary font-medium">Crear cuenta</Link>
           </p>
         </form>
+      )}
+      {firebaseConfigured && (
+        <SeccionIncompleta id="recuperar" />
       )}
     </AuthLayout>
   );

@@ -14,7 +14,11 @@ settings = get_settings()
 app = FastAPI(
     title="Hub CFDI API",
     version="0.1.0",
+    # En producción no se publica la descripción de la API: ni la página (`/docs`) ni el esquema
+    # (`/openapi.json`). Cerrar solo la página dejaba el esquema completo respondiendo 200 —cada
+    # endpoint, parámetro y modelo—, que es lo que de verdad le sirve a quien explora la API.
     docs_url="/docs" if settings.environment != "production" else None,
+    openapi_url="/openapi.json" if settings.environment != "production" else None,
     redoc_url=None,
 )
 

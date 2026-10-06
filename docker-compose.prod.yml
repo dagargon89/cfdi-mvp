@@ -1,0 +1,173 @@
+# Hub CFDI — producción en un solo servidor (VPS).
+#
+# Uso: siempre a través de `deploy/hub.sh`, que pasa el archivo de variables correcto:
+#     deploy/hub.sh up -d --build
+#
+# Diferencias con docker-compose.yml (desarrollo), todas deliberadas:
+# - MySQL y Redis NO publican puertos: solo se alcanzan por la red interna de Docker (runbook A.2).
+#   Lo único expuesto es el proxy `web` en 80/443.
+# - El código va dentro de la imagen; no hay volúmenes de `./app` ni `--reload`.
+# - Las migraciones las corre un servicio de un solo uso (`migrate`) con el usuario administrador,
+#   y después deja al usuario de la aplicación con privilegios mínimos (runbook A.4).
+# - La contraseña de root de MySQL solo la reciben `mysql` y `migrate`. Los contenedores de la
+#   aplicación se conectan con `hub_cfdi_app` y nunca ven la de root.
+# - `${VAR:?…}` hace que compose se niegue a arrancar si falta una variable obligatoria, en vez de
+#   levantar algo a medias.
+
+name: hub-cfdi
+
+x-app-env: &app-env
+  ENVIRONMENT: production
+  DATABASE_URL: mysql+asyncmy://hub_cfdi_app:${MYSQL_APP_PASSWORD:?falta MYSQL_APP_PASSWORD}@mysql:3306/hub_cfdi
+  REDIS_URL: redis://redis:6379/0
+  KEK_PATH: /srv/secrets/kek.bin
+  GOOGLE_APPLICATION_CREDENTIALS: /srv/secrets/firebase-service-account.json
+  FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?falta FIREBASE_PROJECT_ID}
+  STORAGE_ROOT: /srv/storage
+  SIGNING_SECRET: ${SIGNING_SECRET:?falta SIGNING_SECRET}
+  PUBLIC_BASE_URL: https://${DOMAIN:?falta DOMAIN}
+  CORS_ORIGINS: https://${DOMAIN}
+  BANXICO_TOKEN: ${BANXICO_TOKEN:-}
+  BOOTSTRAP_ADMIN_TOKEN: ${BOOTSTRAP_ADMIN_TOKEN:-}
+
+x-app-volumes: &app-volumes
+  - ${HUB_SECRETS_DIR:-./secrets}:/srv/secrets:ro
+  - storage_data:/srv/storage
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: hub_cfdi
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?falta MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # Por TCP y no por socket, a propósito. En una base nueva la imagen arranca primero un
+      # servidor TEMPORAL sin red para inicializarla y luego lo reinicia; un ping por socket
+      # (`-h localhost`) lo daba por sano y `migrate` se estrellaba contra un puerto cerrado.
+      # Pasó en el ensayo del 2026-10-06: habría tumbado el primer despliegue en el VPS.
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 --protocol=tcp -uroot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # `appendonly`: la cola de Celery sobrevive a un reinicio de Redis. Sin persistencia, reiniciar
+    # el servidor a media sincronización deja jobs en NUEVO que nadie retoma (pasó el 2026-07-30).
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  migrate:
+    build: .
+    restart: "no"
+    command: sh -c "alembic upgrade head && python -m app.scripts.privilegios_mysql"
+    environment:
+      <<: *app-env
+      DATABASE_URL: mysql+asyncmy://root:${MYSQL_ROOT_PASSWORD}@mysql:3306/hub_cfdi
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    logging: *logging
+
+  api:
+    build: .
+    restart: unless-stopped
+    # `--forwarded-allow-ips`: la API solo es alcanzable desde la red interna (detrás de `web`),
+    # así que es seguro confiar en las cabeceras X-Forwarded-* que pone el proxy.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2 --proxy-headers --forwarded-allow-ips=*
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  worker:
+    build: .
+    restart: unless-stopped
+    # El worker NO recarga código: tras desplegar una tarea nueva hay que reiniciarlo
+    # (`deploy/hub.sh up -d --build` ya lo recrea).
+    command: celery -A app.worker.celery_app worker -l info --concurrency=4 --prefetch-multiplier=1
+    environment: *app-env
+    volumes: *app-volumes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    logging: *logging
+
+  beat:
+    build: .
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app beat -l info --schedule /tmp/celerybeat-schedule
+    # Sin volúmenes a propósito: beat solo programa tareas, no lee la KEK ni escribe archivos.
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    logging: *logging
+
+  web:
+    build:
+      context: ./apps/web
+      args:
+        VITE_API_BASE_URL: https://${DOMAIN}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:?falta VITE_FIREBASE_API_KEY}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:?falta VITE_FIREBASE_AUTH_DOMAIN}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:?falta VITE_FIREBASE_PROJECT_ID}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:?falta VITE_FIREBASE_APP_ID}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET:-}
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?falta ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *logging
+
+volumes:
+  mysql_data:
+  redis_data:
+  storage_data:
+  caddy_data:
+  caddy_config:

@@ -4,7 +4,7 @@
 // `configuracion` (P11) no tiene endpoint real todavía — lib/client.ts combina este objeto
 // con api.mock.ts para ese método, no lo uses solo.
 import { ApiError } from './api';
-import type { ApiClient, Automatizaciones, BitacoraEntrada, CatalogoPercepciones, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionFiscal, EmpresaResumen, Evento, ImportacionTarifas, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, TarifaIsr, UsuarioAdmin } from './api';
+import type { ApiClient, Automatizaciones, BitacoraEntrada, CatalogoPercepciones, Comprobante, ConfigSmtp, ConfiguracionEmpresa, ConfiguracionItem, ConfiguracionFiscal, EmpresaResumen, Evento, ImportacionTarifas, InformeCatalogo, Job, MapeosEmpresa, MarcaPercepcion, MetadataPreview, ObservadosEmpresa, Page, ParametroFiscal, TarifaIsr, UsuarioAdmin } from './api';
 import { getIdToken } from './firebase';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL;
@@ -83,67 +83,7 @@ async function requestBlob(path: string, init: RequestInit = {}): Promise<Blob> 
   return res.blob();
 }
 
-type ApiClientHttpSubset = Pick<
-  ApiClient,
-  | 'me'
-  | 'estadoBootstrap'
-  | 'crearAdminBootstrap'
-  | 'listarEmpresas'
-  | 'crearEmpresa'
-  | 'actualizarEmpresa'
-  | 'eliminarEmpresa'
-  | 'subirEfirma'
-  | 'obtenerEfirma'
-  | 'eliminarEfirma'
-  | 'crearDescarga'
-  | 'listarJobs'
-  | 'reintentarJob'
-  | 'listarComprobantes'
-  | 'validarLote'
-  | 'exportarExcel'
-  | 'estadoTarea'
-  | 'descargarComprobantePdf'
-  | 'descargarComprobanteDetalle'
-  | 'descargarComprobanteZip'
-  | 'descargarLoteZip'
-  | 'obtenerMetadata'
-  | 'descargarMetadataCsv'
-  | 'listarInformes'
-  | 'generarInforme'
-  | 'listarUsuarios'
-  | 'registrarUsuario'
-  | 'actualizarUsuario'
-  | 'guardarPermisos'
-  | 'eliminarUsuario'
-  | 'listarBitacora'
-  | 'listarEventos'
-  | 'obtenerNotificaciones'
-  | 'guardarNotificaciones'
-  | 'obtenerAutomatizaciones'
-  | 'guardarAutomatizaciones'
-  | 'obtenerConfigSmtp'
-  | 'guardarConfigSmtp'
-  | 'probarConfigSmtp'
-  | 'listarConfiguracionFiscal'
-  | 'capturarParametroFiscal'
-  | 'confirmarParametroFiscal'
-  | 'listarMarcasPercepcion'
-  | 'guardarMarcaPercepcion'
-  | 'confirmarMarcaPercepcion'
-  | 'obtenerConfiguracionEmpresa'
-  | 'guardarConfiguracionEmpresa'
-  | 'obtenerMapeosEmpresa'
-  | 'guardarMapeosEmpresa'
-  | 'obtenerConceptosObservados'
-  | 'listarTarifasIsr'
-  | 'importarTarifaIsr'
-  | 'corregirTarifaIsr'
-  | 'confirmarTarifaIsr'
-  | 'descartarTarifaIsr'
-  | 'descargarHojaDeRevisionTarifa'
->;
-
-export const apiHttp: ApiClientHttpSubset = {
+export const apiHttp: ApiClient = {
   me: () => request('/v1/me'),
 
   estadoBootstrap: () => request<{ needs_bootstrap: boolean }>(`/v1/auth/bootstrap-status`),
@@ -266,6 +206,7 @@ export const apiHttp: ApiClientHttpSubset = {
   guardarNotificaciones: (empresaId, destinos) =>
     request(`/v1/empresas/${empresaId}/notificaciones`, { method: 'PUT', body: JSON.stringify({ destinos }) }),
 
+  listarConfiguracion: () => request<ConfiguracionItem[]>('/v1/config/parametros'),
   obtenerAutomatizaciones: () => request<Automatizaciones>('/v1/config/automatizaciones'),
   guardarAutomatizaciones: (input) => request<Automatizaciones>('/v1/config/automatizaciones', { method: 'PUT', body: JSON.stringify(input) }),
   obtenerConfigSmtp: () => request<ConfigSmtp>('/v1/config/smtp'),

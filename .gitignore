@@ -12,8 +12,14 @@ htmlcov/
 .env
 .env.local
 *.env.local
+# Producción: contraseñas de MySQL, secreto de firma, token de arranque. La plantilla
+# (.env.production.example) sí se versiona; el archivo real, jamás.
+.env.production
+.env.*.local
 secrets/
 storage/
+# Respaldos cifrados de producción (deploy/respaldar.sh). Cifrados o no, no van al repositorio.
+respaldos/
 
 # Alembic no debe versionar bases de datos SQLite sueltas si alguna vez se usan localmente
 *.sqlite3
