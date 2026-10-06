@@ -28,7 +28,7 @@ def _sin_worker_real(monkeypatch: pytest.MonkeyPatch) -> None:
     tarea = _TareaFalsa()
     monkeypatch.setattr(comprobantes_router, "validar_lote", tarea)
     monkeypatch.setattr(comprobantes_router, "exportar_excel", tarea)
-    monkeypatch.setattr(comprobantes_router, "descargar_zip_lote", tarea)
+    monkeypatch.setattr(comprobantes_router, "encolar_zip_lote", lambda empresa_id, ids: tarea.id)
 
 
 async def test_listar_comprobantes_con_filtros(client: AsyncClient, db: AsyncSession) -> None:

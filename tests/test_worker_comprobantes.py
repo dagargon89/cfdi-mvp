@@ -189,6 +189,80 @@ async def test_descargar_zip_lote_omite_comprobante_sin_xml(db: AsyncSession) ->
     assert resultado["incluidos"] == 1  # el que no tiene XML se omite, no aborta el lote
 
 
+async def test_el_pdf_se_genera_una_sola_vez_y_se_reusa_de_disco(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import representaciones
+
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    ruta = _escribir_xml_valido(empresa.empresa_id, "EEEE5555-5555-5555-5555-555555555555", "cinco.xml")
+    c = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="EEEE5555-5555-5555-5555-555555555555", xml_path=ruta)
+    storage_root = get_settings().storage_root
+    xml_bytes = representaciones.leer_xml_de_disco(storage_root, c)
+    assert xml_bytes is not None
+
+    llamadas = 0
+    original = representaciones.generar_pdf
+
+    def contar(xml: bytes) -> bytes:
+        nonlocal llamadas
+        llamadas += 1
+        return original(xml)
+
+    monkeypatch.setattr(representaciones, "generar_pdf", contar)
+    # Otra prueba pudo dejar este mismo uuid en la caché (el storage de pruebas es compartido).
+    ruta_cache = os.path.join(storage_root, str(c.empresa_id), "pdf", f"{c.uuid}.pdf")
+    if os.path.exists(ruta_cache):
+        os.remove(ruta_cache)
+
+    primero = representaciones.obtener_pdf(storage_root, c, xml_bytes)
+    segundo = representaciones.obtener_pdf(storage_root, c, xml_bytes)
+
+    assert primero.startswith(b"%PDF") and segundo == primero
+    assert llamadas == 1
+    assert representaciones.pdf_en_cache(storage_root, c)
+
+
+async def test_generar_pdfs_lote_llena_la_cache_y_reporta_avance(db: AsyncSession, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import representaciones
+
+    avance: list[int] = []
+    monkeypatch.setattr(worker_tasks, "_avanzar_progreso", lambda tarea_id, cuantos=1: avance.append(cuantos))
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    ruta = _escribir_xml_valido(empresa.empresa_id, "FFFF6666-6666-6666-6666-666666666666", "seis.xml")
+    c = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="FFFF6666-6666-6666-6666-666666666666", xml_path=ruta)
+    sin_xml = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="ABAB7777-7777-7777-7777-777777777777", xml_path=None)
+    ruta_cache = os.path.join(get_settings().storage_root, str(c.empresa_id), "pdf", f"{c.uuid}.pdf")
+    if os.path.exists(ruta_cache):
+        os.remove(ruta_cache)
+
+    # 999999: id que no existe — también cuenta como atendido para que el avance llegue al total.
+    await worker_tasks._generar_pdfs_async(empresa.empresa_id, [c.comprobante_id, sin_xml.comprobante_id, 999999], "tarea-x")
+
+    assert representaciones.pdf_en_cache(get_settings().storage_root, c)
+    assert sum(avance) == 3
+
+
+async def test_encolar_zip_lote_reparte_los_pdf_en_lotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    import celery
+
+    capturado: dict[str, object] = {}
+
+    def chord_falso(header: object) -> object:
+        capturado["lotes"] = [firma.args[1] for firma in header]  # type: ignore[attr-defined]
+        return lambda final: capturado.setdefault("final", final)
+
+    monkeypatch.setattr(celery, "chord", chord_falso)
+    monkeypatch.setattr(worker_tasks, "_iniciar_progreso", lambda tarea_id, total: capturado.setdefault("total", total))
+    ids = list(range(1, 24))
+
+    tarea_id = worker_tasks.encolar_zip_lote(7, ids)
+
+    assert capturado["total"] == 23
+    assert capturado["lotes"] == [ids[0:10], ids[10:20], ids[20:23]]
+    final = capturado["final"]
+    assert final.options["task_id"] == tarea_id  # type: ignore[attr-defined]
+    assert final.args == (7, ids)  # type: ignore[attr-defined]
+
+
 # --------------------------------------------------------------------------- #
 # Cancelación tardía (RF-RIES-01) — enganchada dentro de `_validar_lote_async`: solo
 # cuando la transición real es vigente→cancelado (no la primera verificación de un CFDI).

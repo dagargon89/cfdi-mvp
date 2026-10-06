@@ -19,7 +19,7 @@ from app.repositories import comprobantes as comprobantes_repo
 from app.repositories import empresas as empresas_repo
 from app.services import bitacora as bitacora_service
 from app.services import representaciones
-from app.worker.tasks import descargar_zip_lote, exportar_excel, validar_lote
+from app.worker.tasks import encolar_zip_lote, exportar_excel, validar_lote
 
 router = APIRouter(prefix="/empresas/{empresa_id}/comprobantes", tags=["comprobantes"])
 
@@ -136,7 +136,7 @@ async def descargar_pdf_endpoint(
 ) -> Response:
     comprobante = await _comprobante_o_404(db, empresa_id, comprobante_id)
     xml_bytes = _leer_xml(comprobante)
-    pdf = representaciones.generar_pdf(xml_bytes)
+    pdf = representaciones.obtener_pdf(get_settings().storage_root, comprobante, xml_bytes)
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{comprobante.uuid}.pdf"'})
 
 
@@ -162,7 +162,7 @@ async def descargar_paquete_endpoint(
 ) -> Response:
     comprobante = await _comprobante_o_404(db, empresa_id, comprobante_id)
     xml_bytes = _leer_xml(comprobante)
-    paquete = representaciones.generar_paquete_zip(comprobante, xml_bytes)
+    paquete = representaciones.generar_paquete_zip(comprobante, xml_bytes, get_settings().storage_root)
     return Response(paquete, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{comprobante.uuid}.zip"'})
 
 
@@ -180,5 +180,4 @@ async def descargar_zip_lote_endpoint(
     )
     await db.commit()
 
-    tarea = descargar_zip_lote.delay(empresa_id, body.comprobante_ids)
-    return TareaCrearOut(tarea_id=tarea.id)
+    return TareaCrearOut(tarea_id=encolar_zip_lote(empresa_id, body.comprobante_ids))

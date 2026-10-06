@@ -589,7 +589,7 @@ export interface ApiClient {
   ): Promise<Page<Comprobante>>;
   validarLote(empresaId: number, alcance: 'no_verificados' | 'todos' | { uuids: string[] }): Promise<{ tarea_id: string }>;
   exportarExcel(empresaId: number, f?: Record<string, string>): Promise<{ tarea_id: string }>;
-  estadoTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string }>;
+  estadoTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string; progreso?: { hechos: number; total: number } | null }>;
   /** Añadidos tras el freeze (2026-07-28) — RF-RES-03/D2: además del XML, el PDF (representación
    * impresa) y el "Detalle del CFDI" (constancia de validación) también deben poder descargarse,
    * individuales, juntos en un `.zip` por comprobante, o por lote desde la tabla. */

@@ -2,14 +2,17 @@
 (constancia de validación tipo la del portal del SAT), además del XML ya cubierto por
 `app/services/resguardo.py`.
 
-Todo se genera al vuelo a partir del XML ya guardado (`comprobante.xml_path`) — nada se
-pre-genera ni se cachea en disco: el "Detalle" en particular depende del `estatus` más
-reciente (RF-VAL), así que generarlo de nuevo cada vez es lo correcto, no un desperdicio.
+Todo sale del XML ya guardado (`comprobante.xml_path`). El "Detalle" se genera al vuelo
+cada vez: depende del `estatus` más reciente (RF-VAL). El PDF, en cambio, sale **solo** del
+XML (que es inmutable) y generarlo cuesta ~4 s por comprobante (`satcfdi.render` sobre
+WeasyPrint), así que se guarda en disco la primera vez (`obtener_pdf`) — un .zip de cien
+comprobantes pasaba ~8 min regenerando PDFs idénticos en cada descarga.
 """
 
 from __future__ import annotations
 
 import io
+import logging
 import os
 import zipfile
 from datetime import datetime
@@ -18,6 +21,8 @@ from typing import Any
 
 from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
+
+logger = logging.getLogger(__name__)
 
 _EFECTO_TEXTO = {
     "I": "Ingreso",
@@ -54,6 +59,39 @@ def generar_pdf(xml_bytes: bytes) -> bytes:
 
     resultado: bytes = pdf_bytes(CFDI.from_string(xml_bytes))
     return resultado
+
+
+def _ruta_pdf_en_cache(storage_root: str, comprobante: Comprobante) -> str:
+    return os.path.join(storage_root, str(comprobante.empresa_id), "pdf", f"{comprobante.uuid}.pdf")
+
+
+def pdf_en_cache(storage_root: str, comprobante: Comprobante) -> bool:
+    return os.path.isfile(_ruta_pdf_en_cache(storage_root, comprobante))
+
+
+def obtener_pdf(storage_root: str, comprobante: Comprobante, xml_bytes: bytes) -> bytes:
+    """PDF del comprobante: del disco si ya se generó antes; si no, se genera y se guarda.
+
+    Si no se puede guardar (disco lleno, permisos), se devuelve igual — la caché es una
+    optimización, nunca un motivo para que falle una descarga.
+    """
+    ruta = _ruta_pdf_en_cache(storage_root, comprobante)
+    try:
+        with open(ruta, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        pass
+    pdf = generar_pdf(xml_bytes)
+    try:
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        # Temporal + rename: dos procesos generando el mismo PDF a la vez nunca dejan uno a medias.
+        temporal = f"{ruta}.{os.getpid()}.part"
+        with open(temporal, "wb") as f:
+            f.write(pdf)
+        os.replace(temporal, ruta)
+    except OSError as exc:
+        logger.warning("No se pudo guardar en caché el PDF de %s: %s", comprobante.uuid, exc)
+    return pdf
 
 
 def _moneda_fmt(valor: Any) -> str:
@@ -138,11 +176,13 @@ def generar_detalle(xml_bytes: bytes, estatus: EstatusCfdi) -> bytes:
     return pdf_bytes_result
 
 
-def generar_paquete_zip(comprobante: Comprobante, xml_bytes: bytes) -> bytes:
-    """`.zip` en memoria con XML + PDF + Detalle de un solo comprobante."""
+def generar_paquete_zip(comprobante: Comprobante, xml_bytes: bytes, storage_root: str | None = None) -> bytes:
+    """`.zip` en memoria con XML + PDF + Detalle de un solo comprobante. Con `storage_root`,
+    el PDF sale de la caché en disco (`obtener_pdf`)."""
+    pdf = obtener_pdf(storage_root, comprobante, xml_bytes) if storage_root else generar_pdf(xml_bytes)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{comprobante.uuid}.xml", xml_bytes)
-        zf.writestr(f"{comprobante.uuid}.pdf", generar_pdf(xml_bytes))
+        zf.writestr(f"{comprobante.uuid}.pdf", pdf)
         zf.writestr(f"{comprobante.uuid}_detalle.pdf", generar_detalle(xml_bytes, comprobante.estatus))
     return buffer.getvalue()

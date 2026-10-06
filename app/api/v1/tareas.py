@@ -13,10 +13,11 @@ import os
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
 
-from app.api.v1.schemas import TareaEstadoOut
+from app.api.v1.schemas import ProgresoTareaOut, TareaEstadoOut
 from app.core.config import get_settings
 from app.services import enlaces
 from app.worker.celery_app import celery_app
+from app.worker.tasks import leer_progreso
 
 router = APIRouter(tags=["tareas"])
 
@@ -27,7 +28,9 @@ async def estado_tarea_endpoint(tarea_id: str) -> TareaEstadoOut:
 
     resultado = AsyncResult(tarea_id, app=celery_app)
     if resultado.state in ("PENDING", "STARTED", "RETRY"):
-        return TareaEstadoOut(estado="pendiente")
+        avance = leer_progreso(tarea_id)
+        progreso = ProgresoTareaOut(hechos=avance[0], total=avance[1]) if avance else None
+        return TareaEstadoOut(estado="pendiente", progreso=progreso)
     if resultado.state == "FAILURE":
         return TareaEstadoOut(estado="fallida")
 

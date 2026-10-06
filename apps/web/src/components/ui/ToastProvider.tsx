@@ -4,7 +4,8 @@ import { AlertCircle, CheckCircle2, RefreshCw, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
 
 type Tipo = 'ok' | 'info' | 'error';
-interface ToastItem { id: string; texto: string; tipo: Tipo }
+interface Accion { etiqueta: string; onClick: () => void }
+interface ToastItem { id: string; texto: string; tipo: Tipo; accion?: Accion }
 
 const TIPO_ESTILO: Record<Tipo, { fg: string; Icon: typeof CheckCircle2; anim: string }> = {
   ok: { fg: 'text-success', Icon: CheckCircle2, anim: '' },
@@ -13,7 +14,8 @@ const TIPO_ESTILO: Record<Tipo, { fg: string; Icon: typeof CheckCircle2; anim: s
 };
 
 interface ToastApi {
-  toast: (texto: string, tipo?: Tipo) => void;
+  /** Con `accion`, el aviso no se auto-descarta: espera el clic (o que lo cierren). */
+  toast: (texto: string, tipo?: Tipo, accion?: Accion) => void;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -25,10 +27,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const cerrar = useCallback((id: string) => setItems((s) => s.filter((t) => t.id !== id)), []);
 
   const toast = useCallback(
-    (texto: string, tipo: Tipo = 'ok') => {
+    (texto: string, tipo: Tipo = 'ok', accion?: Accion) => {
       const id = String(counter.current++);
-      setItems((s) => [...s, { id, texto, tipo }]);
-      if (tipo !== 'error') setTimeout(() => cerrar(id), 4000);
+      setItems((s) => [...s, { id, texto, tipo, accion }]);
+      if (tipo !== 'error' && !accion) setTimeout(() => cerrar(id), 4000);
     },
     [cerrar],
   );
@@ -48,6 +50,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             >
               <Icon className={`size-4 shrink-0 ${fg} ${anim}`} aria-hidden />
               <span className="flex-1 text-sm text-pretty">{t.texto}</span>
+              {t.accion && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    t.accion?.onClick();
+                    cerrar(t.id);
+                  }}
+                  className="border border-border bg-surface-alt cursor-pointer rounded-md px-2.5 py-1 text-sm font-medium hover:bg-border"
+                >
+                  {t.accion.etiqueta}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => cerrar(t.id)}

@@ -538,6 +538,94 @@ def exportar_excel(empresa_id: int, filtros: dict[str, Any]) -> dict[str, Any]:
 _TIPO_TEXTO = {"I": "Ingreso", "E": "Egreso", "N": "Nómina", "P": "Pago", "T": "Traslado"}
 
 
+# Los PDF (lo caro: ~4 s c/u) se generan antes, en paralelo, repartidos en tareas de
+# `_TAMANO_LOTE_PDF` comprobantes que toman los slots libres del worker (concurrency=4,
+# prefetch=1). Un chord las espera y al final `descargar_zip_lote` solo empaqueta, leyendo
+# los PDF de la caché en disco. No se usa un pool de procesos dentro de la tarea: los hijos
+# del prefork de Celery son daemon y no pueden tener hijos propios.
+_TAMANO_LOTE_PDF = 10
+_PROGRESO_TTL_SEG = 2 * 3600
+
+
+def _clave_progreso(tarea_id: str) -> str:
+    return f"hub_cfdi:progreso:{tarea_id}"
+
+
+def _redis() -> Any:
+    return celery_app.backend.client
+
+
+def _iniciar_progreso(tarea_id: str, total: int) -> None:
+    try:
+        clave = _clave_progreso(tarea_id)
+        _redis().hset(clave, mapping={"hechos": 0, "total": total})
+        _redis().expire(clave, _PROGRESO_TTL_SEG)
+    except Exception:  # noqa: BLE001 — el avance es informativo; nunca debe tumbar la descarga
+        logger.warning("No se pudo registrar el avance de la tarea %s.", tarea_id, exc_info=True)
+
+
+def _avanzar_progreso(tarea_id: str | None, cuantos: int = 1) -> None:
+    if not tarea_id or cuantos <= 0:
+        return
+    try:
+        _redis().hincrby(_clave_progreso(tarea_id), "hechos", cuantos)
+    except Exception:  # noqa: BLE001
+        logger.warning("No se pudo actualizar el avance de la tarea %s.", tarea_id, exc_info=True)
+
+
+def leer_progreso(tarea_id: str) -> tuple[int, int] | None:
+    """`(hechos, total)` de una tarea con avance registrado; `None` si no tiene."""
+    try:
+        valores = _redis().hgetall(_clave_progreso(tarea_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if not valores:
+        return None
+    datos = {k.decode() if isinstance(k, bytes) else k: int(v) for k, v in valores.items()}
+    return min(datos.get("hechos", 0), datos.get("total", 0)), datos.get("total", 0)
+
+
+async def _generar_pdfs_async(empresa_id: int, comprobante_ids: list[int], tarea_id: str | None) -> int:
+    storage_root = get_settings().storage_root
+    async with SessionLocal() as db:
+        comprobantes = await comprobantes_repo.por_ids(db, empresa_id, comprobante_ids)
+    generados = 0
+    for c in comprobantes:
+        try:
+            if not representaciones.pdf_en_cache(storage_root, c):
+                xml_bytes = representaciones.leer_xml_de_disco(storage_root, c)
+                if xml_bytes is not None:
+                    representaciones.obtener_pdf(storage_root, c, xml_bytes)
+                    generados += 1
+        except Exception:  # noqa: BLE001 — `descargar_zip_lote` lo vuelve a intentar al empaquetar
+            logger.exception("generar_pdfs_lote: fallo generando el PDF del comprobante %s.", c.comprobante_id)
+        _avanzar_progreso(tarea_id)
+    # Ids que no son de la empresa (o ya no existen) también cuentan como "atendidos".
+    _avanzar_progreso(tarea_id, len(comprobante_ids) - len(comprobantes))
+    return generados
+
+
+@celery_app.task(name="app.worker.tasks.generar_pdfs_lote")  # type: ignore[untyped-decorator]
+def generar_pdfs_lote(empresa_id: int, comprobante_ids: list[int], tarea_id: str | None = None) -> int:
+    return asyncio.run(_generar_pdfs_async(empresa_id, comprobante_ids, tarea_id))
+
+
+def encolar_zip_lote(empresa_id: int, comprobante_ids: list[int]) -> str:
+    """Encola la descarga por lote y devuelve el `tarea_id` que consulta la interfaz — el de
+    la tarea final del chord (`descargar_zip_lote`), que es la que trae la `ruta` del .zip."""
+    from celery import chord
+
+    tarea_id = str(uuid.uuid4())
+    _iniciar_progreso(tarea_id, len(comprobante_ids))
+    final = descargar_zip_lote.si(empresa_id, comprobante_ids).set(task_id=tarea_id)
+    lotes = [comprobante_ids[i : i + _TAMANO_LOTE_PDF] for i in range(0, len(comprobante_ids), _TAMANO_LOTE_PDF)]
+    if not lotes:
+        final.apply_async()
+    else:
+        chord(generar_pdfs_lote.si(empresa_id, lote, tarea_id) for lote in lotes)(final)
+    return tarea_id
+
+
 async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int]) -> dict[str, Any]:
     storage_root = get_settings().storage_root
     incluidos = 0
@@ -558,7 +646,7 @@ async def _descargar_zip_lote_async(empresa_id: int, comprobante_ids: list[int])
                 tipo = _TIPO_TEXTO.get(c.tipo_comprobante or "", "Otro")
                 carpeta = f"{direccion}/{periodo}/{tipo}"
                 zf.writestr(f"{carpeta}/{c.uuid}.xml", xml_bytes)
-                zf.writestr(f"{carpeta}/{c.uuid}.pdf", representaciones.generar_pdf(xml_bytes))
+                zf.writestr(f"{carpeta}/{c.uuid}.pdf", representaciones.obtener_pdf(storage_root, c, xml_bytes))
                 zf.writestr(f"{carpeta}/{c.uuid}_detalle.pdf", representaciones.generar_detalle(xml_bytes, c.estatus))
                 incluidos += 1
 

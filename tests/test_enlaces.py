@@ -121,3 +121,20 @@ async def test_estado_tarea_fallida(client: AsyncClient, monkeypatch: pytest.Mon
     r = await client.get("/v1/tareas/tarea-fallida")
     assert r.status_code == 200
     assert r.json()["estado"] == "fallida"
+
+
+async def test_estado_tarea_pendiente_incluye_el_avance(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ResultadoFalso:
+        state = "PENDING"
+        result = None
+
+    import celery.result
+
+    from app.api.v1 import tareas as tareas_router
+
+    monkeypatch.setattr(celery.result, "AsyncResult", lambda *a, **k: _ResultadoFalso())
+    monkeypatch.setattr(tareas_router, "leer_progreso", lambda tarea_id: (45, 111))
+
+    r = await client.get("/v1/tareas/tarea-con-avance")
+    assert r.status_code == 200
+    assert r.json() == {"estado": "pendiente", "descarga_url": None, "progreso": {"hechos": 45, "total": 111}}

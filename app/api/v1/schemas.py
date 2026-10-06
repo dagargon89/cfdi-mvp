@@ -231,9 +231,16 @@ class TareaCrearOut(BaseModel):
     tarea_id: str
 
 
+class ProgresoTareaOut(BaseModel):
+    hechos: int
+    total: int
+
+
 class TareaEstadoOut(BaseModel):
     estado: Literal["pendiente", "completada", "fallida"]
     descarga_url: str | None = None
+    # Solo las tareas que registran avance (hoy: descarga .zip por lote).
+    progreso: ProgresoTareaOut | None = None
 
 
 class EventoOut(BaseModel):

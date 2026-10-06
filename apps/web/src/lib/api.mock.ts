@@ -347,7 +347,7 @@ let nextJobId = 45;
 let nextEfirmaId = 90;
 let nextDestinoId = 100;
 let nextBitacoraId = 9003;
-const tareas = new Map<string, { estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string }>();
+const tareas = new Map<string, { estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string; progreso?: { hechos: number; total: number } }>();
 
 /** Emite 'job-completed' cuando avanzarJob() llega a DESCARGADO — ver src/hooks/useJobCompletedToast.ts. */
 export const mockEvents = new EventTarget();
@@ -1197,10 +1197,12 @@ export const apiMock: ApiClient = {
     return new Blob(['PK (mock zip)'], { type: 'application/zip' });
   },
 
-  async descargarLoteZip(empresaId) {
+  async descargarLoteZip(empresaId, comprobanteIds) {
     requireRol(empresaId, 'consulta');
     const tarea_id = crypto.randomUUID();
-    tareas.set(tarea_id, { estado: 'pendiente' });
+    const total = comprobanteIds.length;
+    tareas.set(tarea_id, { estado: 'pendiente', progreso: { hechos: 0, total } });
+    setTimeout(() => tareas.set(tarea_id, { estado: 'pendiente', progreso: { hechos: Math.ceil(total / 2), total } }), 600);
     setTimeout(() => tareas.set(tarea_id, { estado: 'completada', descarga_url: `/mock-descargas/lote_empresa${empresaId}.zip` }), 1200);
     return { tarea_id };
   },

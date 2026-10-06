@@ -33,6 +33,7 @@ export function ComprobantesPage() {
   const [validando, setValidando] = useState(false);
   const [seleccionados, setSeleccionados] = useState<Set<number>>(new Set());
   const [descargandoLote, setDescargandoLote] = useState(false);
+  const [progresoLote, setProgresoLote] = useState<{ hechos: number; total: number } | null>(null);
 
   // Volver a la página 1 cuando cambia cualquier filtro — evita quedar en una página vacía.
   useEffect(() => setPagina(1), [q, estatus, tipo, desde, direccion]);
@@ -63,14 +64,18 @@ export function ComprobantesPage() {
     setQ(''); setEstatus(''); setTipo(''); setDesde(''); setDireccion('');
   }
 
-  async function esperarTarea(tareaId: string) {
+  async function esperarTarea(
+    tareaId: string,
+    { intervaloMs = 300, onProgreso }: { intervaloMs?: number; onProgreso?: (p: { hechos: number; total: number }) => void } = {},
+  ) {
     let estado: 'pendiente' | 'completada' | 'fallida' = 'pendiente';
     let url: string | undefined;
     while (estado === 'pendiente') {
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, intervaloMs));
       const t = await api.estadoTarea(tareaId);
       estado = t.estado;
       url = t.descarga_url;
+      if (t.progreso) onProgreso?.(t.progreso);
     }
     return { estado, url };
   }
@@ -123,19 +128,26 @@ export function ComprobantesPage() {
   }
 
   async function descargarLote() {
+    const total = seleccionados.size;
     setDescargandoLote(true);
-    toast('Generando .zip de los seleccionados…', 'info');
+    setProgresoLote({ hechos: 0, total });
+    toast('Generando .zip de los seleccionados. Puedes seguir trabajando; te aviso cuando esté listo.', 'info');
     try {
       const { tarea_id } = await api.descargarLoteZip(empresa.empresa_id, [...seleccionados]);
-      const { estado, url } = await esperarTarea(tarea_id);
+      // Cada 2 s: un .zip grande tarda minutos y no hace falta preguntar más seguido.
+      const { estado, url } = await esperarTarea(tarea_id, { intervaloMs: 2000, onProgreso: setProgresoLote });
       if (estado === 'completada' && url) {
-        window.open(url, '_blank');
-        toast('Descarga lista', 'ok');
+        // La descarga se abre desde el clic en el aviso, no aquí: abrirla minutos después del
+        // clic original la trata el navegador como ventana emergente y la bloquea sin avisar.
+        toast(`.zip listo (${total} comprobantes)`, 'ok', { etiqueta: 'Descargar .zip', onClick: () => window.open(url, '_blank') });
       } else {
         toast('No se pudo generar la descarga', 'error');
       }
+    } catch {
+      toast('No se pudo generar la descarga', 'error');
     } finally {
       setDescargandoLote(false);
+      setProgresoLote(null);
     }
   }
 
@@ -184,7 +196,8 @@ export function ComprobantesPage() {
         )}
         {seleccionados.size > 0 && (
           <Button variant="secondary" onClick={descargarLote} loading={descargandoLote} disabled={descargandoLote}>
-            <PackageOpen className="size-[15px]" aria-hidden /> Descargar seleccionados ({seleccionados.size})
+            <PackageOpen className="size-[15px]" aria-hidden />{' '}
+            {progresoLote ? `Generando… ${progresoLote.hechos} de ${progresoLote.total}` : `Descargar seleccionados (${seleccionados.size})`}
           </Button>
         )}
         <Button onClick={exportar} loading={exportando} disabled={exportando}>
