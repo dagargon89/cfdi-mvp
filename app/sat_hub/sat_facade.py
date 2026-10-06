@@ -59,6 +59,25 @@ ESTADOS_RECHAZO = frozenset({ESTADO_ERROR, ESTADO_RECHAZADA, ESTADO_VENCIDA})
 # NO es un error, es una terminación exitosa con cero paquetes (visto en producción con
 # una solicitud de METADATA para un rango de fechas sin comprobantes).
 COD_ESTATUS_SIN_RESULTADOS = "5004"
+_COD_EXITO = "5000"
+
+
+def _codigo_de_estatus(st: dict[str, Any]) -> str | None:
+    """El código que de verdad describe la solicitud en una respuesta de verificación.
+
+    La respuesta trae dos: `CodEstatus` (encabezado: ¿se atendió la *consulta*?) y
+    `CodigoEstadoSolicitud` (¿cómo terminó la *solicitud*?). Visto en producción el
+    2026-10-06: `EstadoSolicitud=5`, `CodigoEstadoSolicitud=5004`, `CodEstatus=5000`
+    ("Solicitud Aceptada") para un rango sin CFDI — leer solo el encabezado mandaba a ERROR
+    una solicitud válida sin resultados. También se ha visto el 5004 (o el 404 de "Error no
+    controlado") solo en el encabezado, con `EstadoSolicitud=0`; por eso, si el código de la
+    solicitud es un éxito o no viene, se conserva el del encabezado.
+    """
+    cod_solicitud = st.get("CodigoEstadoSolicitud")
+    if cod_solicitud and str(cod_solicitud) != _COD_EXITO:
+        return str(cod_solicitud)
+    cod = st.get("CodEstatus")
+    return str(cod) if cod is not None else None
 
 
 @dataclass(slots=True)
@@ -211,7 +230,7 @@ class SatFacade:
             ids_paquetes=list(st.get("IdsPaquetes", []) or []),
             num_cfdis=int(st.get("NumeroCFDIs", 0) or 0),
             mensaje=st.get("Mensaje"),
-            cod_estatus=st.get("CodEstatus"),
+            cod_estatus=_codigo_de_estatus(st),
         )
 
     # ---- Descarga -------------------------------------------------------- #

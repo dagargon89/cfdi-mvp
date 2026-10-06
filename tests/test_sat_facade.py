@@ -14,7 +14,7 @@ import pytest
 import requests
 
 from app.sat_hub.errors import SatReintentableError
-from app.sat_hub.sat_facade import SatFacade
+from app.sat_hub.sat_facade import COD_ESTATUS_SIN_RESULTADOS, SatFacade
 
 
 def _facade_con_sat(sat_doble: Any) -> SatFacade:
@@ -105,3 +105,41 @@ def test_un_fallo_de_tls_al_descargar_es_intermitencia() -> None:
 
     with pytest.raises(SatReintentableError):
         facade.descargar("ID-PAQUETE-1")
+
+
+class _SatConEstatus:
+    """Doble de `SAT` que responde a la verificación con un diccionario fijo."""
+
+    def __init__(self, respuesta: dict[str, Any]) -> None:
+        self._respuesta = respuesta
+
+    def recover_comprobante_status(self, id_solicitud: str) -> dict[str, Any]:
+        return self._respuesta
+
+
+def test_sin_resultados_se_lee_de_codigo_estado_solicitud_no_del_encabezado() -> None:
+    """Respuesta real del 2026-10-06 (sync de un rango sin CFDI emitidos): el encabezado dice
+    5000/"Solicitud Aceptada", pero la solicitud terminó con 5004. Antes se leía solo
+    `CodEstatus` y el job caía en ERROR con el mensaje "Solicitud Aceptada"."""
+    facade = _facade_con_sat(
+        _SatConEstatus(
+            {"IdsPaquetes": [], "CodEstatus": "5000", "EstadoSolicitud": 5, "CodigoEstadoSolicitud": "5004", "NumeroCFDIs": 0, "Mensaje": "Solicitud Aceptada"}
+        )
+    )
+
+    assert facade.verificar("ID").cod_estatus == COD_ESTATUS_SIN_RESULTADOS
+
+
+@pytest.mark.parametrize(
+    ("respuesta", "esperado"),
+    [
+        # En proceso: ambos códigos son éxito.
+        ({"CodEstatus": "5000", "EstadoSolicitud": 2, "CodigoEstadoSolicitud": "5000", "Mensaje": "Solicitud Aceptada"}, "5000"),
+        # 5004 solo en el encabezado, con EstadoSolicitud=0 (caso previo, test_worker).
+        ({"CodEstatus": "5004", "EstadoSolicitud": 0, "Mensaje": "No se encontró la información"}, "5004"),
+        # "Error no controlado": el 404 del encabezado no debe perderse.
+        ({"CodEstatus": "404", "EstadoSolicitud": 0, "Mensaje": "Error no controlado."}, "404"),
+    ],
+)
+def test_sin_codigo_de_solicitud_relevante_se_conserva_el_del_encabezado(respuesta: dict[str, Any], esperado: str) -> None:
+    assert _facade_con_sat(_SatConEstatus(respuesta)).verificar("ID").cod_estatus == esperado
