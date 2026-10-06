@@ -11,7 +11,7 @@ class Configuracion(Base):
     """Reglas del SAT y parámetros operativos versionados por ejercicio fiscal (RF-CFG-01).
 
     Claves esperadas: max_meses_ventana, max_anios_antiguedad, polling_espera_seg,
-    max_reintentos, umbral_vigencia_dias, hora_sync.
+    polling_espera_max_seg, max_horas_sondeo, umbral_vigencia_dias, hora_sync.
     """
 
     __tablename__ = "configuracion"

@@ -10,8 +10,10 @@ Dos mecanismos de reintento independientes, a propósito:
 - `autoretry_for=(SatReintentableError,)` (con `max_retries` normal) — intermitencia de
   red/SAT al llamar `solicitar`/`verificar` (doc 06 §2.5 "intermitencia transitoria").
 - `self.retry(..., max_retries=_SIN_LIMITE_CELERY)` explícito — "sigue en proceso, vuelve
-  a sondear"; el tope real de esto es `configuracion.max_reintentos` (T8), NUNCA el
-  `max_retries` de Celery (que solo debe acotar errores, no el sondeo normal).
+  a sondear" (con espera progresiva); el tope real de esto es el tiempo transcurrido desde la
+  solicitud, `configuracion.max_horas_sondeo` (T8), NUNCA el `max_retries` de Celery (que solo
+  debe acotar errores, no el sondeo normal). La reanudación de una descarga de paquetes
+  interrumpida usa el mismo camino, con su propio tope (`_MAX_REINTENTOS_DESCARGA`).
 """
 
 from __future__ import annotations
@@ -105,8 +107,31 @@ def _ruta_paquete(empresa_id: int, job_id: int, indice: int) -> str:
 
 
 def _escribir_paquete(empresa_id: int, job_id: int, indice: int, paquete_b64: str) -> None:
-    with open(_ruta_paquete(empresa_id, job_id, indice), "wb") as f:
+    # Escritura atómica (temporal + rename): un paquete a medias (worker muerto, disco lleno)
+    # nunca queda con el nombre final, así que al reanudar nunca se confunde con uno completo.
+    ruta = _ruta_paquete(empresa_id, job_id, indice)
+    with open(f"{ruta}.part", "wb") as f:
         f.write(base64.b64decode(paquete_b64))
+    os.replace(f"{ruta}.part", ruta)
+
+
+def _paquete_ya_escrito(empresa_id: int, job_id: int, indice: int) -> bool:
+    ruta = _ruta_paquete(empresa_id, job_id, indice)
+    return os.path.isfile(ruta) and os.path.getsize(ruta) > 0
+
+
+def _borrar_paquetes_previos(empresa_id: int, job_id: int) -> None:
+    """Antes de empezar a bajar los paquetes de una solicitud recién terminada: los que haya
+    en la carpeta son de una solicitud anterior del mismo job (reintento T11) y la reanudación
+    los daría por buenos."""
+    carpeta = os.path.join(get_settings().storage_root, str(empresa_id), str(job_id))
+    for ruta in glob.glob(os.path.join(carpeta, "paquete_*.zip*")):
+        os.remove(ruta)
+
+
+def _ahora() -> datetime:
+    """UTC sin zona — igual que las columnas `DateTime` de MySQL."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def _cargar_job(db: AsyncSession, job_id: int) -> Job | None:
@@ -116,7 +141,7 @@ async def _cargar_job(db: AsyncSession, job_id: int) -> Job | None:
 
 async def _paso_nuevo(db: AsyncSession, job: Job) -> ResultadoPaso:
     try:
-        signer = await signer_para_empresa(db, job.empresa)
+        signer = await signer_para_empresa(db, job.empresa, job_id=job.job_id)
     except (EfirmaAusenteError, FielVencidaError) as exc:
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=str(exc))  # T2
         await db.commit()
@@ -133,15 +158,49 @@ async def _paso_nuevo(db: AsyncSession, job: Job) -> ResultadoPaso:
     # adaptador Celery decide el backoff vía `autoretry_for`.
 
     espera = await config_repo.valor(db, "polling_espera_seg", 20)
-    await jobs_repo.transicion(db, job, EstadoJob.SOLICITADO, id_solicitud=id_solicitud)  # T1
+    await jobs_repo.transicion(db, job, EstadoJob.SOLICITADO, id_solicitud=id_solicitud, solicitado_at=_ahora())  # T1
     await db.commit()
     return ResultadoPaso("reintentar", countdown=espera)
 
 
-async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids_paquetes: list[str]) -> None:
+_MAX_REINTENTOS_DESCARGA = 8
+_ESPERA_BASE_DESCARGA_SEG = 30
+_ESPERA_MAX_DESCARGA_SEG = 600
+
+
+async def _reintentar_descarga(db: AsyncSession, job: Job, detalle: str) -> ResultadoPaso:
+    """Falla temporal (red/SAT) al bajar paquetes de una solicitud TERMINADA.
+
+    Antes cualquier fallo aquí mandaba el job a ERROR, y reintentarlo pedía una solicitud
+    nueva al SAT — tirando horas de espera por un corte de red de segundos. Ahora el job se
+    queda en TERMINADA y vuelve a intentarlo con backoff, bajando solo los paquetes que
+    falten. `intentos` cuenta aquí los reintentos de descarga (se reinicia al pasar a
+    TERMINADA).
+    """
+    intentos = job.intentos + 1
+    if intentos > _MAX_REINTENTOS_DESCARGA:
+        await jobs_repo.transicion(
+            db, job, EstadoJob.ERROR, mensaje=f"Fallo al descargar paquetes tras {_MAX_REINTENTOS_DESCARGA} reintentos: {detalle}", intentos=intentos
+        )  # T10
+        await db.commit()
+        return ResultadoPaso("hecho")
+    # Sigue en TERMINADA — no es un cambio de estado (por eso no pasa por `transicion`), solo
+    # se anotan el contador y el motivo para que se vean en la interfaz.
+    job.intentos = intentos
+    job.mensaje = f"Falla temporal al descargar paquetes; reintento {intentos}/{_MAX_REINTENTOS_DESCARGA}: {detalle}"
+    await db.commit()
+    espera = min(_ESPERA_BASE_DESCARGA_SEG * 2 ** (intentos - 1), _ESPERA_MAX_DESCARGA_SEG)
+    logger.warning("ejecutar_job: job %s — %s (siguiente intento en %ss).", job.job_id, job.mensaje, espera)
+    return ResultadoPaso("reintentar", countdown=espera)
+
+
+async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids_paquetes: list[str]) -> ResultadoPaso:
     escritos = 0
     try:
         for idx, id_paquete in enumerate(ids_paquetes, start=1):
+            if _paquete_ya_escrito(job.empresa_id, job.job_id, idx):
+                escritos += 1  # bajado en un intento anterior de esta misma solicitud
+                continue
             meta, paquete_b64 = facade.descargar(id_paquete)
             if paquete_b64 is None:
                 # El SAT respondió con el elemento <Paquete> vacío. El motivo real viene en el
@@ -152,16 +211,18 @@ async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids
                 raise RuntimeError(f"el SAT devolvió el paquete {idx} vacío (CodEstatus={cod}: {msg})")
             _escribir_paquete(job.empresa_id, job.job_id, idx, paquete_b64)
             escritos += 1
-    except Exception as exc:  # noqa: BLE001 — cualquier fallo de escritura/descarga es terminal (T10)
+    except SatReintentableError as exc:
+        return await _reintentar_descarga(db, job, f"{exc} ({escritos}/{len(ids_paquetes)} paquetes escritos)")
+    except Exception as exc:  # noqa: BLE001 — cualquier otro fallo de escritura/descarga es terminal (T10)
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=f"Fallo al descargar paquetes ({escritos}/{job.paquetes} escritos): {exc}")
         await db.commit()
-        return
+        return ResultadoPaso("hecho")
     if escritos != job.paquetes:
         # doc 06 §2.7 A08: paquetes reportados ≠ archivos escritos → nunca pasa a DESCARGADO.
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=f"Se esperaban {job.paquetes} paquetes; se escribieron {escritos}.")
         await db.commit()
-        return
-    await jobs_repo.transicion(db, job, EstadoJob.DESCARGADO)  # T9
+        return ResultadoPaso("hecho")
+    await jobs_repo.transicion(db, job, EstadoJob.DESCARGADO, mensaje=None)  # T9
     await db.commit()
 
     # Resguardo encadenado (RF-RES-01…03, doc 06 §2.5) — en la misma ejecución, nunca una
@@ -172,6 +233,53 @@ async def _descargar_paquetes(db: AsyncSession, job: Job, facade: SatFacade, ids
         logger.info("resguardo: %s comprobantes nuevos indexados (job %s).", nuevos, job.job_id)
     except Exception:  # noqa: BLE001 — el job ya es DESCARGADO; esto no debe corromper su estado
         logger.exception("resguardo: fallo indexando el job %s.", job.job_id)
+    return ResultadoPaso("hecho")
+
+
+async def _empezar_descarga(db: AsyncSession, job: Job, facade: SatFacade, ids_paquetes: list[str]) -> ResultadoPaso:
+    await jobs_repo.transicion(db, job, EstadoJob.TERMINADA, paquetes=len(ids_paquetes), intentos=0)  # T4/T7
+    await db.commit()
+    _borrar_paquetes_previos(job.empresa_id, job.job_id)
+    return await _descargar_paquetes(db, job, facade, ids_paquetes)
+
+
+async def _paso_reanudar_descarga(db: AsyncSession, job: Job) -> ResultadoPaso:
+    """TERMINADA: el SAT ya terminó, pero la descarga de paquetes quedó pendiente (falla
+    temporal de red, o un worker que murió a medias). Se vuelven a pedir los ids de paquete
+    — el SAT los sigue entregando para una solicitud terminada — y se bajan solo los que
+    falten, sin pedir una solicitud nueva."""
+    assert job.id_solicitud is not None  # garantizado por T1
+    signer = await signer_para_empresa(db, job.empresa, job_id=job.job_id)
+    facade = SatFacade(signer, job.empresa.rfc)
+    try:
+        resultado = facade.verificar(job.id_solicitud)
+    except SatReintentableError as exc:
+        return await _reintentar_descarga(db, job, str(exc))
+    if resultado.estado_solicitud not in ESTADOS_TERMINADA:
+        await jobs_repo.transicion(
+            db,
+            job,
+            EstadoJob.ERROR,
+            mensaje=(
+                "No se pudieron recuperar los paquetes: el SAT ya no reporta la solicitud como terminada "
+                f"(EstadoSolicitud={resultado.estado_solicitud}, código={resultado.cod_estatus}): {resultado.mensaje}"
+            ),
+        )  # T10
+        await db.commit()
+        return ResultadoPaso("hecho")
+    return await _descargar_paquetes(db, job, facade, resultado.ids_paquetes)
+
+
+_FACTOR_ESPERA_SONDEO = 1.5
+
+
+def _espera_sondeo(intentos: int, base: int, tope: int) -> int:
+    """Segundos hasta el siguiente sondeo: `base` tras el primero, ×1.5 cada vez, hasta `tope`.
+
+    Con 20 s / 600 s: 20, 30, 45, 67… llega al tope en ~10 sondeos (~30 min) y de ahí sigue
+    cada 10 min. Una solicitud que el SAT tarda 3 h se cubre con ~25 sondeos en vez de ~500.
+    """
+    return int(min(base * _FACTOR_ESPERA_SONDEO ** min(intentos - 1, 50), tope))
 
 
 _REINTENTOS_INMEDIATOS_PARPADEO = 2
@@ -190,7 +298,7 @@ def _es_resultado_definitivo(resultado: ResultadoVerificacion) -> bool:
 
 async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
     assert job.id_solicitud is not None  # garantizado por T1: NUEVO→SOLICITADO siempre lo asigna
-    signer = await signer_para_empresa(db, job.empresa)
+    signer = await signer_para_empresa(db, job.empresa, job_id=job.job_id)
     facade = SatFacade(signer, job.empresa.rfc)
     resultado = facade.verificar(job.id_solicitud)  # SatReintentableError se propaga (backoff de Celery)
 
@@ -218,10 +326,7 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         # "5004: No se encontró la información" — la solicitud es válida, simplemente no hay
         # CFDI que coincidan con el rango/tipo pedido. Éxito con cero paquetes, no un error
         # (visto en producción: una solicitud de METADATA sin comprobantes ese mes).
-        await jobs_repo.transicion(db, job, EstadoJob.TERMINADA, paquetes=0)  # T4/T7
-        await db.commit()
-        await _descargar_paquetes(db, job, facade, [])
-        return ResultadoPaso("hecho")
+        return await _empezar_descarga(db, job, facade, [])
 
     if resultado.estado_solicitud in ESTADOS_RECHAZO:
         await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=resultado.mensaje or "Rechazo definitivo del SAT.")  # T5/T8
@@ -229,15 +334,12 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         return ResultadoPaso("hecho")
 
     if resultado.estado_solicitud in ESTADOS_TERMINADA:
-        await jobs_repo.transicion(db, job, EstadoJob.TERMINADA, paquetes=len(resultado.ids_paquetes))  # T4/T7
-        await db.commit()
-        await _descargar_paquetes(db, job, facade, resultado.ids_paquetes)
-        return ResultadoPaso("hecho")
+        return await _empezar_descarga(db, job, facade, resultado.ids_paquetes)
 
     if resultado.estado_solicitud not in ESTADOS_EN_PROCESO:
         if resultado.mensaje:
             # Ya se le dio su margen de gracia (parpadeo) arriba y sigue fallando — esto sí es
-            # un error real, no vale la pena agotar 60 reintentos (~1h) para mostrar lo mismo.
+            # un error real, no vale la pena sondear horas para mostrar lo mismo.
             await jobs_repo.transicion(
                 db, job, EstadoJob.ERROR, mensaje=f"El SAT respondió un error (EstadoSolicitud={resultado.estado_solicitud}): {resultado.mensaje}"
             )
@@ -246,16 +348,26 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         # Código desconocido SIN mensaje (silencio, no un error explícito) — sí es transitorio.
         logger.warning("ejecutar_job: EstadoSolicitud %s no catalogado para job %s; se trata como 'en proceso'.", resultado.estado_solicitud, job.job_id)
 
-    max_reintentos = await config_repo.valor(db, "max_reintentos", 180)
     intentos = job.intentos + 1
-    if intentos >= max_reintentos:
-        await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=f"Se agotaron los reintentos de sondeo sin que el SAT terminara la solicitud (último EstadoSolicitud={resultado.estado_solicitud}).", intentos=intentos)  # T8
+    ahora = _ahora()
+    # Un job solicitado antes de que existiera `solicitado_at` empieza a contar aquí.
+    inicio = job.solicitado_at or ahora
+    max_horas = float(await config_repo.valor(db, "max_horas_sondeo", 6))
+    if ahora - inicio >= timedelta(hours=max_horas):
+        await jobs_repo.transicion(
+            db,
+            job,
+            EstadoJob.ERROR,
+            mensaje=f"Se agotó el tiempo de sondeo ({max_horas:g} h) sin que el SAT terminara la solicitud (último EstadoSolicitud={resultado.estado_solicitud}).",
+            intentos=intentos,
+        )  # T8
         await db.commit()
         return ResultadoPaso("hecho")
-    await jobs_repo.transicion(db, job, EstadoJob.EN_PROCESO, intentos=intentos)  # T3/T6
+    await jobs_repo.transicion(db, job, EstadoJob.EN_PROCESO, intentos=intentos, solicitado_at=inicio)  # T3/T6
     await db.commit()
-    espera = await config_repo.valor(db, "polling_espera_seg", 20)
-    return ResultadoPaso("reintentar", countdown=espera)
+    base = int(await config_repo.valor(db, "polling_espera_seg", 20))
+    tope = int(await config_repo.valor(db, "polling_espera_max_seg", 600))
+    return ResultadoPaso("reintentar", countdown=_espera_sondeo(intentos, base, tope))
 
 
 async def paso_job(db: AsyncSession, job_id: int) -> ResultadoPaso:
@@ -274,6 +386,8 @@ async def paso_job(db: AsyncSession, job_id: int) -> ResultadoPaso:
         return await _paso_nuevo(db, job)
     if job.estado in (EstadoJob.SOLICITADO, EstadoJob.EN_PROCESO):
         return await _paso_polling(db, job)
+    if job.estado is EstadoJob.TERMINADA:
+        return await _paso_reanudar_descarga(db, job)
 
     logger.info("ejecutar_job: job %s en estado terminal %s, nada que hacer.", job_id, job.estado.value)
     return ResultadoPaso("hecho")

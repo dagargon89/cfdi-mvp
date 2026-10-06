@@ -106,8 +106,8 @@ async def reintentar_job_endpoint(
     try:
         # `intentos` también se reinicia: una solicitud nueva (id_solicitud=None → se asigna
         # una nueva en el siguiente NUEVO→SOLICITADO) merece un presupuesto de sondeo fresco,
-        # no seguir contando hacia el mismo `max_reintentos` de un intento anterior ya agotado.
-        await jobs_repo.transicion(db, job, EstadoJob.NUEVO, id_solicitud=None, mensaje=None, intentos=0)  # T11
+        # no heredar el contador ni el reloj (`solicitado_at`) de un intento anterior ya agotado.
+        await jobs_repo.transicion(db, job, EstadoJob.NUEVO, id_solicitud=None, mensaje=None, intentos=0, solicitado_at=None)  # T11
     except TransicionIlegalError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "TRANSICION_ILEGAL", "mensaje": str(exc)}) from exc
 

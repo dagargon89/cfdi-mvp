@@ -157,7 +157,7 @@ def _traduce_fallos_de_red(operacion: str) -> Iterator[None]:
     Es deliberadamente ancho — se captura `RequestException`, la raíz de la jerarquía de
     ``requests``. Un fallo de transporte nunca es información sobre la solicitud: no dice que
     el SAT la rechazara ni que los datos estén mal, solo que no se pudo preguntar. Reintentar
-    es la única respuesta correcta, y el tope de reintentos del job (`max_reintentos`) es lo
+    es la única respuesta correcta, y el tope de tiempo de sondeo del job (`max_horas_sondeo`) es lo
     que evita que un corte permanente sondee para siempre.
     """
     import requests  # import perezoso, igual que ``satcfdi``
@@ -166,6 +166,14 @@ def _traduce_fallos_de_red(operacion: str) -> Iterator[None]:
         yield
     except requests.RequestException as exc:
         raise SatReintentableError(f"No se pudo {operacion}: la red hacia el SAT falló ({exc.__class__.__name__}).") from exc
+
+
+# Token de autenticación del WS de descarga masiva, por (RFC, número de certificado).
+# Cada tarea del worker construye un `SatFacade` nuevo (nunca se cachea el `Signer`, para que
+# no quede material descifrado vivo entre invocaciones), y sin esto cada sondeo hacía una
+# llamada extra de `Autentica` al SAT. El token dura unos minutos y no es material de llave;
+# vive solo en la memoria del proceso del worker.
+_TOKENS: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 class SatFacade:
@@ -181,6 +189,16 @@ class SatFacade:
 
         self._sat = SAT(signer=signer)
         self._rfc = rfc
+        self._clave_token = (rfc, str(signer.certificate_number))
+        # `SAT` revisa la vigencia del token antes de usarlo y se re-autentica solo si ya
+        # expiró (o expira en <30 s), así que sembrarlo con uno cacheado es seguro.
+        self._sat.token_comprobante = _TOKENS.get(self._clave_token)
+
+    def _recordar_token(self) -> None:
+        clave = getattr(self, "_clave_token", None)
+        token = getattr(self._sat, "token_comprobante", None)
+        if clave is not None and token is not None:
+            _TOKENS[clave] = token
 
     # ---- Solicitud (mapeo tipo → método dedicado · H-04 resuelto) -------- #
 
@@ -211,6 +229,7 @@ class SatFacade:
                 resp = self._sat.recover_comprobante_received_request(rfc_receptor=self._rfc, **comun)
             else:
                 resp = self._sat.recover_comprobante_emitted_request(rfc_emisor=self._rfc, **comun)
+        self._recordar_token()
 
         id_solicitud = resp.get("IdSolicitud")
         if not id_solicitud:
@@ -225,6 +244,7 @@ class SatFacade:
         """Consulta el estatus de la solicitud (polling)."""
         with _traduce_fallos_de_red("consultar el estatus de la solicitud"):
             st = self._sat.recover_comprobante_status(id_solicitud)
+        self._recordar_token()
         return ResultadoVerificacion(
             estado_solicitud=int(st["EstadoSolicitud"]),
             ids_paquetes=list(st.get("IdsPaquetes", []) or []),
@@ -246,6 +266,7 @@ class SatFacade:
         """
         with _traduce_fallos_de_red("descargar el paquete"):
             meta, paquete_b64 = self._sat.recover_comprobante_download(id_paquete)
+        self._recordar_token()
         return meta, paquete_b64
 
     # ---- Validación de estatus (sin captcha · Fase 2) ------------------- #

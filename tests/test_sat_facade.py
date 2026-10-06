@@ -7,7 +7,7 @@ que ninguna prueba del worker ejercita esta capa.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -143,3 +143,34 @@ def test_sin_resultados_se_lee_de_codigo_estado_solicitud_no_del_encabezado() ->
 )
 def test_sin_codigo_de_solicitud_relevante_se_conserva_el_del_encabezado(respuesta: dict[str, Any], esperado: str) -> None:
     assert _facade_con_sat(_SatConEstatus(respuesta)).verificar("ID").cod_estatus == esperado
+
+
+class _SatQueAutentica:
+    """Doble de `SAT` que, como el real, deja el token en `token_comprobante` al usarlo."""
+
+    def __init__(self, token: dict[str, Any]) -> None:
+        self.token_comprobante: dict[str, Any] | None = None
+        self._token = token
+
+    def recover_comprobante_status(self, id_solicitud: str) -> dict[str, Any]:
+        self.token_comprobante = self._token
+        return {"CodEstatus": "5000", "EstadoSolicitud": 2, "CodigoEstadoSolicitud": "5000", "Mensaje": "Solicitud Aceptada"}
+
+
+def test_el_token_del_sat_se_reusa_entre_facades_del_mismo_certificado(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cada sondeo construye un `SatFacade` nuevo; sin caché, cada uno se volvía a autenticar."""
+    from types import SimpleNamespace
+
+    from app.sat_hub import sat_facade
+
+    monkeypatch.setattr(sat_facade, "_TOKENS", {})
+    token = {"AutenticaResult": "TOKEN", "Expires": datetime.max}
+    signer = SimpleNamespace(certificate_number="00001000000500000001")
+
+    primero = SatFacade(signer, "CHL960913IX9")
+    primero._sat = _SatQueAutentica(token)
+    primero.verificar("ID")
+
+    assert SatFacade(signer, "CHL960913IX9")._sat.token_comprobante is token
+    otro_certificado = SimpleNamespace(certificate_number="00001000000500000002")
+    assert SatFacade(otro_certificado, "CHL960913IX9")._sat.token_comprobante is None

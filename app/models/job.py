@@ -35,6 +35,9 @@ class Job(Base):
     intentos: Mapped[int] = mapped_column(MYSQL_INTEGER(unsigned=True), nullable=False, default=0)
     paquetes: Mapped[int] = mapped_column(MYSQL_INTEGER(unsigned=True), nullable=False, default=0)
     mensaje: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Cuándo se envió la solicitud vigente al SAT (T1) — el tope de sondeo es por tiempo
+    # transcurrido desde aquí (`max_horas_sondeo`), no por número de intentos.
+    solicitado_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     # server_default combinado (no `onupdate=`) es la única forma en SQLAlchemy de emitir el DDL
     # `ON UPDATE CURRENT_TIMESTAMP` real de MySQL en vez de solo simularlo a nivel ORM.

@@ -84,7 +84,7 @@ async def crear_descarga(
     return await jobs_repo.crear_lote(db, empresa_id=empresa.empresa_id, tipo=tipo, solicitud=solicitud, ventanas=ventanas, origen=origen)
 
 
-async def signer_para_empresa(db: AsyncSession, empresa: Empresa, *, actor: str = "sistema:worker") -> Any:
+async def signer_para_empresa(db: AsyncSession, empresa: Empresa, *, actor: str = "sistema:worker", job_id: int | None = None) -> Any:
     """Descifra la e.firma de la empresa y devuelve el `Signer` listo para `SatFacade`.
 
     Lanza `EfirmaAusenteError` o `FielVencidaError` (T2: NUEVO→ERROR sin encolar). El
@@ -103,6 +103,11 @@ async def signer_para_empresa(db: AsyncSession, empresa: Empresa, *, actor: str 
     validar_vigencia(signer)  # relee la vigencia directamente del certificado (RF-BOV-02)
 
     await bitacora_service.registrar(
-        db, actor=actor, accion="uso_boveda", entidad=f"empresa:{empresa.empresa_id}", detalle={"num_serie": efirma.num_serie}
+        db,
+        actor=actor,
+        accion="uso_boveda",
+        entidad=f"empresa:{empresa.empresa_id}",
+        # RF-BOV-03: el uso de la bóveda se registra "con job asociado" cuando lo hay.
+        detalle={"num_serie": efirma.num_serie, **({"job_id": job_id} if job_id is not None else {})},
     )
     return signer

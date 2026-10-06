@@ -158,19 +158,59 @@ async def test_camino_feliz_completo(db: AsyncSession, facade_fake: type[FakeFac
     assert facade_fake.llamadas_solicitar == 1  # nunca se re-solicita (RF-DESC-04)
 
 
-async def test_reintentos_agotados_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
-    await _set_config(db, "max_reintentos", 3)
+async def test_tiempo_de_sondeo_agotado_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """El tope del sondeo es el tiempo transcurrido desde la solicitud, no el número de
+    intentos: con la espera progresiva, los intentos ya no dicen cuánto se ha esperado."""
+    await _set_config(db, "max_horas_sondeo", 6)
     job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-YA-SOLICITADO")
     facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_EN_PROCESO)]
+    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    resultado = None
-    for _ in range(3):
-        resultado = await worker_tasks.paso_job(db, job.job_id)
-
+    job.solicitado_at = ahora - timedelta(hours=5, minutes=50)
+    await db.commit()
+    resultado = await worker_tasks.paso_job(db, job.job_id)
     await db.refresh(job)
-    assert resultado is not None and resultado.siguiente == "hecho"
+    assert resultado.siguiente == "reintentar"
+    assert job.estado is EstadoJob.EN_PROCESO
+
+    job.solicitado_at = ahora - timedelta(hours=6, minutes=1)
+    await db.commit()
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
     assert job.estado is EstadoJob.ERROR
-    assert "reintentos" in (job.mensaje or "")
+    assert "tiempo de sondeo" in (job.mensaje or "")
+
+
+async def test_job_sin_solicitado_at_empieza_a_contar_en_el_siguiente_sondeo(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """Jobs solicitados antes de que existiera la columna (p. ej. en curso durante el
+    despliegue) no se cortan de golpe: su reloj empieza en el siguiente sondeo."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.EN_PROCESO, id_solicitud="ID-VIEJO")
+    assert job.solicitado_at is None
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_EN_PROCESO)]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "reintentar"
+    assert job.solicitado_at is not None
+
+
+async def test_el_sondeo_espera_cada_vez_mas_hasta_el_tope(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    await _set_config(db, "polling_espera_seg", 20)
+    await _set_config(db, "polling_espera_max_seg", 600)
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_EN_PROCESO)]
+
+    esperas = [(await worker_tasks.paso_job(db, job.job_id)).countdown for _ in range(12)]
+
+    assert esperas[:4] == [20, 30, 45, 67]
+    assert esperas == sorted(esperas)
+    assert esperas[-1] == 600
+
+
+async def test_espera_de_sondeo_no_desborda_con_muchos_intentos() -> None:
+    assert worker_tasks._espera_sondeo(1, 20, 600) == 20
+    assert worker_tasks._espera_sondeo(100_000, 20, 600) == 600
 
 
 async def test_rechazo_definitivo_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
@@ -342,3 +382,97 @@ async def test_reanudacion_no_duplica_solicitud(db: AsyncSession, facade_fake: t
     await db.refresh(job)
     assert job.id_solicitud == id_solicitud_original
     assert facade_fake.llamadas_solicitar == 1  # sin segunda solicitud
+
+
+class FacadeConCortesAlDescargar(FakeFacade):
+    """Falla con `SatReintentableError` en las descargas listadas en `fallar_en` (por número
+    de llamada, desde 1) y registra qué paquetes se pidieron."""
+
+    fallar_en: set[int] = set()
+    llamadas_descargar = 0
+    pedidos: list[str] = []
+
+    def descargar(self, id_paquete: str) -> tuple[dict[str, object], str]:
+        FacadeConCortesAlDescargar.llamadas_descargar += 1
+        if FacadeConCortesAlDescargar.llamadas_descargar in FacadeConCortesAlDescargar.fallar_en:
+            raise SatReintentableError("No se pudo descargar el paquete: la red hacia el SAT falló (SSLError).")
+        FacadeConCortesAlDescargar.pedidos.append(id_paquete)
+        return super().descargar(id_paquete)
+
+
+@pytest.fixture()
+def facade_con_cortes(facade_fake: type[FakeFacade], monkeypatch: pytest.MonkeyPatch) -> type[FacadeConCortesAlDescargar]:
+    FacadeConCortesAlDescargar.fallar_en = set()
+    FacadeConCortesAlDescargar.llamadas_descargar = 0
+    FacadeConCortesAlDescargar.pedidos = []
+    monkeypatch.setattr(worker_tasks, "SatFacade", FacadeConCortesAlDescargar)
+    return FacadeConCortesAlDescargar
+
+
+async def test_corte_de_red_al_descargar_no_tira_la_solicitud(
+    db: AsyncSession, facade_con_cortes: type[FacadeConCortesAlDescargar]
+) -> None:
+    """Un corte de red al bajar el paquete 2 de 3 deja el job en TERMINADA (no en ERROR), y
+    el siguiente paso baja solo los paquetes que faltan, sin pedir una solicitud nueva."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    FakeFacade.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_TERMINADA, ids_paquetes=["P1", "P2", "P3"])]
+    facade_con_cortes.fallar_en = {2}
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "reintentar"
+    assert resultado.countdown > 0
+    assert job.estado is EstadoJob.TERMINADA
+    assert job.paquetes == 3
+    assert "reintento 1/" in (job.mensaje or "")
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
+    assert job.estado is EstadoJob.DESCARGADO
+    assert job.mensaje is None
+    assert facade_con_cortes.pedidos == ["P1", "P2", "P3"]  # P1 no se volvió a bajar
+    assert FakeFacade.llamadas_solicitar == 0
+
+
+async def test_cortes_persistentes_al_descargar_terminan_en_error(
+    db: AsyncSession, facade_con_cortes: type[FacadeConCortesAlDescargar]
+) -> None:
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    FakeFacade.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_TERMINADA, ids_paquetes=["P1"])]
+    facade_con_cortes.fallar_en = set(range(1, 100))
+
+    pasos = 0
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    while resultado.siguiente == "reintentar":
+        pasos += 1
+        assert pasos <= worker_tasks._MAX_REINTENTOS_DESCARGA + 1
+        resultado = await worker_tasks.paso_job(db, job.job_id)
+
+    await db.refresh(job)
+    assert job.estado is EstadoJob.ERROR
+    assert "tras" in (job.mensaje or "") and "reintentos" in (job.mensaje or "")
+
+
+async def test_reanudar_descarga_si_el_sat_ya_no_reporta_terminada_pasa_a_error(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.TERMINADA, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=6, mensaje="Solicitud vencida", cod_estatus="5000")]
+
+    resultado = await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert resultado.siguiente == "hecho"
+    assert job.estado is EstadoJob.ERROR
+    assert "ya no reporta" in (job.mensaje or "")
+
+
+async def test_uso_de_boveda_registra_el_job(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """RF-BOV-03: el evento `uso_boveda` lleva el job asociado."""
+    from sqlalchemy import select
+
+    from app.models.bitacora import Bitacora
+
+    job = await _crear_job_con_efirma(db)
+    await worker_tasks.paso_job(db, job.job_id)
+
+    detalles = (await db.scalars(select(Bitacora.detalle).where(Bitacora.accion == "uso_boveda"))).all()
+    assert detalles and all(d.get("job_id") == job.job_id for d in detalles)
