@@ -59,6 +59,7 @@ from app.sat_hub.sat_facade import (
     ResultadoVerificacion,
     SatFacade,
     consultar_estatus_xml,
+    describir_codigo,
     descargar_lista_69b,
 )
 from app.services import notificaciones as notificaciones_service
@@ -151,7 +152,7 @@ async def _paso_nuevo(db: AsyncSession, job: Job) -> ResultadoPaso:
     try:
         id_solicitud = facade.solicitar(_a_dominio(job))
     except SatRechazoError as exc:
-        await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=str(exc))
+        await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=str(exc), cod_sat=exc.codigo)
         await db.commit()
         return ResultadoPaso("hecho")
     # SatReintentableError se deja propagar sin tocar el job (sigue en NUEVO); el
@@ -329,7 +330,8 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
         return await _empezar_descarga(db, job, facade, [])
 
     if resultado.estado_solicitud in ESTADOS_RECHAZO:
-        await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=resultado.mensaje or "Rechazo definitivo del SAT.")  # T5/T8
+        mensaje = describir_codigo(resultado.cod_estatus) or resultado.mensaje or "Rechazo definitivo del SAT."
+        await jobs_repo.transicion(db, job, EstadoJob.ERROR, mensaje=mensaje, cod_sat=resultado.cod_estatus)  # T5/T8
         await db.commit()
         return ResultadoPaso("hecho")
 
@@ -341,7 +343,12 @@ async def _paso_polling(db: AsyncSession, job: Job) -> ResultadoPaso:
             # Ya se le dio su margen de gracia (parpadeo) arriba y sigue fallando — esto sí es
             # un error real, no vale la pena sondear horas para mostrar lo mismo.
             await jobs_repo.transicion(
-                db, job, EstadoJob.ERROR, mensaje=f"El SAT respondió un error (EstadoSolicitud={resultado.estado_solicitud}): {resultado.mensaje}"
+                db,
+                job,
+                EstadoJob.ERROR,
+                mensaje=describir_codigo(resultado.cod_estatus)
+                or f"El SAT respondió un error (EstadoSolicitud={resultado.estado_solicitud}): {resultado.mensaje}",
+                cod_sat=resultado.cod_estatus,
             )
             await db.commit()
             return ResultadoPaso("hecho")

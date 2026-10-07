@@ -11,6 +11,7 @@ from app.models.job import Job
 from app.models.usuario import Usuario
 from app.repositories import efirmas as efirmas_repo
 from app.repositories import empresas as empresas_repo
+from app.sat_hub.sat_facade import CODIGOS_SIN_REINTENTO
 from app.services import enlaces
 
 
@@ -41,6 +42,7 @@ def job_a_out(job: Job) -> JobOut:
         mensaje=job.mensaje,
         updated_at=job.updated_at.isoformat(),
         id_solicitud=job.id_solicitud,
+        reintentable=job.cod_sat not in CODIGOS_SIN_REINTENTO,
     )
 
 

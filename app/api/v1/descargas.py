@@ -15,6 +15,7 @@ from app.models.job import Job
 from app.repositories import empresas as empresas_repo
 from app.repositories import jobs as jobs_repo
 from app.sat_hub.errors import FielVencidaError, TransicionIlegalError
+from app.sat_hub.sat_facade import CODIGOS_SIN_REINTENTO
 from app.services import bitacora as bitacora_service
 from app.services import metadata_export
 from app.services.descargas import EfirmaAusenteError, EmpresaInactivaError, RangoInvalidoError, crear_descarga
@@ -103,11 +104,17 @@ async def reintentar_job_endpoint(
     job = await jobs_repo.por_id_de_empresa(db, empresa_id, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    if job.cod_sat in CODIGOS_SIN_REINTENTO:
+        # El SAT rechazaría idéntica una solicitud con los mismos parámetros (5002: agotadas de
+        # por vida; 5003: tope máximo) — reintentar solo gastaría otra solicitud.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"codigo": "REINTENTO_SIN_EFECTO", "mensaje": job.mensaje or "El SAT no aceptará este mismo rango."}
+        )
     try:
         # `intentos` también se reinicia: una solicitud nueva (id_solicitud=None → se asigna
         # una nueva en el siguiente NUEVO→SOLICITADO) merece un presupuesto de sondeo fresco,
         # no heredar el contador ni el reloj (`solicitado_at`) de un intento anterior ya agotado.
-        await jobs_repo.transicion(db, job, EstadoJob.NUEVO, id_solicitud=None, mensaje=None, intentos=0, solicitado_at=None)  # T11
+        await jobs_repo.transicion(db, job, EstadoJob.NUEVO, id_solicitud=None, mensaje=None, intentos=0, solicitado_at=None, cod_sat=None)  # T11
     except TransicionIlegalError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail={"codigo": "TRANSICION_ILEGAL", "mensaje": str(exc)}) from exc
 

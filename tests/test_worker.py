@@ -476,3 +476,31 @@ async def test_uso_de_boveda_registra_el_job(db: AsyncSession, facade_fake: type
 
     detalles = (await db.scalars(select(Bitacora.detalle).where(Bitacora.accion == "uso_boveda"))).all()
     assert detalles and all(d.get("job_id") == job.job_id for d in detalles)
+
+
+async def test_rechazo_5002_explica_el_motivo_y_guarda_el_codigo(db: AsyncSession, facade_fake: type[FakeFacade]) -> None:
+    """Respuesta real del 2026-10-07: EstadoSolicitud=5, CodigoEstadoSolicitud=5002 y el
+    encabezado "Solicitud Aceptada". Antes el job quedaba en ERROR con ese mensaje."""
+    job = await _crear_job_con_efirma(db, estado=EstadoJob.SOLICITADO, id_solicitud="ID-X")
+    facade_fake.secuencia_verificar = [ResultadoVerificacion(estado_solicitud=ESTADO_RECHAZADA, mensaje="Solicitud Aceptada", cod_estatus="5002")]
+
+    await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert job.estado is EstadoJob.ERROR
+    assert job.cod_sat == "5002"
+    assert "5002" in (job.mensaje or "") and "Solicitud Aceptada" not in (job.mensaje or "")
+
+
+async def test_rechazo_al_solicitar_guarda_el_codigo(db: AsyncSession, facade_fake: type[FakeFacade], monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sat_hub.errors import SatRechazoError
+
+    def rechazar(self: object, job: object) -> str:
+        raise SatRechazoError("El SAT rechazó la solicitud (CodEstatus=5005): duplicada", codigo="5005")
+
+    monkeypatch.setattr(FakeFacade, "solicitar", rechazar)
+    job = await _crear_job_con_efirma(db)
+
+    await worker_tasks.paso_job(db, job.job_id)
+    await db.refresh(job)
+    assert job.estado is EstadoJob.ERROR
+    assert job.cod_sat == "5005"

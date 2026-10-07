@@ -174,3 +174,23 @@ def test_el_token_del_sat_se_reusa_entre_facades_del_mismo_certificado(monkeypat
     assert SatFacade(signer, "CHL960913IX9")._sat.token_comprobante is token
     otro_certificado = SimpleNamespace(certificate_number="00001000000500000002")
     assert SatFacade(otro_certificado, "CHL960913IX9")._sat.token_comprobante is None
+
+
+
+class _SatQueRechazaPorAgotado:
+    def recover_comprobante_received_request(self, **kwargs: Any) -> dict[str, Any]:
+        return {"CodEstatus": "5002", "Mensaje": "Se agotó las solicitudes de por vida"}
+
+
+def test_un_rechazo_catalogado_al_solicitar_se_explica_y_lleva_su_codigo() -> None:
+    from app.sat_hub.domain import Job, Solicitud, Tipo
+    from app.sat_hub.errors import SatRechazoError
+
+    facade = _facade_con_sat(_SatQueRechazaPorAgotado())
+    job = Job(job_id=1, client_id=1, tipo=Tipo.RECIBIDO, solicitud=Solicitud.CFDI, fecha_inicial=date(2026, 9, 1), fecha_final=date(2026, 9, 30))
+
+    with pytest.raises(SatRechazoError) as exc:
+        facade.solicitar(job)
+
+    assert exc.value.codigo == "5002"
+    assert "rango distinto" in str(exc.value)

@@ -38,6 +38,8 @@ class Job(Base):
     # Cuándo se envió la solicitud vigente al SAT (T1) — el tope de sondeo es por tiempo
     # transcurrido desde aquí (`max_horas_sondeo`), no por número de intentos.
     solicitado_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Código del SAT del último rechazo (p. ej. "5002") — decide si reintentar tiene sentido.
+    cod_sat: Mapped[str | None] = mapped_column(String(10), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     # server_default combinado (no `onupdate=`) es la única forma en SQLAlchemy de emitir el DDL
     # `ON UPDATE CURRENT_TIMESTAMP` real de MySQL en vez de solo simularlo a nivel ORM.

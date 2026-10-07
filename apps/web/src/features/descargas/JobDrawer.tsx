@@ -21,7 +21,8 @@ export function JobDrawer({ job, puedeMutar, onClose, onReintentar, reintentando
   reintentando: boolean;
 }) {
   const idx = ORDEN.indexOf(job.estado);
-  const puedeReintentar = job.estado === 'ERROR' && puedeMutar;
+  const reintentoSinEfecto = job.estado === 'ERROR' && job.reintentable === false;
+  const puedeReintentar = job.estado === 'ERROR' && puedeMutar && !reintentoSinEfecto;
 
   const { empresa } = useEmpresaCtx();
   const { toast } = useToast();
@@ -81,6 +82,11 @@ export function JobDrawer({ job, puedeMutar, onClose, onReintentar, reintentando
         </div>
 
         {job.mensaje && <div role="alert" className="bg-danger-soft text-danger rounded-md px-2.5 py-2.5 text-[13px] text-pretty">{job.mensaje}</div>}
+        {reintentoSinEfecto && (
+          <div className="bg-surface-alt rounded-md px-2.5 py-2.5 text-[13px] text-pretty">
+            No se puede reintentar: el SAT rechazaría igual cualquier solicitud nueva con este mismo periodo. Crea una descarga nueva con un periodo distinto.
+          </div>
+        )}
         <div className="text-xs text-text-muted">Última verificación: <span className="font-mono">{job.updated_at}</span></div>
 
         {esMetadata && (

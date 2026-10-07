@@ -34,7 +34,12 @@ class SatError(HubError):
 
 
 class SatRechazoError(SatError):
-    """Rechazo definitivo del SAT → el job pasa a ERROR."""
+    """Rechazo definitivo del SAT → el job pasa a ERROR. `codigo` es el código del SAT
+    (CodEstatus) cuando lo hay — decide si reintentar tiene sentido."""
+
+    def __init__(self, mensaje: str, codigo: str | None = None) -> None:
+        super().__init__(mensaje)
+        self.codigo = codigo
 
 
 class SatReintentableError(SatError):

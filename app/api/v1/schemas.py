@@ -176,6 +176,9 @@ class JobOut(BaseModel):
     mensaje: str | None
     updated_at: str
     id_solicitud: str | None
+    # False cuando el SAT rechazó con un código que se repite idéntico (5002/5003): reintentar
+    # con los mismos parámetros solo gasta otra solicitud.
+    reintentable: bool = True
 
 
 class JobPageOut(BaseModel):

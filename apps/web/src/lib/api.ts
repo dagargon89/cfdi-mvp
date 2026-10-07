@@ -49,6 +49,8 @@ export interface Job {
   updated_at: string;
   /** Añadido en el freeze: el drawer de detalle (doc 09 P6) lo muestra y GET /jobs/{id} lo incluye (doc 05 §5). */
   id_solicitud: string | null;
+  /** False cuando el SAT rechazaría idéntica una solicitud nueva (5002/5003): reintentar no sirve. */
+  reintentable?: boolean;
 }
 
 export interface MetadataPreview {

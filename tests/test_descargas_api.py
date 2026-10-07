@@ -131,6 +131,31 @@ async def test_reintentar_job_en_error_202(client: AsyncClient, db: AsyncSession
     assert job.id_solicitud is None
 
 
+async def test_reintentar_un_rechazo_5002_da_409_y_el_job_no_se_toca(client: AsyncClient, db: AsyncSession) -> None:
+    """5002 (solicitudes agotadas de por vida para esos parámetros): el SAT rechazaría idéntica
+    la solicitud nueva — visto en producción el 2026-10-07, reintentado varias veces en vano."""
+    usuario = await crear_usuario(db, uid="uid-op7", correo="op7@demo.test", rol_global=RolGlobal.OPERADOR)
+    empresa = await _empresa_con_efirma(db)
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.OPERADOR)
+    r_crear = await client.post(f"/v1/empresas/{empresa.empresa_id}/descargas", headers={"Authorization": "Bearer uid-op7"}, json=_BODY)
+    job_id = r_crear.json()["job_ids"][0]
+    job = await db.get(Job, job_id)
+    assert job is not None
+    job.estado = EstadoJob.ERROR
+    job.cod_sat = "5002"
+    job.mensaje = "El SAT ya no acepta más solicitudes con este mismo rango…"
+    await db.commit()
+
+    r_job = await client.get(f"/v1/empresas/{empresa.empresa_id}/jobs/{job_id}", headers={"Authorization": "Bearer uid-op7"})
+    assert r_job.json()["reintentable"] is False
+
+    r = await client.post(f"/v1/empresas/{empresa.empresa_id}/jobs/{job_id}/reintentar", headers={"Authorization": "Bearer uid-op7"})
+    assert r.status_code == 409
+    assert r.json()["error"]["codigo"] == "REINTENTO_SIN_EFECTO"
+    await db.refresh(job)
+    assert job.estado is EstadoJob.ERROR
+
+
 async def test_job_de_otra_empresa_404(client: AsyncClient, db: AsyncSession) -> None:
     usuario = await crear_usuario(db, uid="uid-op6", correo="op6@demo.test", rol_global=RolGlobal.OPERADOR)
     empresa_a = await _empresa_con_efirma(db, rfc="EKU9003173C9")

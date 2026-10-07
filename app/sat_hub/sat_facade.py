@@ -61,6 +61,36 @@ ESTADOS_RECHAZO = frozenset({ESTADO_ERROR, ESTADO_RECHAZADA, ESTADO_VENCIDA})
 COD_ESTATUS_SIN_RESULTADOS = "5004"
 _COD_EXITO = "5000"
 
+# Qué significa cada código de rechazo, en palabras de quien opera el Hub (catálogo de
+# `satcfdi.pacs.sat.CodigoEstadoSolicitud`). El `Mensaje` que acompaña la respuesta no sirve
+# para esto: en la verificación es el del encabezado ("Solicitud Aceptada") aunque la
+# solicitud haya sido rechazada — visto en producción el 2026-10-07 con un 5002.
+_DESCRIPCION_CODIGO = {
+    "5002": (
+        "El SAT ya no acepta más solicitudes con este mismo rango de fechas y tipo (código 5002: se agotaron "
+        "las solicitudes de por vida). Reintentar no sirve: crea una descarga con un rango distinto, por ejemplo "
+        "dividiéndolo en dos."
+    ),
+    "5003": (
+        "El rango de fechas tiene más comprobantes de los que el SAT entrega en una sola solicitud (código 5003: "
+        "tope máximo). Crea la descarga con un rango más corto."
+    ),
+    "5005": (
+        "Ya hay una solicitud en curso en el SAT con estos mismos parámetros (código 5005: solicitud duplicada). "
+        "Espera a que termine o reintenta más tarde."
+    ),
+    "404": "El SAT respondió un error genérico (código 404: error no controlado). Suele ser temporal; reintenta más tarde.",
+}
+
+# Rechazos que se repiten idénticos con los mismos parámetros: reintentar solo gasta otra
+# solicitud (y en el caso de 5002, ni siquiera la hay).
+CODIGOS_SIN_REINTENTO = frozenset({"5002", "5003"})
+
+
+def describir_codigo(codigo: str | None) -> str | None:
+    """Explicación de un código de rechazo del SAT, o `None` si no está catalogado."""
+    return _DESCRIPCION_CODIGO.get(str(codigo)) if codigo is not None else None
+
 
 def _codigo_de_estatus(st: dict[str, Any]) -> str | None:
     """El código que de verdad describe la solicitud en una respuesta de verificación.
@@ -235,7 +265,7 @@ class SatFacade:
         if not id_solicitud:
             cod = resp.get("CodEstatus", "SIN_CODIGO")
             mensaje = resp.get("Mensaje", "El SAT rechazó la solicitud sin indicar un motivo.")
-            raise SatRechazoError(f"El SAT rechazó la solicitud (CodEstatus={cod}): {mensaje}")
+            raise SatRechazoError(describir_codigo(cod) or f"El SAT rechazó la solicitud (CodEstatus={cod}): {mensaje}", codigo=str(cod))
         return str(id_solicitud)
 
     # ---- Verificación (polling) ----------------------------------------- #
