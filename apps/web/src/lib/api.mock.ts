@@ -1153,6 +1153,7 @@ export const apiMock: ApiClient = {
     if (f?.estatus) rows = rows.filter((c) => c.estatus === f.estatus);
     if (f?.tipo_comprobante) rows = rows.filter((c) => c.tipo_comprobante === f.tipo_comprobante);
     if (f?.desde) rows = rows.filter((c) => c.fecha_emision.slice(0, 10) >= f.desde!);
+    if (f?.hasta) rows = rows.filter((c) => c.fecha_emision.slice(0, 10) <= f.hasta!);
     if (f?.direccion) {
       const rfcEmpresa = db.empresas.find((e) => e.empresa_id === empresaId)?.rfc;
       rows = rows.filter((c) => (f.direccion === 'emitido' ? c.rfc_emisor === rfcEmpresa : c.rfc_receptor === rfcEmpresa));

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +32,9 @@ async def listar(
     if desde is not None:
         filtros.append(Comprobante.fecha_emision >= desde)
     if hasta is not None:
-        filtros.append(Comprobante.fecha_emision <= hasta)
+        # `fecha_emision` lleva hora: `<= hasta` (medianoche) dejaba fuera todo lo emitido ese
+        # último día después de las 00:00:00. El rango es inclusivo del día completo.
+        filtros.append(Comprobante.fecha_emision < datetime.combine(hasta + timedelta(days=1), time.min))
     if tipo_comprobante is not None:
         filtros.append(Comprobante.tipo_comprobante == tipo_comprobante)
     if estatus is not None:

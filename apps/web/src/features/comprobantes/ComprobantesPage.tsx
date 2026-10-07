@@ -25,6 +25,7 @@ export function ComprobantesPage() {
   const [estatus, setEstatus] = useState<EstatusCfdi | ''>('');
   const [tipo, setTipo] = useState('');
   const [desde, setDesde] = useState('');
+  const [hasta, setHasta] = useState('');
   const [direccion, setDireccion] = useState<'emitido' | 'recibido' | ''>('');
   const [pagina, setPagina] = useState(1);
   const [porPagina, setPorPagina] = useState<TamañoPagina>(25);
@@ -36,15 +37,16 @@ export function ComprobantesPage() {
   const [progresoLote, setProgresoLote] = useState<{ hechos: number; total: number } | null>(null);
 
   // Volver a la página 1 cuando cambia cualquier filtro — evita quedar en una página vacía.
-  useEffect(() => setPagina(1), [q, estatus, tipo, desde, direccion]);
+  useEffect(() => setPagina(1), [q, estatus, tipo, desde, hasta, direccion]);
   // La selección es de "lo que se ve" — cambiar de página o de filtros la limpia.
-  useEffect(() => setSeleccionados(new Set()), [q, estatus, tipo, desde, direccion, pagina]);
+  useEffect(() => setSeleccionados(new Set()), [q, estatus, tipo, desde, hasta, direccion, pagina]);
 
   const filtros = {
     q: q || undefined,
     estatus: estatus || undefined,
     tipo_comprobante: tipo || undefined,
     desde: desde || undefined,
+    hasta: hasta || undefined,
     direccion: direccion || undefined,
   };
   const perPageEfectivo = porPagina === 'todos' ? 100_000 : porPagina;
@@ -61,7 +63,7 @@ export function ComprobantesPage() {
   const resumen = `${page?.total ?? 0} de ${totalEmpresa?.total ?? 0} · total de esta página ${money(totalSuma)}`;
 
   function limpiar() {
-    setQ(''); setEstatus(''); setTipo(''); setDesde(''); setDireccion('');
+    setQ(''); setEstatus(''); setTipo(''); setDesde(''); setHasta(''); setDireccion('');
   }
 
   async function esperarTarea(
@@ -178,7 +180,11 @@ export function ComprobantesPage() {
         </div>
         <div className="flex flex-col gap-1.5">
           <label htmlFor="f-desde" className="text-xs font-semibold text-text-muted">Emitido desde</label>
-          <input id="f-desde" type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="h-[34px] border border-border rounded px-2" />
+          <input id="f-desde" type="date" value={desde} max={hasta || undefined} onChange={(e) => setDesde(e.target.value)} className="h-[34px] border border-border rounded px-2" />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="f-hasta" className="text-xs font-semibold text-text-muted">Emitido hasta</label>
+          <input id="f-hasta" type="date" value={hasta} min={desde || undefined} onChange={(e) => setHasta(e.target.value)} className="h-[34px] border border-border rounded px-2" />
         </div>
         <div className="flex flex-col gap-1.5">
           <label htmlFor="f-dir" className="text-xs font-semibold text-text-muted">Dirección</label>

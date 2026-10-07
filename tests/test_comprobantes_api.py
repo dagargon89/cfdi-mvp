@@ -236,3 +236,27 @@ async def test_descargar_zip_lote_202(client: AsyncClient, db: AsyncSession) -> 
     )
     assert r.status_code == 202
     assert r.json()["tarea_id"] == "tarea-falsa-1234"
+
+
+async def test_listar_por_rango_de_fechas_incluye_el_dia_final_completo(client: AsyncClient, db: AsyncSession) -> None:
+    """`hasta` es inclusivo del día entero: `fecha_emision` lleva hora, y comparar contra la
+    medianoche dejaba fuera lo emitido ese último día después de las 00:00."""
+    from datetime import datetime
+
+    usuario = await crear_usuario(db, uid="uid-rango", correo="rango@demo.test", rol_global=RolGlobal.CONSULTA)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.CONSULTA)
+    fechas = {
+        "aaaaaaaa-0000-0000-0000-000000000001": datetime(2026, 8, 31, 23, 59),  # antes del rango
+        "aaaaaaaa-0000-0000-0000-000000000002": datetime(2026, 9, 1, 0, 0),  # inicio exacto
+        "aaaaaaaa-0000-0000-0000-000000000003": datetime(2026, 9, 15, 18, 30),  # último día, por la tarde
+        "aaaaaaaa-0000-0000-0000-000000000004": datetime(2026, 9, 16, 0, 0),  # después del rango
+    }
+    for uuid, fecha in fechas.items():
+        await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid=uuid, fecha_emision=fecha)
+
+    r = await client.get(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes?desde=2026-09-01&hasta=2026-09-15", headers={"Authorization": "Bearer uid-rango"}
+    )
+    assert r.status_code == 200
+    assert sorted(c["uuid"].lower() for c in r.json()["data"]) == ["aaaaaaaa-0000-0000-0000-000000000002", "aaaaaaaa-0000-0000-0000-000000000003"]
