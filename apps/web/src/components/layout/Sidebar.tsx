@@ -1,5 +1,5 @@
 // demo.html:172-260 (aside de navegación, selector de empresa, colapsar, usuario/logout).
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { Building2, ChevronsLeft, LogOut } from 'lucide-react';
@@ -16,6 +16,8 @@ interface NavItem {
   href: string;
   active: boolean;
   badge?: number;
+  /** Encabezado de grupo que se dibuja antes de este elemento (p. ej. "Administración"). */
+  seccion?: string;
 }
 
 function iniciales(nombre: string): string {
@@ -77,7 +79,7 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       // de alertas se queda aquí para que no se pierda de vista. No aplica al rol de consulta.
       {
         key: 'config-empresa',
-        label: 'Configuración',
+        label: 'Configuración de la empresa',
         Icon: NAV_ICON.ajustes,
         href: `${base}/configuracion`,
         active: path.startsWith(`${base}/configuracion`),
@@ -87,8 +89,9 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
   }
   if (usuario?.rol_global === 'admin') {
     items.push(
-      { key: 'usuarios', label: 'Usuarios', Icon: NAV_ICON.usuarios, href: '/admin/usuarios', active: path === '/admin/usuarios' },
-      { key: 'admin', label: 'Config · Bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') || path.startsWith('/admin/correo') || path.startsWith('/admin/fiscal') },
+      // Agrupados aparte: es configuración de toda la instalación, no de la empresa seleccionada.
+      { key: 'usuarios', label: 'Usuarios', Icon: NAV_ICON.usuarios, href: '/admin/usuarios', active: path === '/admin/usuarios', seccion: 'Administración' },
+      { key: 'admin', label: 'Sistema y bitácora', Icon: NAV_ICON.engrane, href: '/admin/config', active: path.startsWith('/admin/config') || path.startsWith('/admin/bitacora') || path.startsWith('/admin/correo') || path.startsWith('/admin/fiscal') },
     );
   }
 
@@ -159,20 +162,27 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
 
       <nav className="flex-1 overflow-y-auto p-2 flex flex-col gap-0.5">
         {items.map((n) => (
-          <Link
-            key={n.key}
-            to={n.href}
-            title={n.label}
-            aria-current={n.active ? 'page' : undefined}
-            className="flex items-center gap-2.5 w-full rounded-md px-2.5 h-9 text-left hover:bg-surface-alt"
-            style={{ background: n.active ? 'var(--primary-soft)' : 'transparent', color: n.active ? 'var(--primary)' : 'var(--text-strong)', fontWeight: n.active ? 600 : 500 }}
-          >
-            <n.Icon className="size-[18px] shrink-0" aria-hidden />
-            {sidebarOpen && <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis text-[13px]">{n.label}</span>}
-            {!!n.badge && (
-              <span className="bg-danger text-white rounded-full min-w-[18px] h-[18px] px-1.5 text-[11px] font-bold grid place-items-center">{n.badge}</span>
-            )}
-          </Link>
+          <Fragment key={n.key}>
+            {n.seccion &&
+              (sidebarOpen ? (
+                <div className="px-2.5 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-text-muted">{n.seccion}</div>
+              ) : (
+                <div role="separator" className="my-2 mx-2 h-px bg-border" />
+              ))}
+            <Link
+              to={n.href}
+              title={n.label}
+              aria-current={n.active ? 'page' : undefined}
+              className="flex items-center gap-2.5 w-full rounded-md px-2.5 h-9 text-left hover:bg-surface-alt"
+              style={{ background: n.active ? 'var(--primary-soft)' : 'transparent', color: n.active ? 'var(--primary)' : 'var(--text-strong)', fontWeight: n.active ? 600 : 500 }}
+            >
+              <n.Icon className="size-[18px] shrink-0" aria-hidden />
+              {sidebarOpen && <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis text-[13px]">{n.label}</span>}
+              {!!n.badge && (
+                <span className="bg-danger text-white rounded-full min-w-[18px] h-[18px] px-1.5 text-[11px] font-bold grid place-items-center">{n.badge}</span>
+              )}
+            </Link>
+          </Fragment>
         ))}
       </nav>
 
