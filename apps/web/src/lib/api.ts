@@ -589,7 +589,12 @@ export interface ApiClient {
      * este contrato). */
     f?: { desde?: string; hasta?: string; estatus?: EstatusCfdi; tipo_comprobante?: string; direccion?: 'emitido' | 'recibido'; q?: string; page?: number; per_page?: number },
   ): Promise<Page<Comprobante>>;
-  validarLote(empresaId: number, alcance: 'no_verificados' | 'todos' | { uuids: string[] }): Promise<{ tarea_id: string }>;
+  /** `filtros` acota "no_verificados"/"todos" a lo que se ve en pantalla (se ignora con `uuids`). */
+  validarLote(
+    empresaId: number,
+    alcance: 'no_verificados' | 'todos' | { uuids: string[] },
+    filtros?: { desde?: string; hasta?: string; tipo_comprobante?: string; direccion?: 'emitido' | 'recibido'; q?: string },
+  ): Promise<{ tarea_id: string }>;
   exportarExcel(empresaId: number, f?: Record<string, string>): Promise<{ tarea_id: string }>;
   estadoTarea(tareaId: string): Promise<{ estado: 'pendiente' | 'completada' | 'fallida'; descarga_url?: string; progreso?: { hechos: number; total: number } | null }>;
   /** Añadidos tras el freeze (2026-07-28) — RF-RES-03/D2: además del XML, el PDF (representación

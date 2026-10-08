@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,8 +14,7 @@ from app.models.comprobante import Comprobante
 from app.models.enums import EstatusCfdi
 
 
-async def listar(
-    db: AsyncSession,
+def _condiciones(
     empresa_id: int,
     *,
     desde: date | None = None,
@@ -25,10 +25,10 @@ async def listar(
     direccion: str | None = None,
     rfc_empresa: str | None = None,
     q: str | None = None,
-    page: int = 1,
-    per_page: int = 50,
-) -> tuple[list[Comprobante], int]:
-    filtros = [Comprobante.empresa_id == empresa_id]
+) -> list[Any]:
+    """Filtros de la pantalla de Comprobantes — compartidos por el listado y por la validación
+    en lote, para que "Validar pendientes" actúe exactamente sobre lo que se está viendo."""
+    filtros: list[Any] = [Comprobante.empresa_id == empresa_id]
     if desde is not None:
         filtros.append(Comprobante.fecha_emision >= desde)
     if hasta is not None:
@@ -57,6 +57,18 @@ async def listar(
                 Comprobante.folio.ilike(patron),
             )
         )
+    return filtros
+
+
+async def listar(
+    db: AsyncSession,
+    empresa_id: int,
+    *,
+    page: int = 1,
+    per_page: int = 50,
+    **filtros_pantalla: Any,
+) -> tuple[list[Comprobante], int]:
+    filtros = _condiciones(empresa_id, **filtros_pantalla)
 
     total = await db.scalar(select(func.count()).select_from(Comprobante).where(*filtros)) or 0
     result = await db.scalars(
@@ -85,10 +97,9 @@ async def por_ids(db: AsyncSession, empresa_id: int, comprobante_ids: Sequence[i
     return list(result.all())
 
 
-async def ids_no_verificados(db: AsyncSession, empresa_id: int) -> list[int]:
-    result = await db.scalars(
-        select(Comprobante.comprobante_id).where(Comprobante.empresa_id == empresa_id, Comprobante.estatus == EstatusCfdi.NO_VERIFICADO)
-    )
+async def ids_filtrados(db: AsyncSession, empresa_id: int, **filtros_pantalla: Any) -> list[int]:
+    """Ids que cumplen los filtros de la pantalla (mismos que `listar`, sin paginar)."""
+    result = await db.scalars(select(Comprobante.comprobante_id).where(*_condiciones(empresa_id, **filtros_pantalla)))
     return list(result.all())
 
 

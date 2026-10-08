@@ -142,8 +142,8 @@ export const apiHttp: ApiClient = {
     return request<Page<Comprobante>>(`/v1/empresas/${empresaId}/comprobantes${qs ? `?${qs}` : ''}`);
   },
 
-  validarLote: (empresaId, alcance) =>
-    request(`/v1/empresas/${empresaId}/comprobantes/validar`, { method: 'POST', body: JSON.stringify({ alcance }) }),
+  validarLote: (empresaId, alcance, filtros) =>
+    request(`/v1/empresas/${empresaId}/comprobantes/validar`, { method: 'POST', body: JSON.stringify({ alcance, filtros }) }),
 
   exportarExcel: (empresaId, f) => {
     const params = new URLSearchParams();

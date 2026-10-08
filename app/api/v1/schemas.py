@@ -222,8 +222,22 @@ class AlcanceUuids(BaseModel):
     uuids: list[str]
 
 
+class FiltrosComprobantesIn(BaseModel):
+    """Filtros de la pantalla de Comprobantes (los mismos del listado, menos `estatus`: el
+    alcance de la validación ya decide el estatus)."""
+
+    desde: date | None = None
+    hasta: date | None = None
+    tipo_comprobante: str | None = None
+    rfc_contraparte: str | None = None
+    direccion: Literal["emitido", "recibido"] | None = None
+    q: str | None = None
+
+
 class ValidarLoteIn(BaseModel):
     alcance: Literal["no_verificados", "todos"] | AlcanceUuids
+    # Opcional: acota "no_verificados"/"todos" a lo que se ve en pantalla. Se ignora con `uuids`.
+    filtros: FiltrosComprobantesIn | None = None
 
 
 class ComprobanteIdsIn(BaseModel):

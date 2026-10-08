@@ -260,3 +260,73 @@ async def test_listar_por_rango_de_fechas_incluye_el_dia_final_completo(client: 
     )
     assert r.status_code == 200
     assert sorted(c["uuid"].lower() for c in r.json()["data"]) == ["aaaaaaaa-0000-0000-0000-000000000002", "aaaaaaaa-0000-0000-0000-000000000003"]
+
+
+class _TareaQueCaptura:
+    id = "tarea-captura"
+
+    def __init__(self) -> None:
+        self.ids: list[int] | None = None
+
+    def delay(self, empresa_id: int, ids: list[int]) -> "_TareaQueCaptura":
+        self.ids = sorted(ids)
+        return self
+
+
+async def test_validar_pendientes_respeta_los_filtros_de_la_pantalla(
+    client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Con filtros, "Validar pendientes" actúa solo sobre los no verificados que se ven; el
+    filtro de `estatus` de la pantalla no aplica (el alcance ya lo decide)."""
+    from datetime import datetime
+
+    tarea = _TareaQueCaptura()
+    monkeypatch.setattr(comprobantes_router, "validar_lote", tarea)
+    usuario = await crear_usuario(db, uid="uid-filtros", correo="filtros@demo.test", rol_global=RolGlobal.OPERADOR)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.OPERADOR)
+    en_rango = await crear_comprobante(
+        db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-0000-0000-0000-000000000001", fecha_emision=datetime(2026, 9, 10, 12), rfc_emisor="XAXX010101000", rfc_receptor="EKU9003173C9"
+    )
+    await crear_comprobante(  # fuera de rango
+        db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-0000-0000-0000-000000000002", fecha_emision=datetime(2026, 8, 10, 12), rfc_emisor="XAXX010101000", rfc_receptor="EKU9003173C9"
+    )
+    await crear_comprobante(  # en rango, pero ya verificado
+        db,
+        empresa_id=empresa.empresa_id,
+        uuid="bbbbbbbb-0000-0000-0000-000000000003",
+        fecha_emision=datetime(2026, 9, 11, 12),
+        rfc_emisor="XAXX010101000", rfc_receptor="EKU9003173C9",
+        estatus=EstatusCfdi.VIGENTE,
+    )
+    await crear_comprobante(  # en rango, pero emitido (no recibido)
+        db, empresa_id=empresa.empresa_id, uuid="bbbbbbbb-0000-0000-0000-000000000004", fecha_emision=datetime(2026, 9, 12, 12), rfc_emisor="EKU9003173C9"
+    )
+
+    r = await client.post(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes/validar",
+        headers={"Authorization": "Bearer uid-filtros"},
+        json={"alcance": "no_verificados", "filtros": {"desde": "2026-09-01", "hasta": "2026-09-30", "direccion": "recibido"}},
+    )
+    assert r.status_code == 202
+    assert tarea.ids == [en_rango.comprobante_id]
+
+
+async def test_revalidar_seleccionados_incluye_los_ya_verificados(
+    client: AsyncClient, db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tarea = _TareaQueCaptura()
+    monkeypatch.setattr(comprobantes_router, "validar_lote", tarea)
+    usuario = await crear_usuario(db, uid="uid-reval", correo="reval@demo.test", rol_global=RolGlobal.OPERADOR)
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await asignar_permiso(db, usuario, empresa, RolEmpresa.OPERADOR)
+    vigente = await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="cccccccc-0000-0000-0000-000000000001", estatus=EstatusCfdi.VIGENTE)
+    await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="cccccccc-0000-0000-0000-000000000002")
+
+    r = await client.post(
+        f"/v1/empresas/{empresa.empresa_id}/comprobantes/validar",
+        headers={"Authorization": "Bearer uid-reval"},
+        json={"alcance": {"uuids": ["cccccccc-0000-0000-0000-000000000001"]}},
+    )
+    assert r.status_code == 202
+    assert tarea.ids == [vigente.comprobante_id]

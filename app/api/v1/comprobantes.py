@@ -86,10 +86,13 @@ async def validar_lote_endpoint(
 ) -> TareaCrearOut:
     if isinstance(body.alcance, AlcanceUuids):
         ids = await comprobantes_repo.ids_por_uuids(db, empresa_id, body.alcance.uuids)
-    elif body.alcance == "todos":
-        ids = await comprobantes_repo.ids_todos(db, empresa_id)
     else:
-        ids = await comprobantes_repo.ids_no_verificados(db, empresa_id)
+        filtros = body.filtros.model_dump(exclude_none=True) if body.filtros else {}
+        if filtros.get("direccion"):
+            empresa = await empresas_repo.por_id(db, empresa_id)
+            filtros["rfc_empresa"] = empresa.rfc if empresa else None
+        estatus = EstatusCfdi.NO_VERIFICADO if body.alcance == "no_verificados" else None
+        ids = await comprobantes_repo.ids_filtrados(db, empresa_id, estatus=estatus, **filtros)
 
     await bitacora_service.registrar(db, actor=ctx.usuario.correo, accion="validar_lote", entidad=f"empresa:{empresa_id}", detalle={"cantidad": len(ids)})
     await db.commit()

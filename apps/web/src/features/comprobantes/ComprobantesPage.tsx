@@ -32,6 +32,7 @@ export function ComprobantesPage() {
   const [abierto, setAbierto] = useState<Comprobante | null>(null);
   const [exportando, setExportando] = useState(false);
   const [validando, setValidando] = useState(false);
+  const [revalidando, setRevalidando] = useState(false);
   const [seleccionados, setSeleccionados] = useState<Set<number>>(new Set());
   const [descargandoLote, setDescargandoLote] = useState(false);
   const [progresoLote, setProgresoLote] = useState<{ hechos: number; total: number } | null>(null);
@@ -103,7 +104,14 @@ export function ComprobantesPage() {
     setValidando(true);
     toast('Validando estatus con el SAT…', 'info');
     try {
-      const { tarea_id } = await api.validarLote(empresa.empresa_id, 'no_verificados');
+      // Solo los no verificados que cumplen los filtros de la pantalla (el de estatus no aplica).
+      const { tarea_id } = await api.validarLote(empresa.empresa_id, 'no_verificados', {
+        desde: desde || undefined,
+        hasta: hasta || undefined,
+        tipo_comprobante: tipo || undefined,
+        direccion: direccion || undefined,
+        q: q || undefined,
+      });
       const { estado } = await esperarTarea(tarea_id);
       if (estado === 'completada') {
         qc.invalidateQueries({ queryKey: ['comprobantes', empresa.empresa_id] });
@@ -113,6 +121,27 @@ export function ComprobantesPage() {
       }
     } finally {
       setValidando(false);
+    }
+  }
+
+  async function revalidarSeleccionados() {
+    // A diferencia de "Validar pendientes", incluye los ya verificados: vuelve a preguntar al SAT.
+    const uuids = comprobantes.filter((c) => seleccionados.has(c.comprobante_id)).map((c) => c.uuid);
+    setRevalidando(true);
+    toast(`Revalidando ${uuids.length} comprobante(s) con el SAT…`, 'info');
+    try {
+      const { tarea_id } = await api.validarLote(empresa.empresa_id, { uuids });
+      const { estado } = await esperarTarea(tarea_id, { intervaloMs: 1000 });
+      if (estado === 'completada') {
+        qc.invalidateQueries({ queryKey: ['comprobantes', empresa.empresa_id] });
+        toast('Revalidación completada', 'ok');
+      } else {
+        toast('No se pudo completar la revalidación', 'error');
+      }
+    } catch {
+      toast('No se pudo completar la revalidación', 'error');
+    } finally {
+      setRevalidando(false);
     }
   }
 
@@ -196,8 +225,13 @@ export function ComprobantesPage() {
         </div>
         <Button variant="secondary" onClick={limpiar}>Limpiar</Button>
         {puedeMutar && (
-          <Button variant="secondary" onClick={validarPendientes} loading={validando} disabled={validando}>
+          <Button variant="secondary" onClick={validarPendientes} loading={validando} disabled={validando} title="Consulta al SAT los comprobantes no verificados que cumplen los filtros actuales">
             <ShieldCheck className="size-[15px]" aria-hidden /> Validar pendientes
+          </Button>
+        )}
+        {puedeMutar && seleccionados.size > 0 && (
+          <Button variant="secondary" onClick={revalidarSeleccionados} loading={revalidando} disabled={revalidando}>
+            <ShieldCheck className="size-[15px]" aria-hidden /> Revalidar seleccionados ({seleccionados.size})
           </Button>
         )}
         {seleccionados.size > 0 && (
