@@ -32,22 +32,25 @@ export function ConfiguracionLayout() {
 
   return (
     <div className="flex flex-col gap-4">
-      <nav aria-label="Apartados de configuración" className="flex gap-1 bg-surface-alt rounded-md p-0.5 w-fit max-w-full overflow-x-auto">
-        {pestañas.map((t) => (
-          <Link
-            key={t.href}
-            to={t.href}
-            aria-current={t.activa ? 'page' : undefined}
-            className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
-            style={{ background: t.activa ? 'var(--surface)' : 'transparent', color: t.activa ? 'var(--primary)' : 'var(--text-muted)' }}
-          >
-            {t.etiqueta}
-            {'badge' in t && !!t.badge && (
-              <span className="bg-danger text-white rounded-full min-w-[18px] h-[18px] px-1.5 text-[11px] font-bold grid place-items-center">{t.badge}</span>
-            )}
-          </Link>
-        ))}
-      </nav>
+      {/* Con una sola pestaña (rol de consulta) la barra no aporta nada. */}
+      {pestañas.length > 1 && (
+        <nav aria-label="Apartados de configuración" className="flex gap-1 bg-surface-alt rounded-md p-0.5 w-fit max-w-full overflow-x-auto">
+          {pestañas.map((t) => (
+            <Link
+              key={t.href}
+              to={t.href}
+              aria-current={t.activa ? 'page' : undefined}
+              className="h-[30px] rounded px-3.5 text-[13px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
+              style={{ background: t.activa ? 'var(--surface)' : 'transparent', color: t.activa ? 'var(--primary)' : 'var(--text-muted)' }}
+            >
+              {t.etiqueta}
+              {'badge' in t && !!t.badge && (
+                <span className="bg-danger text-white rounded-full min-w-[18px] h-[18px] px-1.5 text-[11px] font-bold grid place-items-center">{t.badge}</span>
+              )}
+            </Link>
+          ))}
+        </nav>
+      )}
       <Outlet />
     </div>
   );

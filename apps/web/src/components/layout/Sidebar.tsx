@@ -79,7 +79,7 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       // de alertas se queda aquí para que no se pierda de vista. No aplica al rol de consulta.
       {
         key: 'config-empresa',
-        label: 'Configuración de la empresa',
+        label: 'Configuración',
         Icon: NAV_ICON.ajustes,
         href: `${base}/configuracion`,
         active: path.startsWith(`${base}/configuracion`),
