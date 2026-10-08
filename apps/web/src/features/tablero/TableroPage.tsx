@@ -98,7 +98,7 @@ export function TableroPage() {
         <div className="bg-surface border border-border rounded-lg overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
             <h3 className="m-0 text-[15px] font-semibold flex-1">Alertas activas</h3>
-            <Link to={`/e/${empresa.empresa_id}/alertas`} className="text-primary font-semibold text-[13px]">Ver todas</Link>
+            <Link to={`/e/${empresa.empresa_id}/configuracion/alertas`} className="text-primary font-semibold text-[13px]">Ver todas</Link>
           </div>
           <div className="flex flex-col">
             {alertas.slice(0, 3).map((a, i) => (

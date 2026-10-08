@@ -12,8 +12,8 @@ function tituloDePantalla(pathname: string, empresaNombre: string | undefined): 
   if (pathname.includes('/efirma')) return 'Bóveda de e.firma';
   if (pathname.includes('/descargas')) return 'Descargas';
   if (pathname.includes('/comprobantes')) return 'Comprobantes';
-  if (pathname.includes('/alertas')) return 'Alertas y eventos';
-  if (pathname.includes('/notificaciones')) return 'Notificaciones';
+  if (pathname.includes('/configuracion/alertas')) return 'Configuración · Alertas y eventos';
+  if (pathname.includes('/configuracion/notificaciones')) return 'Configuración · Notificaciones';
   if (pathname.includes('/configuracion')) return 'Configuración de la empresa';
   if (pathname === '/admin/usuarios') return 'Administración · Usuarios';
   if (pathname === '/admin/fiscal') return 'Administración · Configuración fiscal';

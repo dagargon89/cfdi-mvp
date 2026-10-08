@@ -73,15 +73,17 @@ export function Sidebar({ esCompacto }: { esCompacto: boolean }) {
       { key: 'informes', label: 'Informes', Icon: NAV_ICON.informes, href: `${base}/informes`, active: path.startsWith(`${base}/informes`) },
       // Visible también para el rol de consulta: el backend abre el GET a CONSULTA a propósito
       // (un usuario que ya puede generar los informes tiene que poder ver por qué salen degradados).
-      { key: 'config-empresa', label: 'Configuración', Icon: NAV_ICON.ajustes, href: `${base}/configuracion`, active: path.startsWith(`${base}/configuracion`) },
+      // Alertas y Notificaciones son apartados de Configuración (ConfiguracionLayout); el contador
+      // de alertas se queda aquí para que no se pierda de vista. No aplica al rol de consulta.
+      {
+        key: 'config-empresa',
+        label: 'Configuración',
+        Icon: NAV_ICON.ajustes,
+        href: `${base}/configuracion`,
+        active: path.startsWith(`${base}/configuracion`),
+        badge: empresaActiva.rol !== 'consulta' ? eventos?.total : undefined,
+      },
     );
-    // Alertas y Notificaciones no aplican al rol de solo consulta en esa empresa.
-    if (empresaActiva.rol !== 'consulta') {
-      items.push(
-        { key: 'alertas', label: 'Alertas', Icon: NAV_ICON.triangulo, href: `${base}/alertas`, active: path.startsWith(`${base}/alertas`), badge: eventos?.total },
-        { key: 'notificaciones', label: 'Notificaciones', Icon: NAV_ICON.campana, href: `${base}/notificaciones`, active: path.startsWith(`${base}/notificaciones`) },
-      );
-    }
   }
   if (usuario?.rol_global === 'admin') {
     items.push(

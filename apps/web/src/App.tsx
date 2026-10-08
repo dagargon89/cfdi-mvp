@@ -18,6 +18,7 @@ import { ComprobantesPage } from '@/features/comprobantes/ComprobantesPage';
 import { DescargasPage } from '@/features/descargas/DescargasPage';
 import { EfirmaPage } from '@/features/efirma/EfirmaPage';
 import { ConfiguracionEmpresaPage } from '@/features/empresas/ConfiguracionEmpresaPage';
+import { ConfiguracionLayout } from '@/features/empresas/ConfiguracionLayout';
 import { EmpresasPage } from '@/features/empresas/EmpresasPage';
 import { InformesPage } from '@/features/informes/InformesPage';
 import { NotificacionesPage } from '@/features/notificaciones/NotificacionesPage';
@@ -75,9 +76,14 @@ export function App() {
                         <Route path="descargas/:job" element={<DescargasPage />} />
                         <Route path="comprobantes" element={<ComprobantesPage />} />
                         <Route path="informes" element={<InformesPage />} />
-                        <Route path="configuracion" element={<ConfiguracionEmpresaPage />} />
-                        <Route path="alertas" element={<AlertasPage />} />
-                        <Route path="notificaciones" element={<NotificacionesPage />} />
+                        <Route path="configuracion" element={<ConfiguracionLayout />}>
+                          <Route index element={<ConfiguracionEmpresaPage />} />
+                          <Route path="alertas" element={<AlertasPage />} />
+                          <Route path="notificaciones" element={<NotificacionesPage />} />
+                        </Route>
+                        {/* Rutas anteriores (marcadores, enlaces guardados) → su apartado nuevo. */}
+                        <Route path="alertas" element={<Navigate to="../configuracion/alertas" replace />} />
+                        <Route path="notificaciones" element={<Navigate to="../configuracion/notificaciones" replace />} />
                       </Route>
                     </Route>
                   </Route>
