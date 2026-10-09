@@ -28,7 +28,8 @@ import { api } from '@/lib/client';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
 import { MarcasPercepcionSection } from './MarcasPercepcionSection';
 import { TarifaIsrPanel } from './TarifaIsrPanel';
-import { fechaHoraLegible, fechaLegible, importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
+import { importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
+import * as fmt from '@/lib/fechas';
 
 // --- catálogo de presentación ---------------------------------------------------------------
 // El backend manda la clave; el significado en español llano vive aquí. `siFalta` es lo que se
@@ -150,7 +151,7 @@ const ORIGEN_TEXTO: Record<string, string> = {
 };
 
 // --- formato ---------------------------------------------------------------------------------
-// `fechaLegible` y `fechaHoraLegible` viven en `fiscalComun.ts`: las usan las dos secciones.
+// Las fechas se muestran con `@/lib/fechas` (dd/mm/aaaa, y HH:mm si traen hora).
 
 function hoyISO(): string {
   const d = new Date();
@@ -504,8 +505,8 @@ function TarjetaClave({
           <div className="flex items-baseline gap-3 flex-wrap">
             <span className="font-mono text-[22px] font-semibold leading-none">{importeLegible(actual.valor)}</span>
             <span className="text-[13px] text-text-muted">
-              {actual.vigencia_desde > hoy ? 'Entra en vigor el' : 'En vigor desde el'} {fechaLegible(actual.vigencia_desde)}
-              {actual.vigencia_hasta ? ` y hasta el ${fechaLegible(actual.vigencia_hasta)}` : ''} · ejercicio {actual.ejercicio}
+              {actual.vigencia_desde > hoy ? 'Entra en vigor el' : 'En vigor desde el'} {fmt.fecha(actual.vigencia_desde)}
+              {actual.vigencia_hasta ? ` y hasta el ${fmt.fecha(actual.vigencia_hasta)}` : ''} · ejercicio {actual.ejercicio}
             </span>
           </div>
 
@@ -514,7 +515,7 @@ function TarjetaClave({
           {actual.confirmado ? (
             <p className="m-0 text-[13px] text-success">
               Confirmado por <strong>{actual.confirmado_por}</strong>
-              {actual.confirmado_en ? ` el ${fechaHoraLegible(actual.confirmado_en)}` : ''}. Los informes calculan con este valor.
+              {actual.confirmado_en ? ` el ${fmt.fechaHora(actual.confirmado_en)}` : ''}. Los informes calculan con este valor.
             </p>
           ) : (
             <p className="m-0 text-[13px] text-warning text-pretty">
@@ -553,8 +554,8 @@ function TarjetaClave({
                     <li key={p.vigencia_desde} className="text-[12px] text-text-muted flex items-center gap-2 flex-wrap">
                       <span className="font-mono">{importeLegible(p.valor)}</span>
                       <span>
-                        del {fechaLegible(p.vigencia_desde)}
-                        {p.vigencia_hasta ? ` al ${fechaLegible(p.vigencia_hasta)}` : ' en adelante'}
+                        del {fmt.fecha(p.vigencia_desde)}
+                        {p.vigencia_hasta ? ` al ${fmt.fecha(p.vigencia_hasta)}` : ' en adelante'}
                       </span>
                       <ChipEstado estado={p.confirmado ? 'confirmado' : 'propuesto'} />
                     </li>
@@ -579,7 +580,7 @@ function Procedencia({ parametro }: { parametro: ParametroFiscal }) {
           Ver la fuente <ExternalLink className="size-3" aria-hidden />
         </a>
       )}
-      {parametro.sincronizado_en && <> · Sincronizado el {fechaHoraLegible(parametro.sincronizado_en)}</>}
+      {parametro.sincronizado_en && <> · Sincronizado el {fmt.fechaHora(parametro.sincronizado_en)}</>}
     </p>
   );
 }

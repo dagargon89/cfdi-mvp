@@ -464,12 +464,18 @@ def validar_lote(empresa_id: int, comprobante_ids: list[int]) -> dict[str, int]:
 # paginado por lotes, para no cargar 100k filas en memoria de una vez (doc 06 §3).
 # --------------------------------------------------------------------------- #
 
-_COLUMNAS_EXPORT = ("UUID", "Folio", "RFC emisor", "RFC receptor", "Razón social emisor", "Total", "Fecha emisión", "Tipo", "Estatus", "Verificado")
+# "Verificado (UTC)": la marca de tiempo del servidor se guarda en UTC y el Excel no sabe en qué
+# huso se abrirá; "Fecha emisión" es la hora del emisor tal como viene en el CFDI.
+_COLUMNAS_EXPORT = ("UUID", "Folio", "RFC emisor", "RFC receptor", "Razón social emisor", "Total", "Fecha emisión", "Tipo", "Estatus", "Verificado (UTC)")
+# Mismo estándar que la interfaz: dd/mm/aaaa HH:mm (24 h). Las celdas son fechas reales de Excel
+# (se pueden ordenar y filtrar), no texto.
+_FORMATO_FECHA_HORA_EXCEL = "dd/mm/yyyy hh:mm"
 _TAMANO_LOTE_EXPORT = 5000
 
 
 async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dict[str, Any]:
     from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
 
     desde = date.fromisoformat(filtros["desde"]) if filtros.get("desde") else None
     hasta = date.fromisoformat(filtros["hasta"]) if filtros.get("hasta") else None
@@ -478,6 +484,13 @@ async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dic
     wb = Workbook(write_only=True)
     ws = wb.create_sheet("Comprobantes")
     ws.append(_COLUMNAS_EXPORT)
+
+    def celda_fecha(valor: datetime | None) -> Any:
+        if valor is None:
+            return None
+        celda = WriteOnlyCell(ws, value=valor)
+        celda.number_format = _FORMATO_FECHA_HORA_EXCEL
+        return celda
 
     total_filas = 0
     async with SessionLocal() as db:
@@ -512,10 +525,10 @@ async def _exportar_excel_async(empresa_id: int, filtros: dict[str, Any]) -> dic
                         c.rfc_receptor,
                         c.razon_social_emisor,
                         float(c.total) if c.total is not None else None,
-                        c.fecha_emision.isoformat() if c.fecha_emision else None,
+                        celda_fecha(c.fecha_emision),
                         c.tipo_comprobante,
                         c.estatus.value,
-                        c.estatus_verificado_at.isoformat() if c.estatus_verificado_at else None,
+                        celda_fecha(c.estatus_verificado_at),
                     )
                 )
             total_filas += len(filas)

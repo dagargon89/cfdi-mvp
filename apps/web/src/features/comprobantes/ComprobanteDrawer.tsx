@@ -14,6 +14,7 @@ import type { Comprobante } from '@/lib/api';
 import { api } from '@/lib/client';
 import { descargarBlob } from '@/lib/descargarBlob';
 import { money } from '@/lib/domain';
+import * as fmt from '@/lib/fechas';
 
 type Doc = 'pdf' | 'detalle' | 'zip';
 type Previsualizable = 'pdf' | 'detalle';
@@ -132,7 +133,7 @@ export function ComprobanteDrawer({ comprobante, esEfos, onClose }: { comprobant
           <div><dt className="text-xs text-text-muted font-semibold">Receptor</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{comprobante.rfc_receptor}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Total</dt><dd className="mt-0.5 mb-0 font-mono text-base font-semibold">{money(comprobante.total ?? 0)}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Archivo XML</dt><dd className="mt-0.5 mb-0 text-[13px]">{comprobante.xml_path ? 'Disponible' : 'No disponible'}</dd></div>
-          <div><dt className="text-xs text-text-muted font-semibold">Estatus verificado</dt><dd className="mt-0.5 mb-0 font-mono text-xs">{comprobante.estatus_verificado_at ?? '—'}</dd></div>
+          <div><dt className="text-xs text-text-muted font-semibold">Estatus verificado</dt><dd className="mt-0.5 mb-0 font-mono text-xs">{fmt.fechaHora(comprobante.estatus_verificado_at)}</dd></div>
         </dl>
       </div>
       <div className="border-t border-border p-4 flex flex-col gap-2">

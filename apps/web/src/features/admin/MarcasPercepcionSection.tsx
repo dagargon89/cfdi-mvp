@@ -26,7 +26,8 @@ import { ApiError } from '@/lib/api';
 import type { BaseExencion, MarcaPercepcion, MarcaPercepcionConfirmarIn } from '@/lib/api';
 import { api } from '@/lib/client';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
-import { fechaHoraLegible, type EstadoFiscal } from './fiscalComun';
+import type { EstadoFiscal } from './fiscalComun';
+import * as fmt from '@/lib/fechas';
 
 /** Cómo nombrar un tipo en un mensaje. La descripción la manda el servidor (`descripcion_sat`,
  * del mismo `c_TipoPercepcion` que valida la escritura); un tipo **sin fila** no tiene ninguna,
@@ -589,7 +590,7 @@ function TarjetaMarca({
           {marca.confirmado ? (
             <p className="m-0 text-[13px] text-success">
               Confirmado por <strong>{marca.confirmado_por}</strong>
-              {marca.confirmado_en ? ` el ${fechaHoraLegible(marca.confirmado_en)}` : ''}. B-03 calcula la exención de este
+              {marca.confirmado_en ? ` el ${fmt.fechaHora(marca.confirmado_en)}` : ''}. B-03 calcula la exención de este
               tipo con estas marcas.
             </p>
           ) : (

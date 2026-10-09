@@ -53,6 +53,7 @@ import type {
   ZonaSalarial,
 } from './api';
 import { maxMesesVentana, ventanasDe } from './domain';
+import * as fmt from './fechas';
 
 // --- fixtures (db.json espejo del DDL, doc 03 — mismos datos que demo.html:945-996) -----------------
 
@@ -556,7 +557,7 @@ function alertaDeClave(clave: string, tramos: DbParamFiscal[], hoy: string): Ale
   if (tramos.length === 0) {
     return {
       clave, motivo: 'AUSENTE', vigencia_desde: null, fecha_esperada: esperada,
-      detalle: `No hay ningún valor capturado para \`${clave}\`, y su fecha de actualización (${esperada}) ya pasó. Captúralo desde Configuración → Fiscal con su fuente oficial; mientras tanto los informes que dependen de él salen degradados.`,
+      detalle: `No hay ningún valor capturado para \`${clave}\`, y su fecha de actualización (${fmt.fecha(esperada)}) ya pasó. Captúralo desde Configuración → Fiscal con su fuente oficial; mientras tanto los informes que dependen de él salen degradados.`,
     };
   }
   const masReciente = (lista: DbParamFiscal[]) =>
@@ -571,7 +572,7 @@ function alertaDeClave(clave: string, tramos: DbParamFiscal[], hoy: string): Ale
     if (propuesto !== null && propuesto.vigencia_desde >= esperada) {
       return {
         clave, motivo: 'SIN_CONFIRMAR', vigencia_desde: propuesto.vigencia_desde, fecha_esperada: esperada,
-        detalle: `\`${clave}\` tiene un valor propuesto (${propuesto.valor}, vigente desde ${propuesto.vigencia_desde}, fuente: ${propuesto.fuente}) esperando confirmación. Hasta que alguien lo revise y lo confirme no entra a ningún cálculo.`,
+        detalle: `\`${clave}\` tiene un valor propuesto (${propuesto.valor}, vigente desde ${fmt.fecha(propuesto.vigencia_desde)}, fuente: ${propuesto.fuente}) esperando confirmación. Hasta que alguien lo revise y lo confirme no entra a ningún cálculo.`,
       };
     }
     // Lo único que hay es de antes de la fecha de actualización. Aunque esté sin confirmar, el
@@ -581,7 +582,7 @@ function alertaDeClave(clave: string, tramos: DbParamFiscal[], hoy: string): Ale
     const estado = confirmado !== null ? 'confirmado' : 'propuesto y sin confirmar';
     return {
       clave, motivo: 'CADUCADO', vigencia_desde: actual.vigencia_desde, fecha_esperada: esperada,
-      detalle: `El valor más reciente de \`${clave}\` (${actual.valor}, ${estado}) arranca el ${actual.vigencia_desde}, antes de la fecha de actualización ${esperada}, que ya pasó. Busca el valor del ejercicio en curso en su publicación oficial y captúralo cerrando el tramo anterior.`,
+      detalle: `El valor más reciente de \`${clave}\` (${actual.valor}, ${estado}) arranca el ${fmt.fecha(actual.vigencia_desde)}, antes de la fecha de actualización ${fmt.fecha(esperada)}, que ya pasó. Busca el valor del ejercicio en curso en su publicación oficial y captúralo cerrando el tramo anterior.`,
     };
   }
 
@@ -590,7 +591,7 @@ function alertaDeClave(clave: string, tramos: DbParamFiscal[], hoy: string): Ale
   if (propuesto !== null && confirmado !== null && propuesto.vigencia_desde > confirmado.vigencia_desde) {
     return {
       clave, motivo: 'SIN_CONFIRMAR', vigencia_desde: propuesto.vigencia_desde, fecha_esperada: esperada,
-      detalle: `\`${clave}\` está al día, pero hay un tramo más reciente propuesto (${propuesto.valor}, desde ${propuesto.vigencia_desde}, fuente: ${propuesto.fuente}) esperando confirmación. Mientras no se confirme, los cálculos siguen usando el anterior.`,
+      detalle: `\`${clave}\` está al día, pero hay un tramo más reciente propuesto (${propuesto.valor}, desde ${fmt.fecha(propuesto.vigencia_desde)}, fuente: ${propuesto.fuente}) esperando confirmación. Mientras no se confirme, los cálculos siguen usando el anterior.`,
     };
   }
   return null;

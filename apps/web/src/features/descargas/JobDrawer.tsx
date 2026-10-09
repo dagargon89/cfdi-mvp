@@ -10,6 +10,7 @@ import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import type { Job } from '@/lib/api';
 import { api } from '@/lib/client';
 import { descargarBlob } from '@/lib/descargarBlob';
+import * as fmt from '@/lib/fechas';
 
 const ORDEN: Job['estado'][] = ['SOLICITADO', 'EN_PROCESO', 'TERMINADA', 'DESCARGADO'];
 
@@ -59,7 +60,7 @@ export function JobDrawer({ job, puedeMutar, onClose, onReintentar, reintentando
         <dl className="m-0 grid gap-3" style={{ gridTemplateColumns: '1fr 1fr' }}>
           <div><dt className="text-xs text-text-muted font-semibold">Tipo</dt><dd className="mt-0.5 mb-0 text-[13px]">{job.tipo === 'recibido' ? 'Recibidos' : 'Emitidos'} · {job.solicitud}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Origen</dt><dd className="mt-0.5 mb-0 text-[13px]">{job.origen}</dd></div>
-          <div><dt className="text-xs text-text-muted font-semibold">Periodo</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{job.desde} → {job.hasta}</dd></div>
+          <div><dt className="text-xs text-text-muted font-semibold">Periodo</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{fmt.rango(job.desde, job.hasta)}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Id de solicitud</dt><dd className="mt-0.5 mb-0 font-mono text-xs">{job.id_solicitud ?? '—'}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Intentos</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{job.intentos}</dd></div>
           <div><dt className="text-xs text-text-muted font-semibold">Paquetes</dt><dd className="mt-0.5 mb-0 font-mono text-[13px]">{job.paquetes}</dd></div>
@@ -75,7 +76,7 @@ export function JobDrawer({ job, puedeMutar, onClose, onReintentar, reintentando
                 <span className="size-2.5 rounded-full shrink-0" style={{ background: errorAqui ? 'var(--danger)' : hecho ? 'var(--success)' : 'var(--border)' }} />
                 <span className={`font-mono text-xs ${i === idx ? 'font-semibold' : 'font-normal'} ${hecho || errorAqui ? 'text-text-strong' : 'text-text-muted'}`}>{nombre}</span>
                 <span className="flex-1 h-px bg-surface-alt" />
-                <span className="text-xs text-text-muted">{hecho ? job.updated_at.slice(5, 16) : '—'}</span>
+                <span className="text-xs text-text-muted">{hecho ? fmt.fechaHora(job.updated_at) : '—'}</span>
               </div>
             );
           })}
@@ -87,7 +88,7 @@ export function JobDrawer({ job, puedeMutar, onClose, onReintentar, reintentando
             No se puede reintentar: el SAT rechazaría igual cualquier solicitud nueva con este mismo periodo. Crea una descarga nueva con un periodo distinto.
           </div>
         )}
-        <div className="text-xs text-text-muted">Última verificación: <span className="font-mono">{job.updated_at}</span></div>
+        <div className="text-xs text-text-muted">Última verificación: <span className="font-mono">{fmt.fechaHora(job.updated_at)}</span></div>
 
         {esMetadata && (
           <div className="flex flex-col gap-2">

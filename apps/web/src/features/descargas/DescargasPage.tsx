@@ -14,6 +14,7 @@ import { ApiError } from '@/lib/api';
 import { api } from '@/lib/client';
 import { maxMesesVentana, ventanasDe } from '@/lib/domain';
 import { JobDrawer } from './JobDrawer';
+import * as fmt from '@/lib/fechas';
 
 const DEMO_CONTROLS = import.meta.env.VITE_DEMO_CONTROLS === 'true';
 
@@ -172,11 +173,11 @@ export function DescargasPage() {
                 >
                   <td className="px-3 font-mono text-[13px]">#{j.job_id}</td>
                   <td className="px-3 text-[13px]">{j.tipo === 'recibido' ? 'Recibidos' : 'Emitidos'} · {j.solicitud}</td>
-                  <td className="px-3 text-[13px] text-text-muted whitespace-nowrap">{j.desde} → {j.hasta}</td>
+                  <td className="px-3 text-[13px] text-text-muted whitespace-nowrap">{fmt.rango(j.desde, j.hasta)}</td>
                   <td className="px-3"><EstadoChip estado={j.estado} /></td>
                   <td className="px-3 text-right font-mono text-[13px]">{j.intentos}</td>
                   <td className="px-3 text-right font-mono text-[13px]">{j.paquetes}</td>
-                  <td className="px-3 text-xs text-text-muted whitespace-nowrap">{j.updated_at.slice(5, 16)}</td>
+                  <td className="px-3 text-xs text-text-muted whitespace-nowrap">{fmt.fechaHora(j.updated_at)}</td>
                 </tr>
               ))}
             </tbody>
@@ -199,8 +200,8 @@ export function DescargasPage() {
                   <EstadoChip estado={j.estado} />
                 </span>
                 <span className="text-xs text-text-muted">{j.tipo === 'recibido' ? 'Recibidos' : 'Emitidos'} · {j.solicitud}</span>
-                <span className="font-mono text-xs text-text-muted">{j.desde} → {j.hasta}</span>
-                <span className="text-xs text-text-muted">Intentos {j.intentos} · Paquetes {j.paquetes} · {j.updated_at.slice(5, 16)}</span>
+                <span className="font-mono text-xs text-text-muted">{fmt.rango(j.desde, j.hasta)}</span>
+                <span className="text-xs text-text-muted">Intentos {j.intentos} · Paquetes {j.paquetes} · {fmt.fechaHora(j.updated_at)}</span>
               </button>
             ))}
           </div>

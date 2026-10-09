@@ -13,6 +13,7 @@ import { api } from '@/lib/client';
 import type { Comprobante, EstatusCfdi } from '@/lib/api';
 import { money } from '@/lib/domain';
 import { ComprobanteDrawer } from './ComprobanteDrawer';
+import * as fmt from '@/lib/fechas';
 
 export function ComprobantesPage() {
   const { empresa, puedeMutar } = useEmpresaCtx();
@@ -294,7 +295,7 @@ export function ComprobantesPage() {
                     <td className="px-3 text-[13px] max-w-[220px] overflow-hidden text-ellipsis whitespace-nowrap">{c.razon_social_emisor}</td>
                     <td className="px-3 font-mono text-xs">{c.rfc_emisor}</td>
                     <td className="px-3 font-mono text-xs">{c.folio ?? '—'}</td>
-                    <td className="px-3 text-[13px] text-text-muted whitespace-nowrap">{c.fecha_emision?.slice(0, 10)}</td>
+                    <td className="px-3 text-[13px] text-text-muted whitespace-nowrap">{fmt.fechaHoraSinZona(c.fecha_emision)}</td>
                     <td className="px-3 text-right font-mono text-[13px] font-medium">{money(c.total ?? 0)}</td>
                     <td className="px-3"><EstadoChip estado={c.estatus} /></td>
                   </tr>
@@ -320,7 +321,7 @@ export function ComprobantesPage() {
                 </span>
                 <span className="font-mono text-xs text-text-muted">{c.rfc_emisor} · {c.uuid.slice(0, 13)}…</span>
                 <span className="flex items-baseline gap-2 w-full">
-                  <span className="text-xs text-text-muted">{c.fecha_emision?.slice(0, 10)} · folio {c.folio ?? '—'}</span>
+                  <span className="text-xs text-text-muted">{fmt.fechaHoraSinZona(c.fecha_emision)} · folio {c.folio ?? '—'}</span>
                   <span className="flex-1" />
                   <span className="font-mono text-sm font-semibold">{money(c.total ?? 0)}</span>
                 </span>

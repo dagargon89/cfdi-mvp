@@ -7,8 +7,9 @@ import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { useBreakpoint } from '@/hooks/useBreakpoint';
 import { useJobs } from '@/hooks/useJobs';
 import { api } from '@/lib/client';
-import { diasParaVencer, fechaCorta, umbralVigenciaDias } from '@/lib/domain';
+import { diasParaVencer, umbralVigenciaDias } from '@/lib/domain';
 import { alertaVista } from '@/features/alertas/alertaVista';
+import * as fmt from '@/lib/fechas';
 
 export function TableroPage() {
   const { empresa } = useEmpresaCtx();
@@ -29,7 +30,7 @@ export function TableroPage() {
   const bannerEfirma = !empresa.efirma?.presente
     ? { tono: 'danger', texto: 'Esta empresa no tiene e.firma en la bóveda; las descargas fallarán.' }
     : dias !== null && dias <= umbral
-      ? { tono: 'warning', texto: `La e.firma vence en ${dias} días (${fechaCorta(empresa.efirma.not_after)}). Renuévala para no interrumpir las descargas.` }
+      ? { tono: 'warning', texto: `La e.firma vence en ${dias} días (${fmt.fecha(empresa.efirma.not_after)}). Renuévala para no interrumpir las descargas.` }
       : null;
 
   const kpis = [
@@ -87,7 +88,7 @@ export function TableroPage() {
                   className="border-t border-border cursor-pointer h-10 hover:bg-primary-soft"
                 >
                   <td className="px-3 font-mono text-[13px]">#{j.job_id}</td>
-                  <td className="px-3 text-[13px] text-text-muted">{j.desde} → {j.hasta}</td>
+                  <td className="px-3 text-[13px] text-text-muted">{fmt.rango(j.desde, j.hasta)}</td>
                   <td className="px-3"><EstadoChip estado={j.estado} /></td>
                 </tr>
               ))}

@@ -117,6 +117,20 @@ async def test_exportar_excel_genera_archivo_streaming(db: AsyncSession) -> None
     assert len(filas) == 3  # encabezado + 2 comprobantes
 
 
+async def test_exportar_excel_fechas_como_fecha_real_en_dd_mm_aaaa(db: AsyncSession) -> None:
+    """Estándar de fechas del proyecto: dd/mm/aaaa HH:mm (24 h). En Excel van como fechas reales
+    (ordenables), no como el texto ISO que salía antes ("2026-09-01T16:21:52")."""
+    empresa = await crear_empresa(db, rfc="EKU9003173C9")
+    await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="77777777-7777-7777-7777-777777777777", fecha_emision=datetime(2026, 9, 1, 16, 21, 52))
+
+    resultado = await worker_tasks._exportar_excel_async(empresa.empresa_id, {})
+
+    ws = openpyxl.load_workbook(os.path.join(get_settings().storage_root, resultado["ruta"])).active
+    celda = ws.cell(row=2, column=worker_tasks._COLUMNAS_EXPORT.index("Fecha emisión") + 1)
+    assert celda.value == datetime(2026, 9, 1, 16, 21, 52)
+    assert celda.number_format == "dd/mm/yyyy hh:mm"
+
+
 async def test_exportar_excel_respeta_filtros(db: AsyncSession) -> None:
     empresa = await crear_empresa(db, rfc="EKU9003173C9")
     await crear_comprobante(db, empresa_id=empresa.empresa_id, uuid="77777777-7777-7777-7777-777777777777", estatus=EstatusCfdi.VIGENTE)

@@ -47,7 +47,8 @@ import type { ComprobacionTarifa, PeriodicidadTarifaIsr, TarifaIsr, TarifaIsrRen
 import { api } from '@/lib/client';
 import { descargarBlob } from '@/lib/descargarBlob';
 import { ChipEstadoFiscal } from './ChipEstadoFiscal';
-import { fechaHoraLegible, fechaLegible, importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
+import { importeLegible, partirFuente, type EstadoFiscal } from './fiscalComun';
+import * as fmt from '@/lib/fechas';
 
 const URL_MINISITIO_SAT = 'https://www.sat.gob.mx/consulta/85039/consulta-la-normatividad-vigente-y-sus-anexos';
 
@@ -450,7 +451,7 @@ function TarjetaTarifa({
                 · huella del documento <code className="font-mono text-[11px] break-all">{tarifa.documento_sha256}</code>
               </>
             )}
-            {' '}· importada el {fechaHoraLegible(tarifa.importado_en)}
+            {' '}· importada el {fmt.fechaHora(tarifa.importado_en)}
           </p>
 
           {tarifa.difiere_del_documento && (
@@ -476,7 +477,7 @@ function TarjetaTarifa({
           {tarifa.confirmada ? (
             <p className="m-0 text-[13px] text-success">
               Confirmada por <strong>{tarifa.confirmado_por}</strong>
-              {tarifa.confirmado_en ? ` el ${fechaHoraLegible(tarifa.confirmado_en)}` : ''}. Los informes de nómina ya
+              {tarifa.confirmado_en ? ` el ${fmt.fechaHora(tarifa.confirmado_en)}` : ''}. Los informes de nómina ya
               calculan el ISR con esta tarifa.
             </p>
           ) : (
@@ -572,7 +573,7 @@ function ComprobacionCarga({ comprobacion, renglones }: { comprobacion: Comproba
 
   const periodo =
     comprobacion.fecha_inicial_pago && comprobacion.fecha_final_pago
-      ? `del ${fechaLegible(comprobacion.fecha_inicial_pago)} al ${fechaLegible(comprobacion.fecha_final_pago)}`
+      ? `del ${fmt.fecha(comprobacion.fecha_inicial_pago)} al ${fmt.fecha(comprobacion.fecha_final_pago)}`
       : 'sin fechas de pago en el CFDI';
 
   return (

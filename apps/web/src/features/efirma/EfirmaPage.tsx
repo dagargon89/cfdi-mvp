@@ -8,7 +8,8 @@ import { useToast } from '@/components/ui/ToastProvider';
 import { useEmpresaCtx } from '@/empresa/EmpresaContext';
 import { api } from '@/lib/client';
 import { ApiError } from '@/lib/api';
-import { diasParaVencer, fechaCorta, umbralVigenciaDias } from '@/lib/domain';
+import { diasParaVencer, umbralVigenciaDias } from '@/lib/domain';
+import * as fmt from '@/lib/fechas';
 
 const DEMO_CONTROLS = import.meta.env.VITE_DEMO_CONTROLS === 'true';
 type Escenario = 'exito' | 'EFIRMA_NO_ABRE' | 'RFC_NO_COINCIDE' | 'EFIRMA_VENCIDA';
@@ -43,7 +44,7 @@ export function EfirmaPage() {
     onSuccess: (r) => {
       setPassword('');
       setError(null);
-      setOk(`e.firma registrada. Serie ${r.num_serie}, vigente hasta ${r.not_after.slice(0, 10)}.`);
+      setOk(`e.firma registrada. Serie ${r.num_serie}, vigente hasta ${fmt.fecha(r.not_after)}.`);
       toast('e.firma registrada correctamente', 'ok');
       qc.invalidateQueries({ queryKey: ['efirma', empresa.empresa_id] });
       qc.invalidateQueries({ queryKey: ['empresas'] });
@@ -99,8 +100,8 @@ export function EfirmaPage() {
           </div>
           <dl className="m-0 grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
             <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Número de serie</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{efirma.num_serie}</dd></div>
-            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente desde</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fechaCorta(efirma.not_before)}</dd></div>
-            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente hasta</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fechaCorta(efirma.not_after)}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente desde</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fmt.fecha(efirma.not_before)}</dd></div>
+            <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Vigente hasta</dt><dd className="mt-0.5 mb-0 font-mono text-[13px] break-all">{fmt.fecha(efirma.not_after)}</dd></div>
             <div className="min-w-0"><dt className="text-xs text-text-muted font-semibold">Días restantes</dt><dd className={`mt-0.5 mb-0 font-mono text-[13px] break-all ${estadoInfo.fg}`}>{dias} días</dd></div>
           </dl>
           {puedeMutar && (

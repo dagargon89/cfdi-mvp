@@ -258,6 +258,11 @@ class AlertaVigencia:
     detalle: str = ""
 
 
+def _fecha_legible(valor: date) -> str:
+    """Fechas dentro de mensajes para personas: dd/mm/aaaa, el estándar de toda la interfaz."""
+    return valor.strftime("%d/%m/%Y")
+
+
 def _ahora() -> datetime:
     """`datetime` sin zona, como todas las columnas `DateTime` del proyecto (naive en UTC)."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -320,7 +325,7 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
             fecha_esperada=esperada,
             detalle=(
                 f"No hay ningún valor capturado para `{clave}`, y su fecha de actualización "
-                f"({esperada.isoformat()}) ya pasó. Captúralo desde Configuración → Fiscal con su fuente "
+                f"({_fecha_legible(esperada)}) ya pasó. Captúralo desde Configuración → Fiscal con su fuente "
                 "oficial; mientras tanto los informes que dependen de él salen degradados."
             ),
         )
@@ -356,7 +361,7 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
                 fecha_esperada=esperada,
                 detalle=(
                     f"`{clave}` tiene un valor propuesto ({propuesto.valor}, vigente desde "
-                    f"{propuesto.vigencia_desde.isoformat()}, fuente: {propuesto.fuente}) esperando "
+                    f"{_fecha_legible(propuesto.vigencia_desde)}, fuente: {propuesto.fuente}) esperando "
                     "confirmación. Hasta que alguien lo revise y lo confirme no entra a ningún cálculo."
                 ),
             )
@@ -373,11 +378,11 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
                 fecha_esperada=esperada,
                 detalle=(
                     f"`{clave}` tiene un tramo confirmado ({confirmado.valor}, desde "
-                    f"{confirmado.vigencia_desde.isoformat()}) que "
+                    f"{_fecha_legible(confirmado.vigencia_desde)}) que "
                     + (
-                        f"se cerró el {cerrado.isoformat()}"
+                        f"se cerró el {_fecha_legible(cerrado)}"
                         if cerrado is not None
-                        else f"todavía no arranca (empieza el {confirmado.vigencia_desde.isoformat()})"
+                        else f"todavía no arranca (empieza el {_fecha_legible(confirmado.vigencia_desde)})"
                     )
                     + ", así que hoy no hay ningún valor vigente y los informes lo reportan como "
                     "faltante aunque la tabla parezca completa. Revisa si el `vigencia_hasta` se "
@@ -398,8 +403,8 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
             fecha_esperada=esperada,
             detalle=(
                 f"El valor más reciente de `{clave}` ({actual.valor}, {estado}) arranca el "
-                f"{actual.vigencia_desde.isoformat()}, antes de la fecha de actualización "
-                f"{esperada.isoformat()}, que ya pasó. Busca el valor del ejercicio en curso en su "
+                f"{_fecha_legible(actual.vigencia_desde)}, antes de la fecha de actualización "
+                f"{_fecha_legible(esperada)}, que ya pasó. Busca el valor del ejercicio en curso en su "
                 "publicación oficial y captúralo cerrando el tramo anterior."
             ),
         )
@@ -414,7 +419,7 @@ def _alerta_de_clave(clave: str, tramos: list[ParamFiscal], hoy: date) -> Alerta
             fecha_esperada=esperada,
             detalle=(
                 f"`{clave}` está al día, pero hay un tramo más reciente propuesto ({propuesto.valor}, "
-                f"desde {propuesto.vigencia_desde.isoformat()}, fuente: {propuesto.fuente}) esperando "
+                f"desde {_fecha_legible(propuesto.vigencia_desde)}, fuente: {propuesto.fuente}) esperando "
                 "confirmación. Mientras no se confirme, los cálculos siguen usando el anterior."
             ),
         )
@@ -773,7 +778,7 @@ def _fuente_banxico(fecha: date, anterior: Decimal | None, nuevo: Decimal) -> st
     """
     base = (
         f"Banxico, API SIE serie {SERIE_TIPO_CAMBIO_USD} (tipo de cambio FIX, pesos por dólar), "
-        f"observación del {fecha.isoformat()}"
+        f"observación del {_fecha_legible(fecha)}"
     )
     if anterior is None or not es_implausible(anterior, nuevo):
         return base

@@ -13,6 +13,7 @@ import { useToast } from '@/components/ui/ToastProvider';
 import { ApiError, type Automatizaciones } from '@/lib/api';
 import { api } from '@/lib/client';
 import { ConfiguracionFiscalPage } from './ConfiguracionFiscalPage';
+import * as fmt from '@/lib/fechas';
 
 // Tareas automáticas (beat) que el admin puede apagar/prender, con lo que pasa al desactivarlas.
 const AUTOMATIZACIONES: { key: keyof Automatizaciones; nombre: string; queHace: string; consecuencia: string }[] = [
@@ -150,7 +151,7 @@ export function ConfigBitacoraPage() {
             <tbody>
               {bitacoraPage?.data.map((b) => (
                 <tr key={b.bitacora_id} className="border-t border-border h-10">
-                  <td className="px-3 font-mono text-xs whitespace-nowrap">{b.created_at}</td>
+                  <td className="px-3 font-mono text-xs whitespace-nowrap">{fmt.fechaHora(b.created_at)}</td>
                   <td className="px-3 font-mono text-xs">{b.actor}</td>
                   <td className="px-3 text-[13px] font-medium">{b.accion}</td>
                   <td className="px-3 font-mono text-xs text-text-muted">{b.entidad}</td>

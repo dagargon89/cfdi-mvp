@@ -2,6 +2,7 @@
 // en el .dc.html de Claude Design). Reutilizadas tanto por la UI (preview antes de enviar al backend)
 // como por lib/api.mock.ts (cálculo de resultados simulados).
 import type { ConfiguracionItem } from './api';
+import { rango } from './fechas';
 
 export function diasParaVencer(notAfter: string, hoy: Date = new Date()): number {
   const fin = new Date(notAfter.slice(0, 10));
@@ -18,10 +19,6 @@ export function maxMesesVentana(config: ConfiguracionItem[]): number {
 
 export function money(n: number): string {
   return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n);
-}
-
-export function fechaCorta(s: string | null): string {
-  return s ? s.slice(0, 10) : '—';
 }
 
 export interface Ventana {
@@ -44,7 +41,7 @@ export function ventanasDe(desde: string, hasta: string, maxMeses: number): Vent
     const f = corte > fin ? fin : corte;
     const desdeStr = d.toISOString().slice(0, 10);
     const hastaStr = f.toISOString().slice(0, 10);
-    out.push({ desde: desdeStr, hasta: hastaStr, label: `${desdeStr} → ${hastaStr}` });
+    out.push({ desde: desdeStr, hasta: hastaStr, label: rango(desdeStr, hastaStr) });
     d = new Date(f);
     d.setDate(d.getDate() + 1);
   }

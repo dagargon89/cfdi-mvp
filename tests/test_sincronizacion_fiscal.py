@@ -380,7 +380,7 @@ async def test_un_tramo_confirmado_y_cerrado_sin_sucesor_no_esta_al_dia(db: Asyn
 
     de_uma = next(a for a in alertas if a.clave == "UMA_DIARIA")
     assert de_uma.motivo == "CADUCADO"
-    assert "se cerró el 2026-06-30" in de_uma.detalle
+    assert "se cerró el 30/06/2026" in de_uma.detalle
     assert "vigencia_hasta" in de_uma.detalle, "la acción que toca es revisar el cierre, y hay que decirla"
 
 

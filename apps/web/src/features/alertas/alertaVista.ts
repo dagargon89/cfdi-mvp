@@ -2,6 +2,7 @@
 import { AlertTriangle, Clock, KeyRound, RefreshCw, type LucideIcon } from 'lucide-react';
 import type { Evento } from '@/lib/api';
 import { money } from '@/lib/domain';
+import * as fmt from '@/lib/fechas';
 
 export interface AlertaVista {
   fg: string;
@@ -17,7 +18,7 @@ export interface AlertaVista {
 }
 
 export function alertaVista(ev: Evento, empresaId: number): AlertaVista {
-  const createdAt = ev.created_at.slice(0, 16);
+  const createdAt = fmt.fechaHora(ev.created_at);
   if (ev.tipo === 'efos') {
     const d = ev.detalle as { rfc: string; situacion: string; uuids: string[]; total_afectado: number };
     return {
@@ -34,7 +35,7 @@ export function alertaVista(ev: Evento, empresaId: number): AlertaVista {
     return {
       fg: 'text-warning', bg: 'bg-warning-soft', Icon: Clock, tipo: 'cancelacion_tardia',
       titulo: 'Cancelación tardía detectada',
-      detalle: `Comprobante emitido en ${d.mes_emision} y cancelado en ${d.detectado.slice(0, 7)}. Afecta un ejercicio ya declarado.`,
+      detalle: `Comprobante emitido en ${fmt.mes(d.mes_emision)} y cancelado en ${fmt.mes(d.detectado)}. Afecta un ejercicio ya declarado.`,
       uuids: [d.uuid], createdAt,
       accionTexto: 'Abrir comprobante',
       accionHref: `/e/${empresaId}/comprobantes?q=${encodeURIComponent(d.uuid)}`,
@@ -45,7 +46,7 @@ export function alertaVista(ev: Evento, empresaId: number): AlertaVista {
     return {
       fg: 'text-info', bg: 'bg-info-soft', Icon: RefreshCw, tipo: 'resumen_sync',
       titulo: 'Sincronización diaria',
-      detalle: `Sincronización del ${d.fecha ?? '—'}: ${d.empresas ?? 0} empresa(s) procesada(s).`,
+      detalle: `Sincronización del ${fmt.fecha(d.fecha)}: ${d.empresas ?? 0} empresa(s) procesada(s).`,
       uuids: null, createdAt,
       accionTexto: 'Ver descargas',
       accionHref: `/e/${empresaId}/descargas`,
